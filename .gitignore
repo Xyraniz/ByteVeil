@@ -1,0 +1,9 @@
+/build/
+/.cache/
+*.o
+*.a
+*.so
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+_testing/
