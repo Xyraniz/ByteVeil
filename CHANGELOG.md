@@ -1,218 +1,217 @@
 # Changelog
 
-## 0.4.8 — Endurecimiento del lifter Luau (BlockGen/AstGen) y más cobertura de opcodes
+## 0.4.8 - Hardened Luau lifter and wider opcode coverage
 
-Motivado por pruebas dirigidas contra una muestra real de MoonSec V3
-(`Xyraniz/Obfuscator-Samples`, `Moonsec/v3/323928.lua`) usando `--format lua`,
-que antes de estos cambios crasheaba o colgaba el proceso de forma
-reproducible. El código base de `BlockGen`/`AstGen` es una copia casi
-literal de `xgladius/luauDec`; se comparó línea por línea contra el
-repositorio upstream para confirmar que estos bugs no son introducidos por
-ByteVeil, sino preexistentes en el lifter vendorizado, y se corrigieron
-localmente.
+This release was driven by targeted tests against a real MoonSec V3 sample, `Xyraniz/Obfuscator-Samples` at `Moonsec/v3/323928.lua`, using `--format lua`. Before these changes, the sample could reproducibly crash or hang the process.
 
-### Corregido (crashes/cuelgues confirmados con gdb, no solo teóricos)
+The `BlockGen` and `AstGen` code is almost a direct copy of `xgladius/luauDec`. The implementation was compared line by line with the upstream repository to separate inherited bugs from ByteVeil changes. The issues below were present in the vendored lifter and were fixed locally.
 
-- `functionArgs->at(B)` en `LOP_MOVE` lanzaba `std::out_of_range`: el vector
-  solo tiene tamaño `proto->numparams`, pero `MOVE` puede referenciar
-  cualquier registro local. Ahora tiene bounds-check.
-- `BlockGen<false>` (cualquier función que no es la raíz) nunca generaba su
-  propio `subFuncs`: una closure definida dentro de otra closure (común en
-  VMs de obfuscador) indexaba un vector vacío en `LOP_NEWCLOSURE` →
-  segfault. Ahora cada nivel de anidamiento genera sus propios hijos
-  recursivamente, igual que ya hacía `Decompile.cpp` para el proto raíz.
-- `VirtualAstStack` indexaba su vector interno de 256 registros con
-  `operator[]` crudo, sin bounds-check. Cuando el flujo de bytecode se
-  desincroniza de los límites reales de instrucción, los índices de
-  registro decodificados pueden salirse muchísimo del rango (observado:
-  `idx=7074`) → UB/segfault. Ahora fuera de rango devuelve "sin valor" en
-  vez de crashear.
-- Integer underflow en `getCallAst`/`genTableAst`: `virtualStack.getTop()`
-  puede devolver `-1` legítimamente; al mezclarse con una comparación
-  `unsigned` en el límite del loop, se envolvía a ~4 mil millones,
-  colgando el proceso en un loop casi infinito. Ahora `argCount` se acota
-  a un rango sensato antes de usarse como límite.
-- `AstStatWhileGenerator::condition` no se inicializaba en el constructor
-  y, si `updateCondition()` nunca llegaba a invocarse (control flow que
-  este lifter no modela con precisión), se incrustaba un `AstExpr*` nulo o
-  con memoria sin inicializar en el `AstStatWhile` final, crasheando el
-  *printer* de Luau al imprimirlo. Ahora se inicializa a `nullptr` y
-  `generate()` sustituye un placeholder visible si nunca se actualizó.
-- `handleAllInstructions()` asumía que `bodyHandler.get()->as<AstStatBlock>()`
-  siempre tiene éxito; en control flow que la máquina de estados de
-  `BodyHandler` no modela limpiamente, `as<>()` puede devolver `nullptr`,
-  que se incrustaba como cuerpo de función y crasheaba el *printer*. Ahora
-  hay un fallback a un bloque vacío con un comentario visible.
-- Varios sitios en `Handlers.cpp`/`BlockGen.cpp` (llamadas, operadores
-  aritméticos y unarios, `JUMPIF*`, `FORNPREP`, tablas, `MOVE`) asumían que
-  un registro virtual siempre tiene un valor; un opcode no cubierto podía
-  dejar el registro en `nullptr` y el uso posterior (`->is<>()`, `->as<>()`,
-  o incrustarlo directo en un nodo AST) crasheaba. Nuevo helper
-  `orPlaceholder()` aplicado en todos esos sitios: un registro sin resolver
-  ahora se ve como `'--[[ byteveil: unresolved register ]]'` en el output
-  en vez de crashear el proceso completo.
-- `GETGLOBAL`/`SETGLOBAL`/`GETTABLEKS`/`NAMECALL`/`LOADK` asumían sin
-  comprobar que el índice de constante (`aux` o `D`) siempre cae dentro de
-  `proto->sizek` y siempre es un string. Nuevo helper `getConstantName()`
-  con bounds-check y chequeo de tipo (`tt == LUA_TSTRING`); fuera de rango
-  o de tipo incorrecto ahora produce un placeholder legible
-  (`?byteveil_bad_const_index?` / `?byteveil_non_string_const?`) en vez de
-  leer memoria fuera de límites.
+### Fixed crashes and hangs
 
-### Añadido
+- `functionArgs->at(B)` in `LOP_MOVE` could throw `std::out_of_range`. The vector only had `proto->numparams` entries, while `MOVE` can refer to any local register. The access now checks its bounds.
 
-- Cobertura de opcodes Luau ampliada en el lifter de alto nivel (antes
-  cubría ~35 de ~80 opcodes definidos): `LOADNIL`, `LOADN`, `LOADB` (estaba
-  deshabilitado/comentado en el código heredado), `NOT`, `MINUS`,
-  `LENGTH`, `CONCAT`, `DUPCLOSURE` (closures sin upvalues, resuelto
-  localizando el `Proto*` objetivo dentro de `proto->p`) y `GETIMPORT`
-  (cadenas de acceso a globales tipo `string.byte`, decodificando los
-  hasta 3 índices de constante empaquetados de 10 bits en la palabra
-  `aux`, según `BytecodeBuilder::getImportId`).
-- `--timeout SEGUNDOS` (default 20, `0` = sin límite) en el CLI: abortan
-  limpiamente los decompiles que excedan el límite en vez de colgar el
-  proceso indefinidamente. Es una salvaguarda adicional sobre las
-  correcciones anteriores, no un sustituto: cualquier input adicional
-  igual de patológico que aún no se haya probado queda cubierto igual.
-- Límite de espacio de direcciones (2 GiB) antes de invocar el
-  decompilador Luau: una asignación descontrolada ahora falla de forma
-  predecible como `std::bad_alloc` (ya capturado por el `try/catch`
-  existente) en vez de terminar el proceso con SIGBUS/SIGSEGV por fallo
-  del allocator.
+- `BlockGen<false>` did not generate its own `subFuncs` for non-root functions. A closure defined inside another closure, which is common in obfuscator VMs, could therefore index an empty vector at `LOP_NEWCLOSURE` and segfault. Each nesting level now generates its child functions recursively, as `Decompile.cpp` already did for the root prototype.
 
-### Verificación
+- `VirtualAstStack` indexed its 256-register vector with unchecked `operator[]` access. When bytecode flow became desynchronized from actual instruction boundaries, decoded register indexes could be far outside the vector, including an observed `idx=7074`. Out-of-range access now returns no value instead of invoking undefined behavior or crashing.
 
-- Build CMake Release y Debug: **PASS**.
-- Suite CLI y Lua 5.1 existentes (`tests/test_cli.sh`, `tests/test_lua51.sh`): **PASS**, sin regresiones.
-- Comparación línea por línea contra `xgladius/luauDec` (commit vigente al momento de este cambio) para separar bugs heredados de cambios propios de ByteVeil.
-- Muestra real `Moonsec/v3/323928.lua` (Xyraniz/Obfuscator-Samples) con `--format lua`: antes crasheaba/colgaba de forma reproducible (confirmado con gdb en cada paso); ahora termina limpiamente y produce output parcial honesto, con placeholders explícitos en las partes que el lifter no pudo resolver.
-- Regresión con snippets Lua cotidianos (closures, upvalues, concatenación, tablas, `for` numérico, llamadas a `print`/`ipairs`, POO con `setmetatable`/`:método`, `pairs`, `pcall`): build original (sin parchear) crasheaba con excepción incluso en el snippet más simple con closures; build parcheado ya no crashea en ningún caso probado.
+- `getCallAst` and `genTableAst` could underflow an integer. `virtualStack.getTop()` can legitimately return `-1`; using that value in an unsigned loop bound could wrap to roughly four billion and leave the process in an almost infinite loop. The argument count is now clamped to a sensible range before it becomes a loop bound.
 
-### Límites explícitos
+- `AstStatWhileGenerator::condition` was not initialized in the constructor. If `updateCondition()` was never called because the control flow was outside the lifter's model, the final `AstStatWhile` could contain a null or uninitialized `AstExpr*`, causing Luau's printer to crash. The field now starts as `nullptr`, and `generate()` inserts a visible placeholder when no condition was produced.
 
-- El lifter de alto nivel para Luau sigue siendo **experimental**, como ya
-  advertía el README: sigue sin cubrir el 100% de los opcodes de Luau
-  (`GETTABLE`/`SETTABLE` genérico, `FASTCALL*`, `FORGPREP`/`FORGLOOP`
-  genérico para `pairs`/`ipairs`, `GETUPVAL`/`SETUPVAL` en todos los
-  casos, etc.), y estas correcciones priorizan **nunca crashear ni
-  colgarse** por encima de una reconstrucción 100% fiel del código fuente.
-  Cualquier parte no cubierta se marca explícitamente con un placeholder
-  en vez de fabricarse o inventarse.
-- La muestra de MoonSec V3 sigue sin "desofuscarse" en el sentido de
-  recuperar el código original antes de la protección: el output es una
-  representación parcial y honesta del bytecode compilado del VM
-  interpreter, coherente con el propio alcance del proyecto (detector +
-  lifter estático, nunca un ejecutor).
+- `handleAllInstructions()` assumed that `bodyHandler.get()->as<AstStatBlock>()` would always succeed. For control flow that the `BodyHandler` state machine cannot model cleanly, `as<>()` can return `nullptr`, which was then inserted as a function body and crashed the printer. The code now falls back to an empty block with a visible comment.
 
-## 0.4.7 — Análisis avanzado y metadata de estructura
+- Several paths in `Handlers.cpp` and `BlockGen.cpp`, including calls, arithmetic and unary operators, `JUMPIF*`, `FORNPREP`, table operations, and `MOVE`, assumed that a virtual register always contained a value. An unsupported opcode could leave the register as `nullptr`, and a later `->is<>()`, `->as<>()`, or direct AST insertion could crash. A new `orPlaceholder()` helper is now used at those sites. An unresolved register is rendered as `--[[ byteveil: unresolved register ]]` instead of crashing the process.
 
-### Añadido
+- `GETGLOBAL`, `SETGLOBAL`, `GETTABLEKS`, `NAMECALL`, and `LOADK` assumed that the constant index in `aux` or `D` was within `proto->sizek` and referred to a string. The new `getConstantName()` helper checks both the bounds and the type. Invalid indexes and non-string constants now produce readable placeholders, `?byteveil_bad_const_index?` and `?byteveil_non_string_const?`, instead of reading outside the valid range.
 
-- Diagnóstico de aliasing conservador basado en accesos y asignaciones de tabla.
-- Detección de solapamientos de scopes a partir de intervalos de locals.
-- Conteo de sitios de metamétodos dinámicos mediante opcodes de tabla y constantes `__index`, `__newindex` y `__call`.
-- Análisis SCC de Tarjan para detectar ciclos y loops que no deben estructurarse como `if`/`while` simples.
-- Tres adaptaciones inspiradas en unluac: nombres e intervalos de locals, mapeo de `lineinfo` por PC y normalización de branches para el análisis de ciclos.
-- JSON ampliado con `locals`, `upvalues`, `lines`, línea por instrucción y bloque `analysis`.
+### Added
 
-### Verificación
+- Expanded high-level Luau lifter coverage. The lifter previously handled roughly 35 of the approximately 80 defined opcodes. This release adds `LOADNIL`, `LOADN`, `LOADB`, which was disabled in the inherited code, `NOT`, `MINUS`, `LENGTH`, `CONCAT`, `DUPCLOSURE` for closures without upvalues, and `GETIMPORT`.
 
-- Build CMake Release y smoke de versión: **PASS**.
-- Metadata debug y análisis avanzado en fixture con tabla, closure y loop: **PASS**.
-- Corpus Lua 5.1 existente: **18/18** procesado a JSON.
+- `DUPCLOSURE` locates the target `Proto*` inside `proto->p` when the closure has no upvalues.
 
-### Límites explícitos
+- `GETIMPORT` decodes global access chains such as `string.byte` by reading up to three 10-bit packed constant indexes from the `aux` word, following `BytecodeBuilder::getImportId`.
 
-- Los análisis detectan riesgos y ciclos; no los presentan como equivalencia semántica resuelta.
-- El lifting de metamétodos calculados, aliasing complejo y scopes con escapes sigue requiriendo validación conductual por fixture.
+- `--timeout SECONDS`, with a default of 20 seconds and `0` meaning no limit. Decompilations that exceed the limit now abort cleanly instead of hanging indefinitely. This is an additional safeguard, not a proof that every pathological input is harmless.
 
-## 0.4.6 — Closures, upvalues, retornos múltiples y extracción literal
+- A 2 GiB address-space limit is applied before the Luau decompiler runs. An uncontrolled allocation now fails predictably as `std::bad_alloc`, which is handled by the existing `try`/`catch`, instead of ending the process with an allocator-related `SIGBUS` or `SIGSEGV`.
 
-### Añadido
+### Verification
 
-- El lifter Lua 5.1 representa accesos a upvalues, asignaciones a upvalues, closures anidadas, parámetros vararg, `VARARG`, llamadas con arity abierta y retornos múltiples básicos.
-- Los accesos de tabla y asignaciones conservan la forma indexada para no ocultar metamétodos detrás de una simplificación incorrecta.
-- Nuevo modo `--format unpack`, que identifica la familia visible y extrae solamente payloads literales de `loadstring`, sin ejecutar código.
-- Adaptadores de extracción estática para MoonSec V3, Luraph y cargadores genéricos; los payloads dinámicos quedan identificados de forma explícita.
+- CMake Release and Debug builds: **PASS**.
 
-### Verificación
+- Existing CLI and Lua 5.1 suites, `tests/test_cli.sh` and `tests/test_lua51.sh`: **PASS**, with no regressions at release time.
 
-- Build CMake Release: correcto.
-- Suite CLI y Lua 5.1: **PASS**.
-- Fixture con closure, upvalue y vararg: parseado y levantado correctamente.
-- JSON conserva prototipos anidados y metadata de `SETLIST B=0`.
-- Extracción literal `loadstring`: validada; loaders dinámicos quedan diagnosticados como no extraíbles.
+- Line-by-line comparison with the current `xgladius/luauDec` commit to separate inherited bugs from ByteVeil changes.
 
-### Límites explícitos
+- The real `Moonsec/v3/323928.lua` sample from `Xyraniz/Obfuscator-Samples` previously crashed or hung reproducibly under `--format lua`, as confirmed with `gdb`. It now exits cleanly and produces honest partial output, with explicit placeholders where the lifter cannot resolve a value.
 
-- La equivalencia completa todavía requiere validar cada fixture con el arnés; el lifter no garantiza semántica completa para aliasing complejo, metamétodos, loops irreducibles o scopes difíciles.
-- `unpack` no ejecuta ni resuelve VMs virtualizadas, blobs calculados ni payloads remotos. No se presenta un detector como desempaquetador universal.
+- Regression checks with ordinary Lua snippets covering closures, upvalues, concatenation, tables, numeric `for` loops, calls to `print` and `ipairs`, metatable-based object methods, `pairs`, and `pcall`. The unpatched build crashed with an exception even on a simple closure snippet. The patched build did not crash in the cases tested.
 
-## 0.4.5 — Lifting, CFG estructurado, SETLIST y detectores
+### Explicit limits
 
-### Añadido
+- The high-level Luau lifter remains **experimental**. It still does not cover every Luau opcode, including generic `GETTABLE` and `SETTABLE`, `FASTCALL*`, generic `FORGPREP` and `FORGLOOP` used by `pairs` and `ipairs`, and every `GETUPVAL` or `SETUPVAL` case. These fixes prioritize clean failure over a perfectly faithful reconstruction. Unsupported regions are marked with visible placeholders instead of being fabricated.
 
-- Lifter Lua 5.1 funcional para `MOVE`, `LOADK`, `LOADBOOL`, `LOADNIL`, `GETGLOBAL`, `NEWTABLE`, aritmética, concatenación, negación, longitud, llamadas y retornos. Los opcodes no cubiertos se conservan con PC y operandos en comentarios, sin generar código inventado.
-- Metadata JSON y disassembly para `SETLIST B=0`, incluyendo `open_tail` y el PC del `CALL`, `TAILCALL` o `VARARG` productor más cercano.
-- Modo `--format structured`, que genera una representación Lua estructurada por estados con contador de PC y transiciones explícitas.
-- Detector estático `--format protectors` con JSON de evidencia para MoonSec V3, Luraph, cargadores dinámicos, APIs de executor/Roblox, patrones de dispatcher y blobs codificados.
-- Arnés `tests/equivalence_lua51.sh`, que compara código de salida, stdout y stderr de dos programas bajo Lua 5.1.
+- The MoonSec V3 sample is not "deobfuscated" in the sense of recovering the original source before protection. The output is a partial representation of the compiled VM interpreter bytecode. That matches the project's scope: static detection and lifting, never execution.
 
-### Verificación
+## 0.4.7 - Advanced analysis and structural metadata
 
-- Build CMake Release: correcto.
+### Added
+
+- Conservative alias analysis based on table reads and writes.
+
+- Scope-overlap detection from local-variable intervals.
+
+- Counting of dynamic metamethod sites using table opcodes and the `__index`, `__newindex`, and `__call` constants.
+
+- Tarjan SCC analysis to find cycles and loops that should not be forced into a simple `if` or `while` structure.
+
+- Three adaptations inspired by unluac: local names and intervals, PC-to-`lineinfo` mapping, and branch normalization for cycle analysis.
+
+- Expanded JSON with `locals`, `upvalues`, `lines`, per-instruction line information, and an `analysis` block.
+
+### Verification
+
+- CMake Release build and version smoke test: **PASS**.
+
+- Debug metadata and advanced analysis on a fixture containing a table, closure, and loop: **PASS**.
+
+- Existing Lua 5.1 corpus: **18/18** chunks processed to JSON.
+
+### Explicit limits
+
+- These analyses report risks and cycles. They do not claim that semantic equivalence has been resolved.
+
+- Calculated metamethods, complex aliasing, and scopes that escape their original region still require behavioral validation with a fixture.
+
+## 0.4.6 - Closures, upvalues, multiple returns, and literal extraction
+
+### Added
+
+- The Lua 5.1 lifter represents upvalue reads, upvalue writes, nested closures, vararg parameters, `VARARG`, open-arity calls, and basic multiple returns.
+
+- Table reads and writes retain their indexed form so that metamethod behavior is not hidden behind an unsafe simplification.
+
+- New `--format unpack` mode, which identifies the visible family and extracts only literal `loadstring` payloads without executing code.
+
+- Static extraction adapters for MoonSec V3, Luraph, and generic loaders. Dynamically computed payloads are reported explicitly as unavailable.
+
+### Verification
+
+- CMake Release build: **PASS**.
+
+- CLI and Lua 5.1 suites: **PASS**.
+
+- Fixture with a closure, upvalue, and vararg: parsed and lifted successfully.
+
+- JSON preserves nested prototypes and `SETLIST B=0` metadata.
+
+- Literal `loadstring` extraction: validated. Dynamic loaders remain diagnostic-only when their payload cannot be extracted.
+
+### Explicit limits
+
+- Full equivalence still requires validating each fixture with the harness. The lifter does not guarantee complete semantics for complex aliasing, metamethods, irreducible loops, or difficult scope shapes.
+
+- `unpack` does not execute or resolve virtualized VMs, calculated blobs, or remote payloads. A detector is not presented as a universal unpacker.
+
+## 0.4.5 - Lifting, structured CFGs, SETLIST, and detectors
+
+### Added
+
+- Functional Lua 5.1 lifting for `MOVE`, `LOADK`, `LOADBOOL`, `LOADNIL`, `GETGLOBAL`, `NEWTABLE`, arithmetic, concatenation, negation, length, calls, and returns. Unsupported opcodes remain as comments with their PC and operands; the tool does not invent code for them.
+
+- JSON metadata and disassembly for `SETLIST B=0`, including `open_tail` and the PC of the nearest producer, whether `CALL`, `TAILCALL`, or `VARARG`.
+
+- `--format structured`, which produces a state-based Lua representation with a PC counter and explicit transitions.
+
+- Static `--format protectors` detector with JSON evidence for MoonSec V3, Luraph, dynamic loaders, executor or Roblox APIs, dispatcher patterns, and encoded blobs.
+
+- `tests/equivalence_lua51.sh`, which compares exit code, standard output, and standard error for two programs under Lua 5.1.
+
+### Verification
+
+- CMake Release build: **PASS**.
+
 - `tests/test_cli.sh`: **PASS**.
+
 - `tests/test_lua51.sh`: **PASS**.
-- Arnés de equivalencia con fixture idéntico: **PASS**.
-- 18/18 chunks Lua 5.1 derivados del corpus MoonSec procesados a JSON sin abortos.
-- Smoke de `--format structured` y `--format protectors`: **PASS**.
 
-### Límites explícitos
+- Equivalence harness with an identical fixture: **PASS**.
 
-- El lifter todavía es parcial para closures, upvalues, varargs abiertos, metamétodos, loops complejos y múltiples retornos.
-- `SETLIST B=0` ya se detecta y conserva su productor; la expansión completa de arity dinámica aún requiere un paso posterior.
-- La salida estructurada conserva el CFG y transiciones, pero no siempre produce Lua idiomático.
-- Los detectores de protectores son análisis estático, no desempaquetadores; cada familia necesita un desvirtualizador validado con muestras propias.
+- 18/18 Lua 5.1 chunks derived from the MoonSec corpus processed to JSON without aborting.
 
-## 0.4.0 — Lector Lua 5.1 y detección automática
+- Smoke tests for `--format structured` and `--format protectors`: **PASS**.
 
-### Añadido
+### Explicit limits
 
-- Lector binario Lua 5.1 autocontenido en `byteveil_decompiler/Lua51.cpp` y `Lua51.h`.
-- Validación de firma, versión, formato, endianess, tamaños de tipos, límites de prototipos, registros, constantes, instrucciones, strings, lineinfo, locals y upvalues.
-- Soporte de constantes Lua 5.1 `nil`, booleanas, números y strings.
-- Recorrido de prototipos hijos con IDs deterministas y relaciones padre/hija.
-- Decodificación de instrucciones Lua 5.1 con operandos ABC, Bx y sBx.
-- Detección de destinos de salto y generación de CFG DOT para Lua 5.1.
-- JSON/IR determinista para chunks Lua 5.1.
-- Disassembly Lua 5.1 con nombres de opcode y operandos.
-- Salida Lua diagnóstica sintácticamente válida que conserva el listing cuando todavía no es posible hacer lifting semántico.
-- Detección automática de `\x1bLua` frente a `\x1bLuau` en el CLI.
-- Captura de excepciones del decompiler Luau para convertir fallos en errores controlados.
-- Fixture binario real `tests/fixtures/lua51-sample.luac` y suite `tests/test_lua51.sh`.
+- The lifter remains partial for closures, upvalues, open varargs, metamethods, complex loops, and multiple returns.
 
-### Verificación
+- `SETLIST B=0` is detected and its producer is preserved. Full dynamic-arity expansion still requires a later step.
 
-- Build CMake Release: correcto.
-- Suite CLI existente: **PASS**.
-- Suite Lua 5.1: **PASS**.
-- Fixture sintético Lua 5.1: JSON, prototipos, disassembly, CFG y salida diagnóstica correctos.
-- Corpus derivado MoonSec V3: **18/18 chunks Lua 5.1** procesados correctamente a JSON.
-- Los chunks Lua 5.1 ya no se envían por error al loader Luau.
-- Entradas truncadas y formatos incompatibles producen errores controlados.
+- Structured output preserves the CFG and transitions but does not always produce idiomatic Lua.
 
-### Limitaciones explícitas
+- Protector detectors perform static analysis, not unpacking. Each family requires a desvirtualizer validated against its own samples.
 
-- La ruta Lua 5.1 todavía es una representación estructural y diagnóstica; `--format lua` no pretende ser un decompiler semántico completo.
-- Faltan lifting de alto nivel Lua 5.1, recuperación de SETLIST abierto, estructuración avanzada de CFG irreducible, equivalencia conductual y desvirtualización específica de protectores.
-- La ruta Luau de alto nivel continúa siendo experimental.
+## 0.4.0 - Lua 5.1 reader and automatic format detection
+
+### Added
+
+- Self-contained Lua 5.1 binary reader in `byteveil_decompiler/Lua51.cpp` and `Lua51.h`.
+
+- Validation of the signature, version, format, endianness, type sizes, prototype limits, registers, constants, instructions, strings, line information, locals, and upvalues.
+
+- Support for Lua 5.1 `nil`, boolean, number, and string constants.
+
+- Child-prototype traversal with deterministic IDs and parent-child relationships.
+
+- Lua 5.1 instruction decoding with ABC, Bx, and sBx operands.
+
+- Jump-target detection and Graphviz DOT CFG generation for Lua 5.1.
+
+- Deterministic JSON and IR for Lua 5.1 chunks.
+
+- Lua 5.1 disassembly with opcode names and operands.
+
+- Syntactically valid diagnostic Lua output that preserves the listing when semantic lifting is not yet possible.
+
+- Automatic detection of `\x1bLua` versus `\x1bLuau` in the CLI.
+
+- Luau decompiler exception handling that turns failures into controlled errors.
+
+- Real binary fixture at `tests/fixtures/lua51-sample.luac` and the `tests/test_lua51.sh` suite.
+
+### Verification
+
+- CMake Release build: **PASS**.
+
+- Existing CLI suite: **PASS**.
+
+- Lua 5.1 suite: **PASS**.
+
+- Synthetic Lua 5.1 fixture: JSON, prototypes, disassembly, CFG, and diagnostic output behaved as expected.
+
+- MoonSec V3-derived corpus: **18/18 Lua 5.1 chunks** processed to JSON.
+
+- Lua 5.1 chunks are no longer sent accidentally to the Luau loader.
+
+- Truncated inputs and incompatible formats produce controlled errors.
+
+### Explicit limits
+
+- The Lua 5.1 path is still structural and diagnostic. `--format lua` is not a complete semantic decompiler.
+
+- High-level Lua 5.1 lifting, open `SETLIST` recovery, advanced irreducible-CFG structuring, behavioral equivalence, and protector-specific devirtualization were not yet implemented.
+
+- The high-level Luau path remains experimental.
 
 ## 0.3.0
 
-- IR inicial determinista para Luau con metadatos de funciones, instrucciones, bloques básicos, sucesores de CFG y validación de invariantes.
-- JSON, disassembly, CFG y análisis estático sin ejecución.
-- Regresiones sintéticas para determinismo, bytecode truncado e indicadores visibles.
+- Initial deterministic Luau IR with function metadata, instructions, basic blocks, CFG successors, and invariant validation.
 
-## Procedencia
+- JSON, disassembly, CFG, and static analysis without execution.
 
-La arquitectura Luau toma inspiración de Oracle Decompiler, `xgladius/luauDec` y `atrexus/unluau`. Son referencias externas; ByteVeil no es un fork oficial ni está afiliado a esos proyectos.
+- Synthetic regressions for determinism, truncated bytecode, and visible indicators.
+
+## Provenance
+
+The Luau architecture draws inspiration from Oracle Decompiler, `xgladius/luauDec`, and `atrexus/unluau`. These are external references. ByteVeil is not an official fork of, and is not affiliated with, those projects.
