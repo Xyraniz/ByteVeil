@@ -1,75 +1,243 @@
-# ByteVeil
+<div align="center">
+<h1>ByteVeil</h1>
+  <p><strong>A static analyzer and partial decompiler for Lua 5.1 and Luau bytecode.</strong></p>
+  <p>
+    <a href="https://github.com/Xyraniz/ByteVeil"><img src="https://img.shields.io/github/languages/top/Xyraniz/ByteVeil?style=flat-square" alt="Top language" /></a>
+    <a href="https://github.com/Xyraniz/ByteVeil/issues"><img src="https://img.shields.io/github/issues/Xyraniz/ByteVeil?style=flat-square" alt="Issues" /></a>
+  </p>
+</div>
 
-**ByteVeil 0.4.8** es un decompilador e inspector estático autónomo para Lua 5.1 y Luau. Mantiene rutas separadas para bytecode Luau y chunks Lua 5.1, con detección automática de formato. Esta versión endurece el lifter Luau de alto nivel (heredado de luauDec) contra crashes y cuelgues encontrados al probarlo contra una muestra real de MoonSec V3, y amplía su cobertura de opcodes. Ver CHANGELOG.md para el detalle completo.
+ByteVeil is a standalone C++ command-line tool for inspecting Lua 5.1 chunks and Luau source or bytecode. It detects the input format, loads bytecode into the vendored Luau libraries when needed, and exposes structured information without executing the analyzed program.
 
-## Construcción
+The project has several separate paths rather than one universal decompiler. Lua 5.1 chunks use a dedicated reader and lifting route. Luau source is compiled to bytecode before inspection by default, while Luau bytecode can be inspected directly or passed through the higher-level lifter. Protector detection and literal payload inspection stay on their own static routes.
+
+## What ByteVeil does
+
+ByteVeil can:
+
+- Identify Lua 5.1 and Luau bytecode by signature.
+
+- Compile Luau source to bytecode for analysis.
+
+- Emit JSON or IR-style descriptions of Luau functions, prototypes, constants, instructions, source lines, jump targets, basic blocks, and nested functions.
+
+- Print deterministic instruction disassembly with opcode operands, block successors, line information, auxiliary-word markers, and jump targets.
+
+- Produce a Graphviz DOT control-flow graph for the root function.
+
+- Print constant-table and prototype summaries.
+
+- Lift supported Lua 5.1 instructions into Lua source, keeping unsupported instructions as comments with program-counter and operand information.
+
+- Lift supported Luau bytecode through a block and AST pipeline based on Luau's internal AST types.
+
+- Preserve structured state transitions for control-flow shapes that are not safely reducible to an ordinary `if` or `while` construct.
+
+- Report static indicators associated with MoonSec V3, Luraph, dynamic loaders, Roblox or executor APIs, dispatcher-like virtual-machine patterns, and large escaped blobs.
+
+- Extract only literal strings passed to `loadstring` through the `unpack` route, returning JSON with `executed: false`.
+
+The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
+
+## Safety model
+
+ByteVeil is designed for static inspection. The normal CLI does not execute the input script, a loader, a virtual machine contained in the input, or network code. The protector route only searches for textual evidence and returns a detector result. The unpack route extracts literal payloads but does not run them.
+
+The repository includes a separate equivalence harness for Lua 5.1 lifting. That harness runs the original and candidate programs with an external Lua 5.1 interpreter and compares exit code, standard output, and standard error. This is a validation tool for a candidate lifting result, not part of the normal analysis path.
+
+Static indicators are heuristic evidence. A marker can be absent, misleading, or embedded in an unrelated string. The tool should not be described as a protector identifier with proof of family membership, and it does not automatically defeat a virtualized or dynamically generated loader.
+
+## Build requirements
+
+ByteVeil uses CMake, Ninja, and C++17. The repository vendors the Luau source tree needed for the compiler, VM, AST, and analysis libraries, so the main build does not require downloading Luau at build time.
+
+On Ubuntu, install the basic toolchain with:
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j2
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build
 ```
 
-Requiere CMake 3.20 o posterior y un compilador C++17. El árbol Luau necesario está incluido bajo `luau/`.
+Configure and build:
 
-## Uso
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+The resulting executable is:
+
+```
+build/byteveil
+```
+
+The CMake project uses the vendored Luau components `Luau.Compiler`, `Luau.Analysis`, `Luau.VM`, and `Luau.Ast`.
+
+## Command-line usage
+
+The executable reports its own version and help text:
 
 ```bash
 ./build/byteveil --version
+./build/byteveil --help
+```
+
+The general form is:
+
+```
+ByteVeil <input> [options]
+```
+
+Important options are:
+
+```
+-o, --output FILE       Write output to FILE
+--format lua|luau|json|ir|structured|protectors|unpack
+--disassemble           Print deterministic low-level disassembly
+--dump-constants        Print constant table summary
+--dump-prototypes       Print prototype summary
+--cfg FILE              Write the root CFG as Graphviz DOT
+--analyze               Print static indicators; never executes input
+--bytecode              Treat input as precompiled bytecode
+--source                Treat input as Luau source
+--no-color              Disable colored diagnostics
+--timeout SECONDS       Abort decompilation after a wall-clock limit
+-q, --quiet             Suppress informational messages
+```
+
+The default input mode is source-oriented. Bytecode can be forced with `--bytecode`, and source compilation can be selected explicitly with `--source`. Inputs with Lua 5.1 or Luau bytecode signatures are recognized automatically.
+
+## Inspect Luau source or bytecode
+
+Compile and inspect a Luau source file as JSON:
+
+```bash
+./build/byteveil script.luau --format json
+```
+
+Inspect an existing Luau bytecode file:
+
+```bash
 ./build/byteveil --bytecode sample.luac --format json
+```
+
+Print a deterministic disassembly:
+
+```bash
 ./build/byteveil --bytecode sample.luac --disassemble
+```
+
+Write the root control-flow graph as Graphviz DOT:
+
+```bash
 ./build/byteveil --bytecode sample.luac --cfg graph.dot
-./build/byteveil --bytecode sample.luac --format structured
+```
+
+The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors, line information, jump targets, and auxiliary-word metadata. The internal IR validates prototype depth and total instruction count before building the representation.
+
+## Lift to source-like output
+
+Request the Luau lifter explicitly:
+
+```bash
 ./build/byteveil --bytecode sample.luac --format lua -o lifted.lua
+```
+
+The Lua 5.1 path uses the same output format for supported instructions:
+
+```bash
+./build/byteveil --bytecode tests/fixtures/lua51-sample.luac --format lua -o lifted.lua
+```
+
+The Lua 5.1 route covers common register, constant, global, upvalue, table, arithmetic, concatenation, unary, closure, call, vararg, and return instructions. Unsupported instructions remain visible in the output as comments instead of silently disappearing.
+
+The Luau lifter builds blocks from bytecode and feeds them into an AST-generation and transpilation pipeline. It includes guards for malformed or unusual register accesses and a wall-clock timeout for decompilation. A timeout or unsupported bytecode shape should be treated as an analysis boundary, not as evidence that the original program is invalid.
+
+## Static protector indicators
+
+Run the detector without executing the input:
+
+```bash
 ./build/byteveil --format protectors script.lua
+```
+
+The detector currently checks for visible markers and patterns associated with:
+
+- MoonSec V3.
+
+- Luraph.
+
+- Dynamic-loader primitives such as `loadstring`, `string.dump`, `getfenv`, `setfenv`, and `load`.
+
+- Roblox or executor API names such as `HttpGet`, `request`, `writefile`, and `getgenv`.
+
+- Dispatcher-like loops and opcode-oriented virtual-machine patterns.
+
+- Large escaped, binary-looking strings.
+
+The result is JSON with a family, confidence, and evidence for each detected indicator. Confidence is heuristic and based on visible evidence in the input.
+
+## Literal payload inspection
+
+The `unpack` route searches for literal strings passed to `loadstring`:
+
+```bash
 ./build/byteveil --format unpack script.lua
-./build/byteveil --format json script.luau
+```
+
+The result identifies the visible family, lists extracted literal payloads, sets `executed` to `false`, and reports `no-literal-payload` when there is no literal payload to extract. Dynamically computed payloads are not reconstructed by this route.
+
+## Analysis mode
+
+The `--analyze` option prints a compact static summary:
+
+```bash
 ./build/byteveil --analyze script.lua
 ```
 
-El formato se detecta por firma: `\x1bLua` activa Lua 5.1 y `\x1bLuau` activa Luau. La entrada fuente no binaria se compila como Luau en la ruta Luau. `--format protectors` devuelve JSON de indicadores estáticos; nunca ejecuta ni desempaqueta la entrada.
+The summary reports the detected format, byte count, quoted-string count, visible MoonSec markers, dynamic-loader markers, network or executor names, long encoded-string indicators, and a low or medium heuristic confidence.
 
-## Lifting Lua 5.1
+## Validation
 
-La ruta `--format lua` emite código Lua 5.1 para instrucciones comunes como `MOVE`, `LOADK`, `LOADBOOL`, `LOADNIL`, accesos a upvalues y globals, tablas, operaciones aritméticas, concatenación, negación, longitud, closures, llamadas, `VARARG` y retornos múltiples. Las instrucciones no cubiertas se conservan como comentarios con PC y operandos, y la salida termina de forma sintácticamente válida. Esto es un lifter ampliado verificable, no una promesa de equivalencia para cualquier chunk.
-
-Los modos `json` e `ir` exponen prototipos anidados, parámetros, registros, constantes, instrucciones, saltos y la metadata `open_tail`/`open_producer_pc` de `SETLIST B=0`. `--disassemble` muestra operandos ABC, Bx y sBx y marca el productor de un tail abierto.
-
-## CFG irreducible y SETLIST abierto
-
-`--format structured` genera una representación Lua estructurada por estados, con un contador de PC y transiciones explícitas para cada bloque e instrucción. Esta ruta evita inventar un `if` o `while` cuando el CFG no tiene una forma reducible segura. `SETLIST B=0` se identifica en el lector y se relaciona con el `CALL`, `TAILCALL` o `VARARG` abierto anterior; esa metadata constituye la base para una recuperación semántica posterior y evita perder el tail durante el análisis.
-
-## Protectores
-
-El detector `--format protectors` busca evidencia estática de MoonSec V3, Luraph, cargadores dinámicos, APIs de executor/Roblox, patrones de dispatcher y blobs codificados. Devuelve familia, confianza y evidencia. Es deliberadamente un detector, no un desempaquetador: cada protector necesita un desvirtualizador independiente validado con fixtures propios.
-
-## Equivalencia conductual
-
-`tests/equivalence_lua51.sh ORIGINAL.lua CANDIDATE.lua` ejecuta ambos programas con Lua 5.1 y compara código de salida, stdout y stderr. El arnés es funcional y sirve para validar cada lifting; no ejecuta chunks automáticamente durante el análisis normal de ByteVeil.
-
-## Extracción por familia
-
-`--format unpack` identifica la familia visible y extrae únicamente payloads que sean literales de `loadstring`. El resultado es JSON, marca `executed: false` y conserva el payload para que pueda validarse con el lifter y el arnés de equivalencia. No ejecuta loaders, VMs ni código de red; cuando el payload está calculado dinámicamente devuelve `no-literal-payload` en lugar de inventar una extracción.
-
-## Análisis avanzado y adaptaciones de unluac
-
-El JSON Lua 5.1 incluye `analysis.alias_hazards`, `scope_overlaps`, `dynamic_metamethod_sites` e `irreducible_or_loop_sccs`. Estos valores proceden de instrucciones, constantes, intervalos de debug y un recorrido Tarjan de la gráfica de branches; son diagnósticos conservadores, no afirmaciones de equivalencia.
-
-La metadata `locals` conserva nombre, `start_pc` y `end_pc`; `lines` conserva el mapeo PC-línea; y cada instrucción incluye `line`. Estas tres capacidades se adaptan de la información que unluac utiliza en sus fases de naming y structure, pero se mantienen dentro de la IR C++ de ByteVeil sin copiar su pipeline Rust.
-
-## Validación
+The repository includes shell-based checks for the CLI and Lua 5.1 inspection path:
 
 ```bash
 ./tests/test_cli.sh ./build/byteveil
 ./tests/test_lua51.sh ./build/byteveil
+```
+
+The equivalence harness compares an original Lua 5.1 program with a candidate lifted program:
+
+```bash
 ./tests/equivalence_lua51.sh original.lua candidate.lua
 ```
 
-La validación local incluye las suites CLI y Lua 5.1, el arnés de equivalencia y **18/18** chunks Lua 5.1 derivados del corpus MoonSec V3 procesados a JSON sin abortos.
+In the analyzed checkout, the project builds successfully as `ByteVeil 0.4.8` and `tests/test_cli.sh` passes. `tests/test_lua51.sh` currently contains an older assertion for `ByteVeil 0.4.7`, so it exits before completing against the current binary; this is a test-version mismatch, not a bytecode reader failure. The equivalence harness also requires an external `lua5.1` executable, which is not bundled with the repository.
 
-## Limitaciones conocidas
+The checked fixture covers JSON output, disassembly, CFG generation, and Lua 5.1 lifting. The project's existing documentation also records validation against 18 Lua 5.1 chunks derived from a MoonSec V3 corpus. That result describes the recorded test run; it is not a guarantee that every protector sample can be analyzed or lifted.
 
-El lifter representa closures, upvalues, varargs y retornos múltiples básicos, pero todavía no cubre toda su semántica en presencia de aliasing complejo, `SETLIST` con arity dinámica completa, metamétodos calculados, loops irreducibles y scopes difíciles. El análisis SCC detecta y cuenta ciclos; no los convierte automáticamente en Lua idiomático. El desempaquetado automático sigue limitado a payloads literales: los protectores que calculan o virtualizan el payload requieren adaptadores específicos adicionales. La ruta Luau de alto nivel continúa siendo experimental.
+## Project layout
 
-## Licencias
+| Path | Purpose |
+| --- | --- |
+| `byteveil_cli.cpp` | CLI parsing, input detection, source compilation, static analysis, and output routing. |
+| `byteveil_decompiler/Lua51.*` | Lua 5.1 chunk detection and inspection. |
+| `byteveil_decompiler/IR.*` | Luau function, instruction, basic-block, JSON, disassembly, and CFG representation. |
+| `byteveil_decompiler/Protectors.*` | Static protector and loader-marker heuristics. |
+| `byteveil_decompiler/Unpack.*` | Literal `loadstring` payload inspection. |
+| `byteveil_decompiler/BlockGen/` | Luau bytecode block generation and lifting helpers. |
+| `byteveil_decompiler/AstGen/` | AST construction from lifted Luau operations. |
+| `luau/` | Vendored Luau compiler, VM, AST, analysis code, and related notices. |
+| `tests/` | CLI, Lua 5.1, equivalence scripts, and fixtures. |
 
-Consulta `THIRD_PARTY_NOTICES.md` y las licencias bajo `luau/` para la procedencia y condiciones de redistribución.
+## Known limitations
+
+The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow.
+
+The automatic unpack route is intentionally narrow. It extracts literal payloads only. Loaders that calculate their payload dynamically, virtualize execution, or depend on a runtime-specific environment require separate family-specific analysis and validation.
+
+## Attribution and licenses
+
+ByteVeil includes the Luau source tree required for its compiler, VM, AST, and analysis libraries. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [luau/LICENSE.txt](luau/LICENSE.txt), and [luau/lua_LICENSE.txt](luau/lua_LICENSE.txt) for the applicable notices.
+
+The repository also documents design references and inspiration, including Oracle Decompiler, `luauDec`, and `unluau`. ByteVeil is not an official fork of those projects and is not affiliated with them.
