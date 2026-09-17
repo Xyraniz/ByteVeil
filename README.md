@@ -218,6 +218,7 @@ The repository includes shell-based checks for the CLI and Lua 5.1 inspection pa
 ```bash
 ./tests/test_cli.sh ./build/byteveil
 ./tests/test_lua51.sh ./build/byteveil
+./tests/test_luau_regressions.sh ./build/byteveil
 ```
 
 The equivalence harness compares an original Lua 5.1 program with a candidate lifted program:
@@ -226,9 +227,9 @@ The equivalence harness compares an original Lua 5.1 program with a candidate li
 ./tests/equivalence_lua51.sh original.lua candidate.lua
 ```
 
-In the analyzed checkout, the project builds successfully as `ByteVeil 0.4.8` and `tests/test_cli.sh` passes. `tests/test_lua51.sh` currently contains an older assertion for `ByteVeil 0.4.7`, so it exits before completing against the current binary; this is a test-version mismatch, not a bytecode reader failure. The equivalence harness also requires an external `lua5.1` executable, which is not bundled with the repository.
+The project builds successfully as `ByteVeil 0.4.8`; the CLI, Luau integrity, Luau regression, Lua 5.1 reader, extended, and reconstruction suites pass in the maintained checkout. The equivalence harness remains separate and requires an external `lua5.1` executable.
 
-The checked fixture covers JSON output, disassembly, CFG generation, and Lua 5.1 lifting. The project's existing documentation also records validation against 18 Lua 5.1 chunks derived from a MoonSec V3 corpus. That result describes the recorded test run; it is not a guarantee that every protector sample can be analyzed or lifted.
+The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lifting, Luau loop metadata, simple return/call regressions, and truncated-bytecode rejection. The project's existing documentation also records validation against 18 Lua 5.1 chunks derived from a MoonSec V3 corpus. That result describes the recorded test run; it is not a guarantee that every protector sample can be analyzed or lifted.
 
 ## Project layout
 
@@ -246,7 +247,7 @@ The checked fixture covers JSON output, disassembly, CFG generation, and Lua 5.1
 
 ## Known limitations
 
-The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow.
+The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow. Luau output remains guarded by structural-integrity checks: when the body, loop, or closure cannot be recovered safely, the CLI fails instead of returning code 0 with a plausible-looking false reconstruction.
 
 The automatic unpack route is intentionally narrow. It extracts literal payloads only. Loaders that calculate their payload dynamically, virtualize execution, or depend on a runtime-specific environment require separate family-specific analysis and validation.
 

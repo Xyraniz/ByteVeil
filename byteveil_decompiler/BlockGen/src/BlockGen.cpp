@@ -157,8 +157,10 @@ namespace Luau::Decompiler::BlockGen {
             case LOP_CALL: {
                 auto callExpr = Luau::Decompiler::AstGen::Handlers::getCallAst(virtualStack, *insn);
 
-                if (LUAU_INSN_C(*insn) - 1 != 0) {
-                    for (auto i = 0; i <= LUAU_INSN_C(*insn); i++) {
+                // C encodes result-count + 1. The previous <= C loop wrote
+                // beyond the result range and polluted subsequent expressions.
+                if (LUAU_INSN_C(*insn) > 1) {
+                    for (auto i = 0u; i < LUAU_INSN_C(*insn) - 1; i++) {
                         virtualStack.set(LUAU_INSN_A(*insn) + i, callExpr);
                     }
                 } else {
@@ -321,7 +323,7 @@ namespace Luau::Decompiler::BlockGen {
                 break;
             }
             case LOP_FORNPREP: {
-                auto name = new std::string(std::string("R") + std::to_string(LUAU_INSN_A(*insn) + 2));
+                auto name = new std::string(std::string("loop_index_") + std::to_string(LUAU_INSN_A(*insn) / 4));
                 auto local = new AstLocal {AstName(name->c_str()), Location(), nullptr, 1, 1, nullptr};
                 locVars.insert(std::make_pair(LUAU_INSN_A(*insn) + 2, local));
                 bodyHandler.makeFor(local, Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_A(*insn) + 2]),
@@ -382,7 +384,9 @@ namespace Luau::Decompiler::BlockGen {
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
                 break;
             case LOP_RETURN: {
-                if (LUAU_INSN_B(*insn) - 1 > 0) {
+                // B == 1 encodes one returned value; dropping that case made
+                // simple `return expression` functions appear empty.
+                if (LUAU_INSN_B(*insn) == 0 || LUAU_INSN_B(*insn) > 1) {
                     auto* argVec = new std::vector<AstExpr *>{};
                     int argCount = LUAU_INSN_B(*insn) == 0 ? virtualStack.getTop() + 1 : LUAU_INSN_B(*insn) - 1;
                     unsigned int startReg = LUAU_INSN_A(*insn);
