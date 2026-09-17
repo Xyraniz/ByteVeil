@@ -350,8 +350,9 @@ namespace Luau::Decompiler::BlockGen::Lifter {
                     p->code[i] = LOP_NOP;
                     bodies[target] = WHILESTART;
                 } else if (LUAU_INSN_OP(p->code[i]) == LOP_FORNLOOP || LUAU_INSN_OP(p->code[i]) == LOP_FORGLOOP) {
-                    // do nothing, else will handle this, we do nothing with this instr in decomp
-                    p->code[i] = LOP_NOP;
+                    // Keep the terminator intact.  Replacing it with NOP
+                    // before BlockGen sees it closes the AstStatFor before
+                    // its body has been attached, producing empty loops.
                 } else {
                     bodies[i + getOpLength(LuauOpcode(LUAU_INSN_OP(p->code[i])))- 1] = START; // next instr is start of block
                     bodies[target- 1] = END; // end of block

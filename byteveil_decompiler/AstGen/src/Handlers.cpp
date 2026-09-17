@@ -58,25 +58,34 @@ namespace Luau::Decompiler::AstGen::Handlers {
         return new AstStatAssign {Location(), vars, vals};
     }
 
-    locVar genLocalStat(VirtualAstStack& virtualStack, std::unordered_map<int, AstLocal*>& locVars, unsigned int insn) {
+    locVar genRegisterStat(std::unordered_map<int, AstLocal*>& locVars, int reg, AstExpr* value) {
         auto *vars_arr = new std::vector<AstLocal *>;
-        auto name = new std::string(std::string("loc") + std::to_string(LUAU_INSN_B(insn)));
+        auto name = new std::string(std::string("loc") + std::to_string(reg));
         AstLocal *loc;
         bool existed = false;
-        if (locVars.find(LUAU_INSN_B(insn)) != locVars.end()) {
-            loc = locVars.at(LUAU_INSN_B(insn));
+        if (locVars.find(reg) != locVars.end()) {
+            loc = locVars.at(reg);
             existed = true;
         } else {
             loc = new AstLocal{AstName(name->c_str()), Location(), nullptr, 1, 1, nullptr};
-            locVars.insert(std::make_pair(LUAU_INSN_B(insn), loc));
+            locVars.insert(std::make_pair(reg, loc));
         }
         vars_arr->push_back(loc);
         auto *values_arr = new std::vector<AstExpr *>;
-        values_arr->push_back(Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(insn)]));
-        auto stat = new AstStatLocal{Location(), {vars_arr->data(), vars_arr->size()},
-                                     {values_arr->data(), values_arr->size()},
-                                     std::make_optional<Location>(Location())};
-        return {existed, stat, new AstExprLocal{Location(), loc, false}};
+        values_arr->push_back(Luau::Decompiler::orPlaceholder(value));
+        AstExprLocal* lhs = new AstExprLocal{Location(), loc, false};
+        auto* lhs_arr = new std::vector<AstExpr*>{lhs};
+        AstStat* stat = existed
+            ? static_cast<AstStat*>(new AstStatAssign{Location(), AstArray<AstExpr*>{lhs_arr->data(), lhs_arr->size()},
+                                                       AstArray<AstExpr*>{values_arr->data(), values_arr->size()}})
+            : static_cast<AstStat*>(new AstStatLocal{Location(), {vars_arr->data(), vars_arr->size()},
+                                                      {values_arr->data(), values_arr->size()},
+                                                      std::make_optional<Location>(Location())});
+        return {existed, stat, lhs};
+    }
+
+    locVar genLocalStat(VirtualAstStack& virtualStack, std::unordered_map<int, AstLocal*>& locVars, unsigned int insn) {
+        return genRegisterStat(locVars, LUAU_INSN_A(insn), virtualStack[LUAU_INSN_B(insn)]);
     }
 
     AstExprTable* genTableAst(VirtualAstStack& virtualStack, unsigned int insn, int index) {

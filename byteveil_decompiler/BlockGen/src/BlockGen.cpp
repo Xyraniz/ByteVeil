@@ -88,6 +88,13 @@ namespace Luau::Decompiler::BlockGen {
     }
 
     template<bool isMain> void BlockGen<isMain>::handleInstruction(unsigned int *insn, int pc) {
+        auto materialize = [&](int reg) {
+            auto local = Luau::Decompiler::AstGen::Handlers::genRegisterStat(
+                locVars, reg, virtualStack[reg]);
+            if (!local.existed)
+                bodyHandler.addStat(local.stat);
+            virtualStack.set(reg, local.expr);
+        };
         if (blockInfo[pc] == Lifter::BlockType::END) {
             if (bodyHandler.getType() == BodyType::IF) {
                 bodyHandler.addStat(bodyHandler.get()->template as<AstStatIf>());
@@ -102,19 +109,23 @@ namespace Luau::Decompiler::BlockGen {
                 // above: proto->k[D] with no bounds check against proto->sizek.
                 if (kIdx < static_cast<unsigned int>(proto->sizek))
                     virtualStack.set(LUAU_INSN_A(*insn), getConstantAst(&proto->k[kIdx]));
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_LOADNIL: {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprConstantNil{Location()});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_LOADN: {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprConstantNumber{Location(), double(LUAU_INSN_D(*insn))});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_LOADB: {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprConstantBool { Location(),
                                                                                LUAU_INSN_B(*insn) != 0 });
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_NOT: {
@@ -162,6 +173,7 @@ namespace Luau::Decompiler::BlockGen {
             }
             case LOP_GETGLOBAL: {
                 virtualStack.set(LUAU_INSN_A(*insn), makeGlobal(Luau::Decompiler::getConstantName(proto, *(insn + 1))));
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_GETIMPORT: {
@@ -203,6 +215,7 @@ namespace Luau::Decompiler::BlockGen {
                     virtualStack.set(LUAU_INSN_A(*insn),
                         new AstExprConstantString{Location(), AstArray<char>{placeholder, sizeof(placeholder) - 1}});
                 }
+                materialize(LUAU_INSN_A(*insn));
                 break;
             }
             case LOP_DUPCLOSURE: {
@@ -249,6 +262,7 @@ namespace Luau::Decompiler::BlockGen {
                 unsigned int srcReg = LUAU_INSN_B(*insn);
                 if (srcReg < functionArgs->size() && (*functionArgs)[srcReg]) { // is an arg of the function
                     virtualStack.set(LUAU_INSN_A(*insn), Luau::Decompiler::orPlaceholder(virtualStack[srcReg]));
+                    materialize(LUAU_INSN_A(*insn));
                     break;
                 }
                 auto locVar = Luau::Decompiler::AstGen::Handlers::genLocalStat(virtualStack, locVars, *insn);
@@ -315,6 +329,11 @@ namespace Luau::Decompiler::BlockGen {
                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_A(*insn) + 1]));
                 break;
             }
+            case LOP_FORNLOOP: {
+                if (bodyHandler.getType() == BodyType::FORPREP)
+                    bodyHandler.addStat(bodyHandler.get()->template as<AstStatFor>());
+                break;
+            }
             case LOP_NOP: {
                 if (bodyHandler.getType() == BodyType::FORPREP) {
                     bodyHandler.addStat(bodyHandler.get()->template as<AstStatFor>());
@@ -333,16 +352,19 @@ namespace Luau::Decompiler::BlockGen {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Add,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_SUB:
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Sub,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_MUL:
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Mul,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_DIV:
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Div,
