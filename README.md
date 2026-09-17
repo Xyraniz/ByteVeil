@@ -43,6 +43,8 @@ ByteVeil was audited against [shrimp-nz/medal](https://github.com/shrimp-nz/meda
 
 The current implementation closes the most actionable gap from that comparison on the Lua 5.1 route. Debug-local and upvalue names are reused when their lifetime is known, conditional jumps and loop transitions are preserved in `structured` output, `LOADBOOL`, `JMP`, `SETLIST`, `TAILCALL`, early `RETURN`, and malformed/non-variadic `VARARG` cases are represented without producing invalid Lua, and large nested-prototype chunks are emitted through a function table rather than exceeding Lua's 200-local limit. This is deliberately conservative: unresolved semantics remain visible in comments or placeholders instead of being invented.
 
+The second pass adds the CFG foundation needed for a future Medal-style restructurer on Luau bytecode. Every function now exposes reachable-block immediate dominators, back-edges, and natural-loop membership in JSON under `cfg_analysis`; disassembly prints each block's `idom`, and Graphviz marks loop headers. These facts are computed without executing bytecode and remain available even when the higher-level AST lifter cannot safely reduce a graph to idiomatic Lua.
+
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
 ## Safety model

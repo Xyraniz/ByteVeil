@@ -35,6 +35,10 @@ struct Function {
     std::string nameHint;
     std::vector<Instruction> instructions;
     std::vector<BasicBlock> basicBlocks;
+    // CFG facts used by restructuring passes and exposed by --format json.
+    std::vector<int> immediateDominators;
+    std::vector<std::pair<int, int>> backEdges;
+    std::vector<std::vector<int>> naturalLoops;
     std::vector<Function> children;
 };
 
