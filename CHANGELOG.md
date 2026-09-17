@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased - Lua 5.1 semantic lifting and structured CFG hardening
+
+This iteration follows a source audit against [shrimp-nz/medal](https://github.com/shrimp-nz/medal), [metaworm/luac-parser-rs](https://github.com/metaworm/luac-parser-rs), and other actively maintained Lua decompiler projects. Medal remains stronger in full AST/SSA restructuring and idiomatic formatting; ByteVeil retains a wider safety-oriented inspection surface, including Luau support, static protector analysis, deterministic JSON/IR, CFG export, and non-executing loader inspection. The implementation below adopts the highest-value behavior without copying incompatible code or licenses.
+
+### Added
+
+- Lua 5.1 lifting now consults debug-local intervals and names, selecting the innermost active local for register references and using declared upvalue names when available.
+- `LOADBOOL` skip behavior and `JMP` transitions are explicitly retained in lifted comments and structured output.
+- `SETLIST` with a fixed element count is expanded into indexed assignments; open-tail `SETLIST` remains annotated with its producer instruction rather than being guessed.
+- Early `RETURN` and `TAILCALL` output is wrapped in a `do ... end` block so unreachable bytecode that follows a return does not make the generated Lua syntactically invalid.
+- Non-variadic prototypes that contain `VARARG` are represented as a visible diagnostic assignment instead of emitting illegal `...`; open returns only emit `...` for prototypes marked variadic.
+- Structured Lua 5.1 output now preserves conditional branch decisions, numeric-loop back edges, generic-loop exits, and `LOADBOOL` skip edges. Nested prototypes are emitted through a function table, avoiding Lua's 200-local limit on large chunks.
+- `tests/test_lua51_extended.sh` covers compilation, local/branch lifting, structured output, JSON analysis, and syntax validation. The real `Xyraniz/Obfuscator-Samples` `output.lua` fixture was also processed: 643 functions and 40,598 instructions were decoded, and both Lua output modes parsed successfully with Lua 5.1.
+
+### Corrected
+
+- The Lua 5.1 version assertion in `tests/test_lua51.sh` now matches the CLI's actual `0.4.8` version instead of the stale `0.4.7` expectation.
+- Generated Lua no longer fails parsing solely because the bytecode contains early returns, invalid vararg metadata, or too many nested prototype state variables.
+
+### Validation
+
+- Release CMake build: **PASS**.
+- `tests/test_cli.sh`: **PASS**.
+- `tests/test_lua51.sh`: **PASS**.
+- `tests/test_lua51_extended.sh`: **PASS**.
+- `output.lua` from `Xyraniz/Obfuscator-Samples`: JSON parse, 643-prototype traversal, Lua lift syntax, and structured lift syntax: **PASS**.
+
+### Explicit limits
+
+- This does not claim Medal-level idiomatic recovery of every Lua construct. The structured output is a faithful state machine, not a universal `if`/`while` restructurer.
+- Dynamic `SETLIST` arity, metamethod-dependent behavior, irreducible control flow, and protector-specific virtualization still require specialized analysis. ByteVeil continues to mark those boundaries instead of executing or inventing semantics.
+
 ## 0.4.8 - Hardened Luau lifter and wider opcode coverage
 
 This release was driven by targeted tests against a real MoonSec V3 sample, `Xyraniz/Obfuscator-Samples` at `Moonsec/v3/323928.lua`, using `--format lua`. Before these changes, the sample could reproducibly crash or hang the process.
