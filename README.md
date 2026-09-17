@@ -49,6 +49,8 @@ The third pass adds conservative register SSA metadata. Register-writing instruc
 
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
+The Lua 5.1 `lua` route now includes a conservative CFG restructor for common reducible shapes. It recognizes numeric `for`, `while`, `repeat/until`, conditional branches, nested `if/else` blocks, and nested function bodies. A backward register-definition pass propagates simple `LOADK`, `MOVE`, and `LOADNIL` values into loop bounds and expressions, while debug-local ranges are used to keep stable source names where the bytecode retains them. Unsupported or ambiguous graphs still fall back to visible register-oriented statements rather than being silently guessed.
+
 ## Safety model
 
 ByteVeil is designed for static inspection. The normal CLI does not execute the input script, a loader, a virtual machine contained in the input, or network code. The protector route only searches for textual evidence and returns a detector result. The unpack route extracts literal payloads but does not run them.
