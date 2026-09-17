@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased - Conservative register SSA and phi analysis
+
+### Added
+
+- Luau IR now tracks deterministic definition versions for register-writing instructions.
+- CFG joins with distinct incoming register definitions produce explicit `phi_nodes`, including block, register, generated version, and incoming versions.
+- SSA metadata is emitted in JSON under `ssa` and summarized in disassembly as `phi=rN:vM`.
+- The implementation is intentionally conservative: it models register definitions and joins without claiming that every Luau multiple-return, aliasing, or metamethod case has been resolved.
+
+### Validation
+
+- Deterministic JSON was verified byte-for-byte on branch and loop samples.
+- A sample containing an `if` join and numeric loop produced eight phi nodes with stable versions.
+- Existing CLI, Lua 5.1, and extended regression suites remain passing.
+
 ## Unreleased - Lua 5.1 semantic lifting and structured CFG hardening
 
 This iteration follows a source audit against [shrimp-nz/medal](https://github.com/shrimp-nz/medal), [metaworm/luac-parser-rs](https://github.com/metaworm/luac-parser-rs), and other actively maintained Lua decompiler projects. Medal remains stronger in full AST/SSA restructuring and idiomatic formatting; ByteVeil retains a wider safety-oriented inspection surface, including Luau support, static protector analysis, deterministic JSON/IR, CFG export, and non-executing loader inspection. The implementation below adopts the highest-value behavior without copying incompatible code or licenses.
@@ -37,9 +52,9 @@ This iteration follows a source audit against [shrimp-nz/medal](https://github.c
 
 ## 0.4.8 - Hardened Luau lifter and wider opcode coverage
 
-This release was driven by targeted tests against a real MoonSec V3 sample, `Xyraniz/Obfuscator-Samples` at `Moonsec/v3/323928.lua`, using `--format lua`. Before these changes, the sample could reproducibly crash or hang the process.
+This release was driven by targeted tests against a real MoonSec V3 sample, `Xyraniz/Obfuscator-Samples` at `Moonsec/v3/323928.lua`, using `--format lua`. Before these modifications, the sample could reproducibly crash or hang the process.
 
-The `BlockGen` and `AstGen` code is almost a direct copy of `xgladius/luauDec`. The implementation was compared line by line with the upstream repository to separate inherited bugs from ByteVeil changes. The issues below were present in the vendored lifter and were fixed locally.
+The `BlockGen` and `AstGen` code is almost a direct copy of `xgladius/luauDec`. The implementation was compared line by line with the upstream repository to separate inherited bugs from ByteVeil modifications. The issues below were present in the vendored lifter and were fixed locally.
 
 ### Fixed crashes and hangs
 
@@ -77,7 +92,7 @@ The `BlockGen` and `AstGen` code is almost a direct copy of `xgladius/luauDec`. 
 
 - Existing CLI and Lua 5.1 suites, `tests/test_cli.sh` and `tests/test_lua51.sh`: **PASS**, with no regressions at release time.
 
-- Line-by-line comparison with the current `xgladius/luauDec` commit to separate inherited bugs from ByteVeil changes.
+- Line-by-line comparison with the current `xgladius/luauDec` commit to separate inherited bugs from ByteVeil modifications.
 
 - The real `Moonsec/v3/323928.lua` sample from `Xyraniz/Obfuscator-Samples` previously crashed or hung reproducibly under `--format lua`, as confirmed with `gdb`. It now exits cleanly and produces honest partial output, with explicit placeholders where the lifter cannot resolve a value.
 

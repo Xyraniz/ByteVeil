@@ -23,6 +23,13 @@ struct BasicBlock {
     std::vector<int> successors;
 };
 
+struct PhiNode {
+    int block = -1;
+    int reg = -1;
+    int version = -1;
+    std::vector<int> incomingVersions;
+};
+
 struct Function {
     int id = 0;
     int parentId = -1;
@@ -39,6 +46,8 @@ struct Function {
     std::vector<int> immediateDominators;
     std::vector<std::pair<int, int>> backEdges;
     std::vector<std::vector<int>> naturalLoops;
+    std::vector<int> instructionDefVersions;
+    std::vector<PhiNode> phiNodes;
     std::vector<Function> children;
 };
 
@@ -67,6 +76,7 @@ using Luau::Decompiler::IR::Module;
 using Luau::Decompiler::IR::Instruction;
 using Luau::Decompiler::IR::BasicBlock;
 using Luau::Decompiler::IR::Function;
+using Luau::Decompiler::IR::PhiNode;
 using Luau::Decompiler::IR::validateProto;
 using Luau::Decompiler::IR::buildModule;
 using Luau::Decompiler::IR::opcodeName;

@@ -45,6 +45,8 @@ The current implementation closes the most actionable gap from that comparison o
 
 The second pass adds the CFG foundation needed for a future Medal-style restructurer on Luau bytecode. Every function now exposes reachable-block immediate dominators, back-edges, and natural-loop membership in JSON under `cfg_analysis`; disassembly prints each block's `idom`, and Graphviz marks loop headers. These facts are computed without executing bytecode and remain available even when the higher-level AST lifter cannot safely reduce a graph to idiomatic Lua.
 
+The third pass adds conservative register SSA metadata. Register-writing instructions receive deterministic definition versions, and joins whose incoming versions differ receive explicit phi nodes. JSON consumers can read `ssa.instruction_def_versions` and `ssa.phi_nodes`; the disassembler prints phi summaries next to their blocks. This is an analysis layer for future restructuring, not a claim that dynamic aliasing or multiple-return semantics have been fully solved.
+
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
 ## Safety model
