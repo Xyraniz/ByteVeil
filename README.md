@@ -49,6 +49,8 @@ The third pass adds conservative register SSA metadata. Register-writing instruc
 
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
+The Luau lifter now validates its printed result before returning success. If control-flow recovery loses a loop body or a closure value, the CLI returns an explicit error instead of reporting malformed source as a successful decompilation. This is intentionally a visible analysis boundary while the Luau AST restructurer is being completed.
+
 The Lua 5.1 `lua` route now includes a conservative CFG restructor for common reducible shapes. It recognizes numeric `for`, `while`, `repeat/until`, conditional branches, nested `if/else` blocks, and nested function bodies. A backward register-definition pass propagates simple `LOADK`, `MOVE`, and `LOADNIL` values into loop bounds and expressions, while debug-local ranges are used to keep stable source names where the bytecode retains them. Unsupported or ambiguous graphs still fall back to visible register-oriented statements rather than being silently guessed.
 
 ## Safety model

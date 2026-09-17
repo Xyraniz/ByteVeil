@@ -16,11 +16,13 @@ namespace Luau::Decompiler::AstGen::Handlers {
 
     struct locVar {
         bool existed;
-        AstStatLocal* stat;
+        AstStat* stat;
         AstExprLocal* expr;
     };
 
     locVar genLocalStat(VirtualAstStack& virtualStack, std::unordered_map<int, AstLocal*>& locVars, unsigned int insn);
+
+    locVar genRegisterStat(std::unordered_map<int, AstLocal*>& locVars, int reg, AstExpr* value);
 
     AstExprTable* genTableAst(VirtualAstStack& virtualStack, unsigned int insn, int index);
 
