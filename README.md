@@ -45,7 +45,7 @@ The current implementation closes the most actionable gap from that comparison o
 
 The second pass adds the CFG foundation needed for a future Medal-style restructurer on Luau bytecode. Every function now exposes reachable-block immediate dominators, back-edges, and natural-loop membership in JSON under `cfg_analysis`; disassembly prints each block's `idom`, and Graphviz marks loop headers. These facts are computed without executing bytecode and remain available even when the higher-level AST lifter cannot safely reduce a graph to idiomatic Lua.
 
-The third pass adds conservative register SSA metadata. Register-writing instructions receive deterministic definition versions, and joins whose incoming versions differ receive explicit phi nodes. JSON consumers can read `ssa.instruction_def_versions` and `ssa.phi_nodes`; the disassembler prints phi summaries next to their blocks. This is an analysis layer for future restructuring, not a claim that dynamic aliasing or multiple-return semantics have been fully solved.
+The third pass adds conservative register SSA metadata. Register-writing instructions receive deterministic definition versions, and joins whose incoming versions differ receive explicit phi nodes. JSON consumers can read `ssa.instruction_def_versions` and `ssa.phi_nodes`; the disassembler prints phi summaries next to their blocks. The IR now also records instruction uses, destinations, constant references, source and target blocks, purity/effects, block predecessors, SCCs, loop records, and conservative root/loop scopes. This is an analysis layer for future restructuring, not a claim that dynamic aliasing or multiple-return semantics have been fully solved.
 
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
@@ -147,7 +147,7 @@ Write the root control-flow graph as Graphviz DOT:
 ./build/byteveil --bytecode sample.luac --cfg graph.dot
 ```
 
-The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors, line information, jump targets, and auxiliary-word metadata. The internal IR validates prototype depth and total instruction count before building the representation.
+The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors and predecessors, line information, jump targets, auxiliary-word metadata, register uses/definitions, purity/effects, loop/SCC facts, scopes, and SSA information. The internal IR validates prototype depth, total instruction count, instruction boundaries, operand ranges, and constant/prototype references before building the representation.
 
 ## Lift to source-like output
 
@@ -247,7 +247,7 @@ The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lif
 
 ## Known limitations
 
-The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow. Luau output remains guarded by structural-integrity checks: when the body, loop, or closure cannot be recovered safely, the CLI fails instead of returning code 0 with a plausible-looking false reconstruction.
+The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow. Luau IR scopes and effects are conservative analysis metadata, not complete source-level lexical lifetime recovery. Luau output remains guarded by structural-integrity checks: when the body, loop, or closure cannot be recovered safely, the CLI fails instead of returning code 0 with a plausible-looking false reconstruction.
 
 The automatic unpack route is intentionally narrow. It extracts literal payloads only. Loaders that calculate their payload dynamically, virtualize execution, or depend on a runtime-specific environment require separate family-specific analysis and validation.
 

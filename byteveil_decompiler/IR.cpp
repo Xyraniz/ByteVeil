@@ -111,6 +111,48 @@ static std::string tag(LuauOpcode op)
     }
 }
 
+static void annotateInstruction(Instruction& i)
+{
+    LuauOpcode op = LuauOpcode(i.opcode);
+    if (writtenRegister(i.opcode) >= 0) i.destinationRegister = i.a;
+    i.isAuxiliary = i.hasAux;
+    i.constantIndex = (op == LOP_LOADK || op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK ||
+                       op == LOP_DIVK || op == LOP_MODK || op == LOP_POWK || op == LOP_DUPCLOSURE) ? i.d : -1;
+    auto add = [&](int r) { if (r >= 0) i.uses.push_back(r); };
+    switch (op)
+    {
+    case LOP_MOVE: add(i.b); break;
+    case LOP_GETTABLE: case LOP_SETTABLE: case LOP_ADD: case LOP_SUB: case LOP_MUL:
+    case LOP_DIV: case LOP_MOD: case LOP_POW: case LOP_AND: case LOP_OR: case LOP_CONCAT:
+        add(i.b); add(i.c); break;
+    case LOP_GETTABLEKS: case LOP_SETTABLEKS: case LOP_GETTABLEN: case LOP_SETTABLEN:
+    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: add(i.b); break;
+    case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
+    case LOP_ANDK: case LOP_ORK: add(i.b); break;
+    case LOP_CALL: case LOP_NAMECALL:
+        add(i.a); for (int r = 1; r < i.b; ++r) add(i.a + r); break;
+    case LOP_RETURN:
+        for (int r = 0; i.b == 0 ? r <= i.c : r < i.b - 1; ++r) add(i.a + r);
+        break;
+    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ: case LOP_JUMPIFLE:
+    case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
+        add(i.a); add(i.b); break;
+    case LOP_FORNPREP: case LOP_FORNLOOP: case LOP_FORGPREP: case LOP_FORGLOOP:
+    case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT: case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT:
+        add(i.a); add(i.a + 1); add(i.a + 2); break;
+    case LOP_GETGLOBAL: case LOP_GETIMPORT: case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN:
+    case LOP_LOADK: case LOP_NEWTABLE: case LOP_DUPTABLE: case LOP_NEWCLOSURE: case LOP_DUPCLOSURE:
+        break;
+    default:
+        i.hasSideEffects = true;
+        break;
+    }
+    if (op == LOP_CALL || op == LOP_NAMECALL || op == LOP_RETURN || op == LOP_SETGLOBAL || op == LOP_SETUPVAL ||
+        op == LOP_SETTABLE || op == LOP_SETTABLEKS || op == LOP_SETTABLEN || isJump(op))
+        i.hasSideEffects = true;
+    i.isPure = !i.hasSideEffects && op != LOP_GETTABLE && op != LOP_GETTABLEKS;
+}
+
 static bool validateOne(const Proto* p, std::string& error, int depth, int& total, int maxDepth, int maxInstructions, int functionId)
 {
     if (!p) { error = "function " + std::to_string(functionId) + ": null prototype"; return false; }
@@ -192,6 +234,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
     {
         uint32_t raw = p->code[pc]; LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
         Instruction i; i.offset = pc; i.opcode = int(op); i.length = opLength(op); i.a = LUAU_INSN_A(raw); i.b = LUAU_INSN_B(raw); i.c = LUAU_INSN_C(raw); i.d = LUAU_INSN_D(raw); i.e = LUAU_INSN_E(raw); i.hasAux = hasAux(op); i.jumpTarget = jumpTarget(raw, pc); i.semanticTag = tag(op);
+        annotateInstruction(i);
         if (p->lineinfo && pc < p->sizecode) i.line = luaG_getline(const_cast<Proto*>(p), pc);
         f.instructions.push_back(i); pc += i.length;
     }
@@ -214,6 +257,18 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
         }
         f.basicBlocks.push_back(std::move(block));
     }
+    for (BasicBlock& block : f.basicBlocks)
+        for (int successor : block.successors)
+            if (successor >= 0 && successor < int(f.basicBlocks.size())) f.basicBlocks[successor].predecessors.push_back(block.id);
+    for (BasicBlock& block : f.basicBlocks)
+        for (int instructionIndex : block.instructions)
+        {
+            Instruction& instruction = f.instructions[instructionIndex];
+            instruction.sourceBlock = block.id;
+            if (instruction.jumpTarget >= 0)
+                for (const BasicBlock& target : f.basicBlocks)
+                    if (target.start == instruction.jumpTarget) { instruction.targetBlock = target.id; break; }
+        }
     // Medal's restructurer relies on dominators and natural-loop headers.  Keep
     // the same useful CFG facts in the neutral ByteVeil IR so future AST passes
     // do not need to rediscover them from serialized instructions.
@@ -293,6 +348,65 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                     }
                     f.naturalLoops.emplace_back(loop.begin(), loop.end());
                 }
+
+        // Materialize the loop facts instead of leaving consumers to infer
+        // them from opcode mutations or serialized edges.
+        for (size_t n = 0; n < f.backEdges.size(); ++n)
+        {
+            Loop loop; loop.header = f.backEdges[n].second; loop.backEdges.push_back(f.backEdges[n]);
+            if (n < f.naturalLoops.size()) loop.blocks = f.naturalLoops[n];
+            f.loops.push_back(std::move(loop));
+        }
+
+        // Iterative post-dominators over the finite CFG. Exit blocks
+        // post-dominate themselves; unreachable blocks remain empty.
+        f.postDominators.assign(blockCount, {});
+        std::set<int> allBlocks;
+        for (int block = 0; block < blockCount; ++block) allBlocks.insert(block);
+        for (int block = 0; block < blockCount; ++block)
+            if (reachable[block]) f.postDominators[block] = f.basicBlocks[block].successors.empty() ? std::set<int>{block} : allBlocks;
+        bool postChanged = true;
+        while (postChanged)
+        {
+            postChanged = false;
+            for (int block = blockCount - 1; block >= 0; --block)
+            {
+                if (!reachable[block] || f.basicBlocks[block].successors.empty()) continue;
+                std::set<int> next = allBlocks;
+                for (int successor : f.basicBlocks[block].successors)
+                {
+                    std::set<int> intersection;
+                    std::set_intersection(next.begin(), next.end(), f.postDominators[successor].begin(), f.postDominators[successor].end(), std::inserter(intersection, intersection.begin()));
+                    next = std::move(intersection);
+                }
+                next.insert(block);
+                if (next != f.postDominators[block]) { f.postDominators[block] = std::move(next); postChanged = true; }
+            }
+        }
+
+        // Tarjan SCCs identify irreducible cycles and nested loop components.
+        std::vector<int> index(blockCount, -1), low(blockCount, -1), stack;
+        std::vector<char> onStack(blockCount, 0); int nextIndex = 0;
+        std::function<void(int)> strongConnect = [&](int v) {
+            index[v] = low[v] = nextIndex++; stack.push_back(v); onStack[v] = 1;
+            for (int w : f.basicBlocks[v].successors) if (reachable[w])
+            {
+                if (index[w] < 0) { strongConnect(w); low[v] = std::min(low[v], low[w]); }
+                else if (onStack[w]) low[v] = std::min(low[v], index[w]);
+            }
+            if (low[v] == index[v])
+            {
+                std::vector<int> component;
+                while (!stack.empty()) { int w = stack.back(); stack.pop_back(); onStack[w] = 0; component.push_back(w); if (w == v) break; }
+                std::sort(component.begin(), component.end());
+                f.stronglyConnectedComponents.push_back(std::move(component));
+            }
+        };
+        for (int block = 0; block < blockCount; ++block) if (reachable[block] && index[block] < 0) strongConnect(block);
+        Scope rootScope; rootScope.id = 0; rootScope.entryBlock = 0; rootScope.exitBlock = blockCount - 1;
+        for (int reg = 0; reg < f.registers; ++reg) rootScope.registers.push_back(reg);
+        f.scopes.push_back(std::move(rootScope));
+        for (size_t n = 0; n < f.loops.size(); ++n) { Scope scope; scope.id = int(n + 1); scope.parent = 0; scope.entryBlock = f.loops[n].header; scope.registers.push_back(f.loops[n].header); f.scopes.push_back(std::move(scope)); }
     }
     // Conservative register SSA: definitions are instruction-index versions;
     // joins receive deterministic phi versions when incoming definitions differ.
@@ -364,22 +478,39 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
 static void jsonFn(std::ostringstream& o, const Function& f)
 {
     o << "{\"id\":" << f.id << ",\"parent_id\":" << f.parentId << ",\"prototype_index\":" << f.prototypeIndex << ",\"name_hint\":\"" << esc(f.nameHint) << "\",\"line_defined\":" << f.lineDefined << ",\"parameters\":" << f.parameters << ",\"registers\":" << f.registers << ",\"constants\":" << f.constants << ",\"upvalues\":" << f.upvalues << ",\"instructions\":[";
-    for (size_t n = 0; n < f.instructions.size(); ++n) { if (n) o << ','; const auto& i = f.instructions[n]; o << "{\"offset\":" << i.offset << ",\"opcode\":" << i.opcode << ",\"opcode_name\":\"" << opcodeName(i.opcode) << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e << ",\"line\":" << i.line << ",\"jump_target\":" << i.jumpTarget << ",\"has_aux\":" << (i.hasAux ? "true" : "false") << ",\"semantic_tag\":\"" << i.semanticTag << "\"}"; }
+    for (size_t n = 0; n < f.instructions.size(); ++n)
+    {
+        if (n) o << ','; const auto& i = f.instructions[n];
+        o << "{\"offset\":" << i.offset << ",\"opcode\":" << i.opcode << ",\"opcode_name\":\"" << opcodeName(i.opcode)
+          << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e
+          << ",\"line\":" << i.line << ",\"jump_target\":" << i.jumpTarget << ",\"target_block\":" << i.targetBlock
+          << ",\"destination_register\":" << i.destinationRegister << ",\"constant_index\":" << i.constantIndex
+          << ",\"source_block\":" << i.sourceBlock << ",\"has_aux\":" << (i.hasAux ? "true" : "false")
+          << ",\"is_auxiliary\":" << (i.isAuxiliary ? "true" : "false") << ",\"is_pure\":" << (i.isPure ? "true" : "false")
+          << ",\"has_side_effects\":" << (i.hasSideEffects ? "true" : "false") << ",\"semantic_tag\":\"" << i.semanticTag << "\",\"uses\":[";
+        for (size_t k = 0; k < i.uses.size(); ++k) { if (k) o << ','; o << i.uses[k]; }
+        o << "]}";
+    }
     o << "],\"basic_blocks\":[";
-    for (size_t n = 0; n < f.basicBlocks.size(); ++n) { if (n) o << ','; const auto& b = f.basicBlocks[n]; o << "{\"id\":" << b.id << ",\"start\":" << b.start << ",\"end\":" << b.end << ",\"instructions\":["; for (size_t k = 0; k < b.instructions.size(); ++k) { if (k) o << ','; o << b.instructions[k]; } o << "],\"successors\":["; for (size_t k = 0; k < b.successors.size(); ++k) { if (k) o << ','; o << b.successors[k]; } o << "]}"; }
-    o << "],\"cfg_analysis\":{";
-    o << "\"immediate_dominators\":[";
+    for (size_t n = 0; n < f.basicBlocks.size(); ++n)
+    {
+        if (n) o << ','; const auto& b = f.basicBlocks[n];
+        o << "{\"id\":" << b.id << ",\"start\":" << b.start << ",\"end\":" << b.end << ",\"instructions\":[";
+        for (size_t k = 0; k < b.instructions.size(); ++k) { if (k) o << ','; o << b.instructions[k]; }
+        o << "],\"successors\":["; for (size_t k = 0; k < b.successors.size(); ++k) { if (k) o << ','; o << b.successors[k]; }
+        o << "],\"predecessors\":["; for (size_t k = 0; k < b.predecessors.size(); ++k) { if (k) o << ','; o << b.predecessors[k]; }
+        o << "]}";
+    }
+    o << "],\"cfg_analysis\":{\"immediate_dominators\":[";
     for (size_t n = 0; n < f.immediateDominators.size(); ++n) { if (n) o << ','; o << f.immediateDominators[n]; }
-    o << "],\"back_edges\":[";
-    for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
-    o << "],\"natural_loops\":[";
-    for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
-    o << "]},\"ssa\":{";
-    o << "\"instruction_def_versions\":[";
+    o << "],\"back_edges\":["; for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
+    o << "],\"natural_loops\":["; for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
+    o << "],\"sccs\":["; for (size_t n = 0; n < f.stronglyConnectedComponents.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.stronglyConnectedComponents[n].size(); ++k) { if (k) o << ','; o << f.stronglyConnectedComponents[n][k]; } o << ']'; }
+    o << "]},\"ssa\":{\"instruction_def_versions\":[";
     for (size_t n = 0; n < f.instructionDefVersions.size(); ++n) { if (n) o << ','; o << f.instructionDefVersions[n]; }
-    o << "],\"phi_nodes\":[";
-    for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
-    o << "]},\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
+    o << "],\"phi_nodes\":["; for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
+    o << "]},\"scopes\":["; for (size_t n = 0; n < f.scopes.size(); ++n) { if (n) o << ','; const Scope& s = f.scopes[n]; o << "{\"id\":" << s.id << ",\"parent\":" << s.parent << ",\"entry\":" << s.entryBlock << ",\"exit\":" << s.exitBlock << ",\"registers\":["; for (size_t k = 0; k < s.registers.size(); ++k) { if (k) o << ','; o << s.registers[k]; } o << "]}"; }
+    o << "],\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
 }
 }
 

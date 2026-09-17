@@ -37,6 +37,12 @@ ops = [i['opcode_name'] for i in f['instructions']]
 assert 'FORNPREP' in ops and 'FORNLOOP' in ops
 assert f['basic_blocks']
 assert f['cfg_analysis']['immediate_dominators']
+assert f['cfg_analysis']['sccs']
+assert f['scopes']
+assert all('uses' in i and 'source_block' in i and 'destination_register' in i for i in f['instructions'])
+assert any(i['has_side_effects'] for i in f['instructions'])
+assert any(i['is_pure'] for i in f['instructions'])
+assert all('predecessors' in b for b in f['basic_blocks'])
 assert 'ssa' in f and 'phi_nodes' in f['ssa']
 PY
 
