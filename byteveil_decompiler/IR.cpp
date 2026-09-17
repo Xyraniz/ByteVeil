@@ -123,7 +123,10 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
     if (!p->p && p->sizep) { error = "function " + std::to_string(functionId) + ": missing child prototype storage"; return false; }
     if (!p->k && p->sizek) { error = "function " + std::to_string(functionId) + ": missing constant storage"; return false; }
 
+    // Build instruction boundaries while decoding. A jump into an AUX word is
+    // not a valid CFG edge; accepting it would desynchronise later passes.
     std::set<int> boundaries{0};
+    std::vector<std::pair<int, int>> decoded;
     for (int pc = 0; pc < p->sizecode;)
     {
         ++total;
@@ -143,7 +146,37 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         if (target >= 0) { if (target < 0 || target >= p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": jump target out of range"; return false; } boundaries.insert(target); }
         if (op == LOP_CAPTURE && LUAU_INSN_B(raw) >= p->maxstacksize && LUAU_INSN_A(raw) != LCT_UPVAL)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": capture register out of range"; return false; }
+        auto checkReg = [&](unsigned int reg, const char* field) {
+            if (reg >= p->maxstacksize) {
+                error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": register " + field + " out of range";
+                return false;
+            }
+            return true;
+        };
+        switch (LuauOpcode(op))
+        {
+        case LOP_MOVE: case LOP_GETTABLE: case LOP_SETTABLE: case LOP_ADD:
+        case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
+        case LOP_AND: case LOP_OR: case LOP_CONCAT:
+            if (!checkReg(LUAU_INSN_B(raw), "B") || !checkReg(LUAU_INSN_C(raw), "C")) return false;
+            break;
+        case LOP_GETTABLEKS: case LOP_SETTABLEKS: case LOP_GETTABLEN: case LOP_SETTABLEN:
+            if (!checkReg(LUAU_INSN_B(raw), "B")) return false;
+            break;
+        default:
+            break;
+        }
+        decoded.emplace_back(pc, len);
         pc += len;
+    }
+    for (const auto& instruction : decoded)
+    {
+        int target = jumpTarget(p->code[instruction.first], instruction.first);
+        if (target >= 0 && !boundaries.count(target))
+        {
+            error = "function " + std::to_string(functionId) + " offset " + std::to_string(instruction.first) + ": jump target is not an instruction boundary";
+            return false;
+        }
     }
     for (int i = 0; i < p->sizep; ++i)
         if (!validateOne(p->p[i], error, depth + 1, total, maxDepth, maxInstructions, functionId + i + 1)) return false;
@@ -154,7 +187,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
 {
     f.id = id; f.parentId = parentId; f.prototypeIndex = protoIndex;
     f.parameters = p->numparams; f.registers = p->maxstacksize; f.constants = p->sizek; f.upvalues = p->nups; f.lineDefined = p->linedefined;
-    f.nameHint = p->debugname ? p->debugname->data : "function_" + std::to_string(id);
+    f.nameHint = (p->debugname && p->debugname->data && p->debugname->data[0]) ? p->debugname->data : "function_" + std::to_string(id);
     for (int pc = 0; pc < p->sizecode;)
     {
         uint32_t raw = p->code[pc]; LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));

@@ -11,8 +11,16 @@ ByteVeil was inspired by the public design and implementation ideas of the follo
 - Oracle Decompiler
 - https://github.com/xgladius/luauDec
 - https://github.com/atrexus/unluau
+- https://github.com/viruscamp/luadec
+- https://github.com/ItsLucas/luadecng-rs
+- https://github.com/luau-lang/luau
 
 The reference repositories are **not bundled in this distribution**. Their names are retained only as attribution for the architectural and research inspiration described in the README. ByteVeil is not an official fork or affiliated project.
+
+The CFG, dominator, liveness, and intermediate-representation concepts were
+reviewed against luadecng-rs and Luau's public bytecode implementation. No
+code from those repositories is copied into ByteVeil; this remains a separate
+C++17 implementation under the applicable project licenses.
 
 ## ByteVeil changes
 
