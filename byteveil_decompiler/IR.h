@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <set>
 #include <vector>
 #include "Common.h"
 
@@ -13,6 +14,14 @@ struct Instruction {
     int jumpTarget = -1;
     bool hasAux = false;
     std::string semanticTag;
+    int destinationRegister = -1;
+    int constantIndex = -1;
+    int sourceBlock = -1;
+    int targetBlock = -1;
+    bool isAuxiliary = false;
+    bool isPure = false;
+    bool hasSideEffects = false;
+    std::vector<int> uses;
 };
 
 struct BasicBlock {
@@ -21,6 +30,21 @@ struct BasicBlock {
     int end = 0;
     std::vector<int> instructions;
     std::vector<int> successors;
+    std::vector<int> predecessors;
+};
+
+struct Scope {
+    int id = -1;
+    int parent = -1;
+    int entryBlock = -1;
+    int exitBlock = -1;
+    std::vector<int> registers;
+};
+
+struct Loop {
+    int header = -1;
+    std::vector<int> blocks;
+    std::vector<std::pair<int, int>> backEdges;
 };
 
 struct PhiNode {
@@ -44,8 +68,12 @@ struct Function {
     std::vector<BasicBlock> basicBlocks;
     // CFG facts used by restructuring passes and exposed by --format json.
     std::vector<int> immediateDominators;
+    std::vector<std::set<int>> postDominators;
     std::vector<std::pair<int, int>> backEdges;
     std::vector<std::vector<int>> naturalLoops;
+    std::vector<std::vector<int>> stronglyConnectedComponents;
+    std::vector<Scope> scopes;
+    std::vector<Loop> loops;
     std::vector<int> instructionDefVersions;
     std::vector<PhiNode> phiNodes;
     std::vector<Function> children;
