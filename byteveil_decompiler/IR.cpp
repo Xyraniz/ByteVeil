@@ -39,6 +39,20 @@ static bool isJump(LuauOpcode op)
     }
 }
 
+static bool isConditional(LuauOpcode op)
+{
+    switch (op)
+    {
+    case LOP_LOADB: case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ:
+    case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE:
+    case LOP_JUMPIFNOTLT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FORNPREP:
+    case LOP_FORNLOOP: case LOP_FORGLOOP: case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT:
+    case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT: case LOP_FORGPREP:
+        return true;
+    default: return false;
+    }
+}
+
 static int jumpTarget(const uint32_t raw, int pc)
 {
     LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
@@ -143,11 +157,91 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
         {
             const Instruction& last = f.instructions[block.instructions.back()];
             if (last.jumpTarget >= 0) for (size_t j = 0; j < sorted.size(); ++j) if (sorted[j] == last.jumpTarget) block.successors.push_back(int(j));
-            bool conditional = last.opcode == LOP_JUMPIF || last.opcode == LOP_JUMPIFNOT || last.opcode == LOP_JUMPIFEQ || last.opcode == LOP_JUMPIFLE || last.opcode == LOP_JUMPIFLT || last.opcode == LOP_JUMPIFNOTEQ || last.opcode == LOP_JUMPIFNOTLE || last.opcode == LOP_JUMPIFNOTLT || last.opcode == LOP_JUMPIFEQK || last.opcode == LOP_JUMPIFNOTEQK || last.opcode == LOP_LOADB;
+            bool conditional = isConditional(LuauOpcode(last.opcode));
             if (conditional && n + 1 < sorted.size()) block.successors.push_back(int(n + 1));
             std::sort(block.successors.begin(), block.successors.end()); block.successors.erase(std::unique(block.successors.begin(), block.successors.end()), block.successors.end());
         }
         f.basicBlocks.push_back(std::move(block));
+    }
+    // Medal's restructurer relies on dominators and natural-loop headers.  Keep
+    // the same useful CFG facts in the neutral ByteVeil IR so future AST passes
+    // do not need to rediscover them from serialized instructions.
+    const int blockCount = int(f.basicBlocks.size());
+    if (blockCount > 0)
+    {
+        std::vector<std::set<int>> predecessors(blockCount);
+        for (const BasicBlock& block : f.basicBlocks)
+            for (int successor : block.successors)
+                if (successor >= 0 && successor < blockCount) predecessors[successor].insert(block.id);
+
+        std::vector<char> reachable(blockCount, 0);
+        std::function<void(int)> markReachable = [&](int block) {
+            if (block < 0 || block >= blockCount || reachable[block]) return;
+            reachable[block] = 1;
+            for (int successor : f.basicBlocks[block].successors) markReachable(successor);
+        };
+        markReachable(0);
+
+        std::vector<std::set<int>> dominators(blockCount);
+        for (int block = 0; block < blockCount; ++block)
+            if (reachable[block]) dominators[block] = {};
+        dominators[0] = {0};
+        std::set<int> allReachable;
+        for (int block = 0; block < blockCount; ++block) if (reachable[block]) allReachable.insert(block);
+        for (int block = 1; block < blockCount; ++block) if (reachable[block]) dominators[block] = allReachable;
+
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (int block = 1; block < blockCount; ++block)
+            {
+                if (!reachable[block]) continue;
+                std::set<int> next = allReachable;
+                bool hasReachablePredecessor = false;
+                for (int predecessor : predecessors[block])
+                {
+                    if (!reachable[predecessor]) continue;
+                    hasReachablePredecessor = true;
+                    std::set<int> intersection;
+                    std::set_intersection(next.begin(), next.end(), dominators[predecessor].begin(), dominators[predecessor].end(), std::inserter(intersection, intersection.begin()));
+                    next = std::move(intersection);
+                }
+                if (hasReachablePredecessor) next.insert(block);
+                if (next != dominators[block]) { dominators[block] = std::move(next); changed = true; }
+            }
+        }
+
+        f.immediateDominators.assign(blockCount, -1);
+        f.immediateDominators[0] = 0;
+        for (int block = 1; block < blockCount; ++block)
+        {
+            if (!reachable[block]) continue;
+            int best = -1;
+            size_t bestDepth = 0;
+            for (int candidate : dominators[block])
+            {
+                if (candidate == block) continue;
+                if (dominators[candidate].size() > bestDepth) { best = candidate; bestDepth = dominators[candidate].size(); }
+            }
+            f.immediateDominators[block] = best;
+        }
+
+        for (const BasicBlock& block : f.basicBlocks)
+            for (int successor : block.successors)
+                if (successor >= 0 && successor < blockCount && reachable[successor] && dominators[block.id].count(successor))
+                {
+                    f.backEdges.emplace_back(block.id, successor);
+                    std::set<int> loop{successor, block.id};
+                    std::vector<int> work{block.id};
+                    while (!work.empty())
+                    {
+                        int current = work.back(); work.pop_back();
+                        for (int predecessor : predecessors[current])
+                            if (reachable[predecessor] && loop.insert(predecessor).second) work.push_back(predecessor);
+                    }
+                    f.naturalLoops.emplace_back(loop.begin(), loop.end());
+                }
     }
     int childId = id + 1;
     for (int c = 0; c < p->sizep; ++c) { Function child; addFunction(p->p[c], child, childId, id, c); childId += 1; f.children.push_back(std::move(child)); }
@@ -159,7 +253,14 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     for (size_t n = 0; n < f.instructions.size(); ++n) { if (n) o << ','; const auto& i = f.instructions[n]; o << "{\"offset\":" << i.offset << ",\"opcode\":" << i.opcode << ",\"opcode_name\":\"" << opcodeName(i.opcode) << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e << ",\"line\":" << i.line << ",\"jump_target\":" << i.jumpTarget << ",\"has_aux\":" << (i.hasAux ? "true" : "false") << ",\"semantic_tag\":\"" << i.semanticTag << "\"}"; }
     o << "],\"basic_blocks\":[";
     for (size_t n = 0; n < f.basicBlocks.size(); ++n) { if (n) o << ','; const auto& b = f.basicBlocks[n]; o << "{\"id\":" << b.id << ",\"start\":" << b.start << ",\"end\":" << b.end << ",\"instructions\":["; for (size_t k = 0; k < b.instructions.size(); ++k) { if (k) o << ','; o << b.instructions[k]; } o << "],\"successors\":["; for (size_t k = 0; k < b.successors.size(); ++k) { if (k) o << ','; o << b.successors[k]; } o << "]}"; }
-    o << "],\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
+    o << "],\"cfg_analysis\":{";
+    o << "\"immediate_dominators\":[";
+    for (size_t n = 0; n < f.immediateDominators.size(); ++n) { if (n) o << ','; o << f.immediateDominators[n]; }
+    o << "],\"back_edges\":[";
+    for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
+    o << "],\"natural_loops\":[";
+    for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
+    o << "]},\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
 }
 }
 
@@ -187,12 +288,13 @@ std::string toJson(const Module& m)
 
 std::string disassemble(const Module& m)
 {
-    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]"; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX"; o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
+    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]"; if (b.id < int(f.immediateDominators.size())) o << " idom=block_" << f.immediateDominators[b.id]; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX"; o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
 }
 
 std::string cfgDot(const Module& m)
 {
-    std::ostringstream o; o << "digraph byteveil_cfg {\n"; for (const auto& b : m.root.basicBlocks) { o << "  b" << b.id << " [label=\"block_" << b.id << "\\n" << b.start << ".." << b.end << "\"];\n"; for (int s : b.successors) o << "  b" << b.id << " -> b" << s << ";\n"; } o << "}\n"; return o.str();
+    std::set<int> loopHeaders; for (const auto& edge : m.root.backEdges) loopHeaders.insert(edge.second);
+    std::ostringstream o; o << "digraph byteveil_cfg {\n"; for (const auto& b : m.root.basicBlocks) { o << "  b" << b.id << " [label=\"block_" << b.id << "\\n" << b.start << ".." << b.end; if (b.id < int(m.root.immediateDominators.size())) o << "\\nidom=" << m.root.immediateDominators[b.id]; if (loopHeaders.count(b.id)) o << "\\nloop-header"; o << "\"];\n"; for (int s : b.successors) o << "  b" << b.id << " -> b" << s << ";\n"; } o << "}\n"; return o.str();
 }
 
 std::string constantsText(const Proto* p) { std::ostringstream o; o << "function 0 constants: " << (p ? p->sizek : 0) << "\n"; return o.str(); }

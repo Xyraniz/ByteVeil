@@ -5,6 +5,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cat >"$TMP/sample.luau" <<'LUA'
 local x = 1 + 2
+for i = 1, 3 do
+    x += i
+end
 return x
 LUA
 "$BIN" --version | grep -q '^ByteVeil '
@@ -12,12 +15,16 @@ LUA
 "$BIN" --format json "$TMP/sample.luau" >"$TMP/b.json"
 grep -q '"root_function"' "$TMP/a.json"
 grep -q '"opcode_name"' "$TMP/a.json"
+grep -q '"cfg_analysis"' "$TMP/a.json"
+grep -q '"immediate_dominators"' "$TMP/a.json"
 cmp "$TMP/a.json" "$TMP/b.json"
 "$BIN" --disassemble "$TMP/sample.luau" >"$TMP/disassembly"
 grep -q '^function 0' "$TMP/disassembly"
 grep -q 'LOAD' "$TMP/disassembly"
+grep -q 'idom=block_' "$TMP/disassembly"
 "$BIN" --cfg "$TMP/graph.dot" "$TMP/sample.luau" >/dev/null
 grep -q '^digraph byteveil_cfg' "$TMP/graph.dot"
+grep -q 'idom=' "$TMP/graph.dot"
 printf 'MoonSec V3\n' >"$TMP/protected.lua"
 "$BIN" --analyze "$TMP/protected.lua" | grep -q 'moonsec_marker: yes'
 printf 'error("MUST_NOT_EXECUTE")\n' >"$TMP/noexec.luau"

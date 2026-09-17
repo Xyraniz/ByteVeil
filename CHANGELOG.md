@@ -13,6 +13,9 @@ This iteration follows a source audit against [shrimp-nz/medal](https://github.c
 - Non-variadic prototypes that contain `VARARG` are represented as a visible diagnostic assignment instead of emitting illegal `...`; open returns only emit `...` for prototypes marked variadic.
 - Structured Lua 5.1 output now preserves conditional branch decisions, numeric-loop back edges, generic-loop exits, and `LOADBOOL` skip edges. Nested prototypes are emitted through a function table, avoiding Lua's 200-local limit on large chunks.
 - `tests/test_lua51_extended.sh` covers compilation, local/branch lifting, structured output, JSON analysis, and syntax validation. The real `Xyraniz/Obfuscator-Samples` `output.lua` fixture was also processed: 643 functions and 40,598 instructions were decoded, and both Lua output modes parsed successfully with Lua 5.1.
+- Luau IR now computes reachable-block dominators with an iterative data-flow pass, immediate dominators, CFG back-edges, and natural-loop membership. The results are available under `cfg_analysis` in JSON, `idom=block_N` in disassembly, and annotated loop headers in Graphviz output.
+- The CFG metadata is calculated per nested function and remains deterministic, giving a future AST restructurer the same structural foundation used by Medal without pretending that every graph is reducible.
+- Luau numeric and generic loop opcodes are now treated as conditional terminators when constructing block successors. This preserves both the loop back-edge and the exit edge; previously `FORNPREP`/`FORNLOOP` could leave the loop body unreachable in the derived CFG.
 
 ### Corrected
 
