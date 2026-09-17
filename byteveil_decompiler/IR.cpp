@@ -53,6 +53,24 @@ static bool isConditional(LuauOpcode op)
     }
 }
 
+static int writtenRegister(int opcode)
+{
+    switch (LuauOpcode(opcode))
+    {
+    case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN: case LOP_LOADK: case LOP_MOVE:
+    case LOP_GETGLOBAL: case LOP_GETUPVAL: case LOP_GETTABLE: case LOP_GETTABLEKS:
+    case LOP_GETTABLEN: case LOP_NEWCLOSURE: case LOP_NAMECALL: case LOP_CALL:
+    case LOP_GETIMPORT: case LOP_DUPTABLE: case LOP_DUPCLOSURE: case LOP_LOADKX:
+    case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
+    case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
+    case LOP_AND: case LOP_OR: case LOP_ANDK: case LOP_ORK: case LOP_CONCAT:
+    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: case LOP_FORNLOOP: case LOP_FORGLOOP:
+    case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT: case LOP_GETVARARGS:
+        return 0; // A is filled by the caller from the instruction.
+    default: return -1;
+    }
+}
+
 static int jumpTarget(const uint32_t raw, int pc)
 {
     LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
@@ -243,6 +261,69 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                     f.naturalLoops.emplace_back(loop.begin(), loop.end());
                 }
     }
+    // Conservative register SSA: definitions are instruction-index versions;
+    // joins receive deterministic phi versions when incoming definitions differ.
+    f.instructionDefVersions.assign(f.instructions.size(), -1);
+    if (blockCount > 0 && f.registers > 0)
+    {
+        std::vector<std::set<int>> predecessors(blockCount);
+        for (const BasicBlock& block : f.basicBlocks)
+            for (int successor : block.successors)
+                if (successor >= 0 && successor < blockCount) predecessors[successor].insert(block.id);
+        std::vector<std::vector<int>> incoming(blockCount, std::vector<int>(f.registers, -1));
+        std::vector<std::vector<int>> outgoing(blockCount, std::vector<int>(f.registers, -1));
+        std::vector<std::vector<int>> phiVersions(blockCount, std::vector<int>(f.registers, -1));
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (int block = 0; block < blockCount; ++block)
+            {
+                std::vector<int> next(f.registers, -1);
+                if (block == 0) next.assign(f.registers, 0);
+                else if (!predecessors[block].empty())
+                {
+                    for (int reg = 0; reg < f.registers; ++reg)
+                    {
+                        int value = -1; bool first = true; bool differs = false;
+                        for (int predecessor : predecessors[block])
+                        {
+                            int candidate = outgoing[predecessor][reg];
+                            if (first) { value = candidate; first = false; }
+                            else if (candidate != value) differs = true;
+                        }
+                        if (differs)
+                        {
+                            int phi = 1000000 + block * 256 + reg;
+                            phiVersions[block][reg] = phi; next[reg] = phi;
+                        }
+                        else next[reg] = value;
+                    }
+                }
+                if (next != incoming[block]) { incoming[block] = next; changed = true; }
+                std::vector<int> out = next;
+                for (int instructionIndex : f.basicBlocks[block].instructions)
+                {
+                    const Instruction& instruction = f.instructions[instructionIndex];
+                    if (writtenRegister(instruction.opcode) >= 0 && instruction.a >= 0 && instruction.a < f.registers)
+                    {
+                        int version = instructionIndex + 1;
+                        f.instructionDefVersions[instructionIndex] = version;
+                        out[instruction.a] = version;
+                    }
+                }
+                if (out != outgoing[block]) { outgoing[block] = std::move(out); changed = true; }
+            }
+        }
+        for (int block = 0; block < blockCount; ++block)
+            for (int reg = 0; reg < f.registers; ++reg)
+                if (phiVersions[block][reg] >= 0)
+                {
+                    PhiNode phi; phi.block = block; phi.reg = reg; phi.version = phiVersions[block][reg];
+                    for (int predecessor : predecessors[block]) phi.incomingVersions.push_back(outgoing[predecessor][reg]);
+                    f.phiNodes.push_back(std::move(phi));
+                }
+    }
     int childId = id + 1;
     for (int c = 0; c < p->sizep; ++c) { Function child; addFunction(p->p[c], child, childId, id, c); childId += 1; f.children.push_back(std::move(child)); }
 }
@@ -260,6 +341,11 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
     o << "],\"natural_loops\":[";
     for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
+    o << "]},\"ssa\":{";
+    o << "\"instruction_def_versions\":[";
+    for (size_t n = 0; n < f.instructionDefVersions.size(); ++n) { if (n) o << ','; o << f.instructionDefVersions[n]; }
+    o << "],\"phi_nodes\":[";
+    for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
     o << "]},\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
 }
 }
@@ -288,7 +374,7 @@ std::string toJson(const Module& m)
 
 std::string disassemble(const Module& m)
 {
-    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]"; if (b.id < int(f.immediateDominators.size())) o << " idom=block_" << f.immediateDominators[b.id]; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX"; o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
+    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]"; if (b.id < int(f.immediateDominators.size())) o << " idom=block_" << f.immediateDominators[b.id]; for (const PhiNode& phi : f.phiNodes) if (phi.block == b.id) o << " phi=r" << phi.reg << ":v" << phi.version; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX"; o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
 }
 
 std::string cfgDot(const Module& m)
