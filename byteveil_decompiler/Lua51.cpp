@@ -81,20 +81,46 @@ static void disProto(std::ostringstream& o,const Proto& p){ o<<"function "<<p.id
 static void cfgProto(std::ostringstream& o,const Proto& p){ o<<"digraph lua51_cfg_"<<p.id<<" {\n"; std::vector<int> starts{0}; for(const auto&i:p.code)if(i.target>=0){starts.push_back(i.target);if(i.pc+1<int(p.code.size()))starts.push_back(i.pc+1);} std::sort(starts.begin(),starts.end());starts.erase(std::unique(starts.begin(),starts.end()),starts.end()); for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;o<<"  b"<<i<<" [label=\""<<starts[i]<<".."<<end<<"\"];\n";} for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;const Instr* last=nullptr;for(const auto&ins:p.code)if(ins.pc>=starts[i]&&ins.pc<=end)last=&ins;if(last&&last->target>=0){auto it=std::find(starts.begin(),starts.end(),last->target);if(it!=starts.end())o<<"  b"<<i<<" -> b"<<(it-starts.begin())<<";\n";} if(last&& (last->op==23||last->op==24||last->op==25||last->op==26||last->op==27||last->op==33) && i+1<starts.size())o<<"  b"<<i<<" -> b"<<i+1<<";\n";}o<<"}\n"; }
 static void luaProto(std::ostringstream& o,const Proto& p){ o<<"-- ByteVeil Lua 5.1 diagnostic decompilation\n-- function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" instructions="<<p.code.size()<<"\n";for(const auto&i:p.code)o<<"-- ["<<i.pc<<"] "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<"\n";for(const auto&c:p.children)luaProto(o,c);if(p.id==0)o<<"return nil\n";}
 static std::string reg(int a){return "r"+std::to_string(a);}
+static int debugRegister(const Proto& p,const LocalInfo& local){
+    if(local.name.rfind("(",0)==0) return -1;
+    if(local.start==0 && local.start<p.params) return local.start;
+    for(const auto& ins:p.code){
+        if(ins.pc<local.start-1 || ins.pc>=local.end) continue;
+        if(ins.op==32 && ins.pc<=local.start && ins.a+3<p.maxstack) return ins.a+3;
+        if(ins.pc==local.start || ins.pc==local.start-1){
+            if(ins.op==36 || ins.op==1 || ins.op==2 || ins.op==3 || ins.op==10 || ins.op==12 || ins.op==13 || ins.op==14 || ins.op==15 || ins.op==16 || ins.op==17) return ins.a;
+        }
+    }
+    return -1;
+}
 static std::string localReg(const Proto& p,int a,int pc){
-    // Lua debug locals are the best available source-level names.  Prefer the
-    // innermost active range and fall back to a stable register spelling.
     const LocalInfo* best=nullptr;
-    for(const auto& local:p.locals)
-        if(local.start<=pc && pc<local.end && local.name.rfind("(",0)!=0 &&
+    for(const auto& local:p.locals){
+        int mapped=debugRegister(p,local);
+        if(mapped==a && local.start<=pc && pc<local.end &&
            (!best || local.start>=best->start)) best=&local;
+    }
     return best && !best->name.empty() ? best->name : reg(a);
 }
 static std::string upvalue(const Proto& p,int index){
     return index>=0 && index<int(p.upvalues.size()) && !p.upvalues[index].empty()
         ? p.upvalues[index] : "__upvalue_"+std::to_string(index);
 }
-static std::string value(const Proto& p,int x,int pc=0){return (x&256)?(x&255<p.constants.size()?p.constants[x&255]:"nil"):localReg(p,x,pc);}
+static std::string value(const Proto& p,int x,int pc=0){
+    if(x&256){ int index=x&255; return index<int(p.constants.size())?p.constants[index]:"nil"; }
+    return localReg(p,x,pc);
+}
+static std::string valueAt(const Proto& p,int regIndex,int pc){
+    for(int n=pc-1;n>=0;--n){
+        const Instr& d=p.code[n];
+        if(d.a!=regIndex) continue;
+        if(d.op==1) return d.bx<int(p.constants.size())?p.constants[d.bx]:"nil";
+        if(d.op==0) return valueAt(p,d.b, n);
+        if(d.op==3) return "nil";
+        break;
+    }
+    return localReg(p,regIndex,pc);
+}
 static std::string args(const Proto& p,int a,int b,int pc=0){std::ostringstream s;int n=b-1;for(int k=1;k<=n;k++){if(k>1)s<<", ";s<<localReg(p,a+k,pc);}return s.str();}
 static void liftFunctionBody(std::ostringstream& o,const Proto& p){
     for(const auto&i:p.code){
@@ -129,6 +155,84 @@ static void liftFunctionBody(std::ostringstream& o,const Proto& p){
         }
     }
 }
+
+static bool isCompare(int op){ return op==23 || op==24 || op==25; }
+static std::string compareExpr(const Proto& p,const Instr& i){
+    std::string lhs=value(p,i.b,i.pc), rhs=value(p,i.c,i.pc);
+    const char* op=i.op==23 ? " == " : i.op==24 ? " < " : " <= ";
+    return "("+lhs+op+rhs+")";
+}
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent);
+static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent){
+    std::string pad(indent,' ');
+    switch(i.op){
+    case 0:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"\n";break;
+    case 1:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(i.bx<p.constants.size()?p.constants[i.bx]:"nil")<<"\n";break;
+    case 2:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(i.b?"true":"false")<<"\n";break;
+    case 3:o<<pad<<localReg(p,i.a,i.pc)<<" = nil\n";break;
+    case 5:o<<pad<<localReg(p,i.a,i.pc)<<" = _G["<<(i.bx<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
+    case 6:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"["<<value(p,i.c,i.pc)<<"]\n";break;
+    case 7:o<<pad<<"_G["<<(i.bx<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<localReg(p,i.a,i.pc)<<"\n";break;
+    case 9:o<<pad<<localReg(p,i.a,i.pc)<<"["<<value(p,i.b,i.pc)<<"] = "<<value(p,i.c,i.pc)<<"\n";break;
+    case 10:o<<pad<<localReg(p,i.a,i.pc)<<" = {}\n";break;
+    case 12: case 13: case 14: case 15: case 16: case 17:{const char* op=i.op==12?"+":i.op==13?"-":i.op==14?"*":i.op==15?"/":i.op==16?"%":"^";o<<pad<<localReg(p,i.a,i.pc)<<" = "<<value(p,i.b,i.pc)<<" "<<op<<" "<<value(p,i.c,i.pc)<<"\n";break;}
+    case 18:o<<pad<<localReg(p,i.a,i.pc)<<" = -"<<localReg(p,i.b,i.pc)<<"\n";break;
+    case 19:o<<pad<<localReg(p,i.a,i.pc)<<" = not "<<localReg(p,i.b,i.pc)<<"\n";break;
+    case 20:o<<pad<<localReg(p,i.a,i.pc)<<" = #"<<localReg(p,i.b,i.pc)<<"\n";break;
+    case 21:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<" .. "<<localReg(p,i.c,i.pc)<<"\n";break;
+    case 28:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
+    case 29:o<<pad<<"return "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
+    case 30:{int n=i.b==0?1:i.b-1;o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<localReg(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
+    case 34: if(i.b>0){int base=(i.c-1)*50;for(int k=1;k<i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}break;
+    case 36: if(i.bx<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}break;
+    default: break;
+    }
+}
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent){
+    const std::string pad(indent,' ');
+    for(int pc=begin;pc<end;){
+        const Instr& i=p.code[pc];
+        // Numeric for: FORPREP jumps over the body to FORLOOP; the loop variable is A+3.
+        if(i.op==32 && i.target>pc && i.target<end && i.target<int(p.code.size()) && p.code[i.target].op==31){
+            const Instr& loop=p.code[i.target]; int bodyBegin=pc+1, bodyEnd=i.target;
+            std::string var=localReg(p,i.a+3,bodyBegin);
+            o<<pad<<"for "<<var<<" = "<<valueAt(p,i.a,pc)<<", "<<valueAt(p,i.a+1,pc)<<", "<<valueAt(p,i.a+2,pc)<<" do\n";
+            emitRange(o,p,bodyBegin,bodyEnd,indent+4); o<<pad<<"end\n"; pc=i.target+1; continue;
+        }
+        // Repeat/until: a conditional immediately followed by a backward jump.
+        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>=begin && p.code[pc+1].target<pc){
+            o<<pad<<"repeat\n"; emitRange(o,p,p.code[pc+1].target,pc,indent+4); o<<pad<<"until "<<compareExpr(p,i)<<"\n"; pc+=2; continue;
+        }
+        // While: condition, forward exit jump, body, backward jump to condition.
+        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
+            int bodyBegin=pc+2, exit=p.code[pc+1].target;
+            if(exit<=end && exit>bodyBegin && p.code[exit-1].op==22 && p.code[exit-1].target==pc){
+                o<<pad<<"while "<<compareExpr(p,i)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4); o<<pad<<"end\n"; pc=exit; continue;
+            }
+        }
+        // If/elseif/else: conditional, jump over true branch, optional join jump.
+        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
+            int trueBegin=pc+2, falseBegin=p.code[pc+1].target;
+            int join=falseBegin;
+            if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22 && p.code[falseBegin-1].target>falseBegin){ join=p.code[falseBegin-1].target; }
+            o<<pad<<"if "<<compareExpr(p,i)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4);
+            if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4); }
+            o<<pad<<"end\n"; pc=join; continue;
+        }
+        if(i.op==22){ pc=i.target>=0?i.target:pc+1; continue; }
+        if(i.op==35){ pc++; continue; }
+        emitSimple(o,p,i,indent);
+        if(i.op==29 || i.op==30) break;
+        pc++;
+    }
+}
+static void readableProto(std::ostringstream& o,const Proto& p){
+    o<<"-- ByteVeil reconstructed Lua 5.1 function "<<p.id<<" (CFG/SSA conservative)\n";
+    for(int i=0;i<p.params;i++) o<<"local "<<localReg(p,i,0)<<"\n";
+    emitRange(o,p,0,int(p.code.size()),0);
+    if(p.id==0 && (p.code.empty()||p.code.back().op!=30)) o<<"return nil\n";
+}
+
 static void liftProto(std::ostringstream& o,const Proto& p){
     o<<"-- ByteVeil Lua 5.1 lifted function "<<p.id<<" (unsupported instructions remain annotated)\n";
     liftFunctionBody(o,p);
@@ -172,5 +276,5 @@ static void structuredProto(std::ostringstream& o,const Proto& p){
 }
 
 bool isChunk(const std::string& data) { return data.size()>=4 && data.compare(0,4,"\x1bLua",4)==0; }
-std::string inspect(const std::string& data,const std::string& mode,std::string& error){try{Proto p=parse(data);std::ostringstream o;if(mode=="json"||mode=="ir"){o<<"{\"format\":\"Lua 5.1 bytecode\",\"version\":81,\"root_function\":";jsonProto(o,p);o<<"}\n";}else if(mode=="disassemble")disProto(o,p);else if(mode=="cfg")cfgProto(o,p);else if(mode=="structured")structuredProto(o,p);else if(mode=="constants"){o<<"function 0 constants: "<<p.constants.size()<<"\n";for(size_t i=0;i<p.constants.size();i++)o<<i<<": "<<p.constants[i]<<"\n";}else if(mode=="prototypes"){std::function<void(const Proto&)> f=[&](const Proto&x){o<<"function "<<x.id<<" parent="<<x.parent<<" instructions="<<x.code.size()<<" children="<<x.children.size()<<"\n";for(const auto&c:x.children)f(c);};f(p);}else liftProto(o,p);return o.str();}catch(const std::exception&e){error=e.what();return {};}}
+std::string inspect(const std::string& data,const std::string& mode,std::string& error){try{Proto p=parse(data);std::ostringstream o;if(mode=="json"||mode=="ir"){o<<"{\"format\":\"Lua 5.1 bytecode\",\"version\":81,\"root_function\":";jsonProto(o,p);o<<"}\n";}else if(mode=="disassemble")disProto(o,p);else if(mode=="cfg")cfgProto(o,p);else if(mode=="structured")structuredProto(o,p);else if(mode=="constants"){o<<"function 0 constants: "<<p.constants.size()<<"\n";for(size_t i=0;i<p.constants.size();i++)o<<i<<": "<<p.constants[i]<<"\n";}else if(mode=="prototypes"){std::function<void(const Proto&)> f=[&](const Proto&x){o<<"function "<<x.id<<" parent="<<x.parent<<" instructions="<<x.code.size()<<" children="<<x.children.size()<<"\n";for(const auto&c:x.children)f(c);};f(p);}else readableProto(o,p);return o.str();}catch(const std::exception&e){error=e.what();return {};}}
 }
