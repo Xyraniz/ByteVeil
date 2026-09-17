@@ -97,11 +97,11 @@ static std::string localReg(const Proto& p,int a,int pc){
     const LocalInfo* best=nullptr;
     for(const auto& local:p.locals){
         int mapped=debugRegister(p,local);
-        if(mapped==a && local.start<=pc && pc<local.end &&
-           (!best || local.start>=best->start)) best=&local;
+        if(mapped==a && (!best || (local.start<=pc && pc<local.end) || local.start>best->start)) best=&local;
     }
     return best && !best->name.empty() ? best->name : reg(a);
 }
+static std::string valueAt(const Proto& p,int regIndex,int pc);
 static std::string upvalue(const Proto& p,int index){
     return index>=0 && index<int(p.upvalues.size()) && !p.upvalues[index].empty()
         ? p.upvalues[index] : "__upvalue_"+std::to_string(index);
@@ -121,7 +121,7 @@ static std::string valueAt(const Proto& p,int regIndex,int pc){
     }
     return localReg(p,regIndex,pc);
 }
-static std::string args(const Proto& p,int a,int b,int pc=0){std::ostringstream s;int n=b-1;for(int k=1;k<=n;k++){if(k>1)s<<", ";s<<localReg(p,a+k,pc);}return s.str();}
+static std::string args(const Proto& p,int a,int b,int pc=0){std::ostringstream s;int n=b-1;for(int k=1;k<=n;k++){if(k>1)s<<", ";s<<valueAt(p,a+k,pc);}return s.str();}
 static void liftFunctionBody(std::ostringstream& o,const Proto& p){
     for(const auto&i:p.code){
         o<<"-- pc "<<i.pc<<" "<<opName(i.op)<<"\n";
@@ -181,8 +181,8 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 20:o<<pad<<localReg(p,i.a,i.pc)<<" = #"<<localReg(p,i.b,i.pc)<<"\n";break;
     case 21:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<" .. "<<localReg(p,i.c,i.pc)<<"\n";break;
     case 28:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
-    case 29:o<<pad<<"return "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
-    case 30:{int n=i.b==0?1:i.b-1;o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<localReg(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
+    case 29:o<<pad<<"return "<<valueAt(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
+    case 30:{int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<valueAt(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
     case 34: if(i.b>0){int base=(i.c-1)*50;for(int k=1;k<i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}break;
     case 36: if(i.bx<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}break;
     default: break;
@@ -192,6 +192,19 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
     const std::string pad(indent,' ');
     for(int pc=begin;pc<end;){
         const Instr& i=p.code[pc];
+        // GETGLOBAL/MOVE/CALL (or TAILCALL) is the common compiler shape for
+        // a direct global call. Emit the source-level call and consume the
+        // temporary function/argument registers.
+        if(i.op==5 && pc+2<end && p.code[pc+1].op==0 &&
+           (p.code[pc+2].op==28 || p.code[pc+2].op==29) &&
+           p.code[pc+2].a==i.a){
+            const Instr& call=p.code[pc+2];
+            std::string fn=i.bx<int(p.constants.size())?p.constants[i.bx]:"_G[\"unknown\"]";
+            if(fn.size()>=2 && fn.front()=='"' && fn.back()=='"') fn=fn.substr(1,fn.size()-2);
+            std::string arg=valueAt(p,p.code[pc+1].b,pc+1);
+            o<<pad<<(call.op==29?"return ":"")<<fn<<"("<<arg<<")\n";
+            pc+=3; if(call.op==29) break; continue;
+        }
         // Numeric for: FORPREP jumps over the body to FORLOOP; the loop variable is A+3.
         if(i.op==32 && i.target>pc && i.target<end && i.target<int(p.code.size()) && p.code[i.target].op==31){
             const Instr& loop=p.code[i.target]; int bodyBegin=pc+1, bodyEnd=i.target;
@@ -221,7 +234,17 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         }
         if(i.op==22){ pc=i.target>=0?i.target:pc+1; continue; }
         if(i.op==35){ pc++; continue; }
-        emitSimple(o,p,i,indent);
+        // FORPREP consumes the three setup registers; do not leak their
+        // compiler temporaries into reconstructed source.
+        bool loopSetup=false;
+        bool returnSetup=(i.op==1 && pc+1<end &&
+            (p.code[pc+1].op==30 || p.code[pc+1].op==29) &&
+            p.code[pc+1].a==i.a);
+        if(i.op==1 || i.op==0 || i.op==3){
+            for(int f=pc+1;f<end && f<=pc+4;f++)
+                if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
+        }
+        if(!loopSetup && !returnSetup) emitSimple(o,p,i,indent);
         if(i.op==29 || i.op==30) break;
         pc++;
     }
