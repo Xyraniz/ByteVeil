@@ -37,6 +37,12 @@ ByteVeil can:
 
 - Extract only literal strings passed to `loadstring` through the `unpack` route, returning JSON with `executed: false`.
 
+## Comparison and design choices
+
+ByteVeil was audited against [shrimp-nz/medal](https://github.com/shrimp-nz/medal), whose strongest contribution is a Rust AST/SSA pipeline with dominator-based control-flow restructuring, local renaming, and a formatter that handles precedence and statement disambiguation. ByteVeil keeps those ideas as design targets, but does not copy Medal's code: it already provides a broader safety-oriented CLI, static protector and loader analysis, deterministic JSON/IR, Graphviz output, automatic Lua 5.1/Luau detection, and a vendored Luau execution-free inspection path.
+
+The current implementation closes the most actionable gap from that comparison on the Lua 5.1 route. Debug-local and upvalue names are reused when their lifetime is known, conditional jumps and loop transitions are preserved in `structured` output, `LOADBOOL`, `JMP`, `SETLIST`, `TAILCALL`, early `RETURN`, and malformed/non-variadic `VARARG` cases are represented without producing invalid Lua, and large nested-prototype chunks are emitted through a function table rather than exceeding Lua's 200-local limit. This is deliberately conservative: unresolved semantics remain visible in comments or placeholders instead of being invented.
+
 The output of the lifters is an analysis aid. It is not a promise that every input can be reconstructed into equivalent, idiomatic source code.
 
 ## Safety model
@@ -232,7 +238,7 @@ The checked fixture covers JSON output, disassembly, CFG generation, and Lua 5.1
 
 ## Known limitations
 
-The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow.
+The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow.
 
 The automatic unpack route is intentionally narrow. It extracts literal payloads only. Loaders that calculate their payload dynamically, virtualize execution, or depend on a runtime-specific environment require separate family-specific analysis and validation.
 
