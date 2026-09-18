@@ -338,12 +338,15 @@ namespace Luau::Decompiler::BlockGen {
             }
             case LOP_NOP: {
                 if (bodyHandler.getType() == BodyType::FORPREP) {
-                    bodyHandler.addStat(bodyHandler.get()->template as<AstStatFor>());
+                    if (AstStat* stat = bodyHandler.get()) bodyHandler.addStat(stat->template as<AstStatFor>());
                 } else if (bodyHandler.getType() == BodyType::WHILE) {
-                    bodyHandler.addStat(bodyHandler.get()->template as<AstStatWhile>());
+                    if (AstStat* stat = bodyHandler.get()) bodyHandler.addStat(stat->template as<AstStatWhile>());
                 }
+                break;
             }
             case LOP_GETUPVAL: {
+                // Upvalue names are not available in all Luau bytecode versions.
+                // Do not fall through into a different opcode or fabricate a global.
                 break;
             }
             case LOP_GETVARARGS: {
