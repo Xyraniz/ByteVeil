@@ -88,6 +88,7 @@ struct Module {
 
 bool validateProto(const Proto* root, std::string& error, int maxDepth = 128, int maxInstructions = 1000000);
 bool buildModule(const Proto* root, Module& module, std::string& error);
+bool validateAnalysis(const Module& module, std::string& error);
 std::string opcodeName(int opcode);
 std::string toJson(const Module& module);
 std::string disassemble(const Module& module);

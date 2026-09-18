@@ -525,10 +525,43 @@ bool validateProto(const Proto* root, std::string& error, int maxDepth, int maxI
     int total = 0; return validateOne(root, error, 0, total, maxDepth, maxInstructions, 0);
 }
 
+static bool validateFunctionAnalysis(const Function& f, std::string& error)
+{
+    const int blocks = int(f.basicBlocks.size());
+    if (blocks == 0) { error = "IR function has no basic blocks"; return false; }
+    if (int(f.immediateDominators.size()) != blocks) { error = "IR dominator vector does not match block count"; return false; }
+    for (const BasicBlock& block : f.basicBlocks)
+    {
+        if (block.id < 0 || block.id >= blocks) { error = "IR contains an invalid basic-block id"; return false; }
+        for (int target : block.successors)
+            if (target < 0 || target >= blocks) { error = "IR contains an out-of-range CFG successor"; return false; }
+        for (int predecessor : block.predecessors)
+            if (predecessor < 0 || predecessor >= blocks) { error = "IR contains an out-of-range CFG predecessor"; return false; }
+        for (int instruction : block.instructions)
+            if (instruction < 0 || instruction >= int(f.instructions.size())) { error = "IR block references an invalid instruction"; return false; }
+    }
+    for (int idom : f.immediateDominators)
+        if (idom < -1 || idom >= blocks) { error = "IR contains an invalid immediate dominator"; return false; }
+    for (const auto& edge : f.backEdges)
+        if (edge.first < 0 || edge.second < 0 || edge.first >= blocks || edge.second >= blocks) { error = "IR contains an invalid back-edge"; return false; }
+    for (const PhiNode& phi : f.phiNodes)
+    {
+        if (phi.block < 0 || phi.block >= blocks || phi.reg < 0 || phi.reg >= f.registers) { error = "IR contains an invalid phi node"; return false; }
+        if (phi.incomingVersions.size() != f.basicBlocks[phi.block].predecessors.size()) { error = "IR phi node has the wrong number of incoming versions"; return false; }
+    }
+    for (const Function& child : f.children)
+        if (!validateFunctionAnalysis(child, error)) return false;
+    return true;
+}
+bool validateAnalysis(const Module& module, std::string& error)
+{
+    return validateFunctionAnalysis(module.root, error);
+}
 bool buildModule(const Proto* root, Module& module, std::string& error)
 {
     if (!validateProto(root, error)) return false;
-    module = Module{}; module.root = Function{}; addFunction(root, module.root, 0, -1, 0); return true;
+    module = Module{}; module.root = Function{}; addFunction(root, module.root, 0, -1, 0);
+    return validateAnalysis(module, error);
 }
 
 std::string toJson(const Module& m)
