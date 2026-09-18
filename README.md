@@ -87,6 +87,8 @@ build/byteveil
 
 The CMake project links the vendored `Luau.Compiler`, `Luau.VM`, and `Luau.Ast` targets. It compiles Luau's standalone transpiler source directly instead of pulling the entire, otherwise unused `Luau.Analysis` library into the build.
 
+MinGW builds statically link the GCC and C++ runtimes so the resulting executable cannot accidentally load an incompatible `libstdc++-6.dll` supplied by Git Bash or another MSYS installation.
+
 ## Command-line usage
 
 The executable reports its own version and help text:
@@ -147,7 +149,7 @@ Write the root control-flow graph as Graphviz DOT:
 ./build/byteveil --bytecode sample.luac --cfg graph.dot
 ```
 
-The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors and predecessors, line information, jump targets, auxiliary-word metadata, register uses/definitions, purity/effects, loop/SCC facts, scopes, and SSA information. The internal IR validates prototype depth, total instruction count, instruction boundaries, operand ranges, and constant/prototype references before building the representation.
+The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors and predecessors, reachability, line information, jump targets, decoded AUX words, complete register use/definition sets, purity/effects, loop/SCC facts, scopes, and SSA information. Multi-register operations such as `CALL`, `NAMECALL`, `GETVARARGS`, and loop instructions retain every defined register and its SSA version. The internal IR validates prototype depth, total instruction count, real instruction boundaries (including rejection of jumps into AUX words), operand ranges, and constant/prototype references before building the representation.
 
 ## Lift to source-like output
 
@@ -272,7 +274,7 @@ CTest passes the generator-specific executable path to every script, so the same
 
 ## Luau reconstruction pipeline
 
-The Luau inspection path is deliberately split into validated phases. Bytecode is decoded into an IR, basic blocks are connected into a CFG, dominators/post-dominators and natural loops are computed, and register lifetimes, definitions, uses and phi nodes are exposed as dataflow metadata. The `--format structured` mode consumes those facts to render conditional diamonds, joins, loop headers and irreducible edges as an explicit control-flow plan. It preserves unsafe edges instead of guessing source that merely looks plausible.
+The Luau inspection path is deliberately split into validated phases. Bytecode is decoded into an IR, basic blocks are connected into a CFG with explicit fallthrough and unreachable regions, dominators/post-dominators and merged natural loops are computed, and register lifetimes, definitions, uses and phi nodes are exposed as dataflow metadata. The `--format structured` mode consumes those facts to render conditional diamonds, joins, loop headers and irreducible edges as an explicit control-flow plan. It preserves unsafe edges instead of guessing source that merely looks plausible.
 
 The source decompiler retains the legacy AST lifter for compatible output, but now applies two safety gates: known incomplete shapes are rejected and the generated Luau is compiled and loaded before it is returned. This follows the analysis recommendation to keep ByteVeil's validation layer while moving toward a Medal-style restructuring phase.
 

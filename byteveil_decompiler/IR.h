@@ -10,6 +10,7 @@ struct Instruction {
     int opcode = -1;
     int length = 1;
     int a = 0, b = 0, c = 0, d = 0, e = 0;
+    uint32_t aux = 0;
     int line = 0;
     int jumpTarget = -1;
     bool hasAux = false;
@@ -22,6 +23,10 @@ struct Instruction {
     bool isPure = false;
     bool hasSideEffects = false;
     std::vector<int> uses;
+    // Luau instructions can define a range (CALL/GETVARARGS) or a pair
+    // (NAMECALL/loop opcodes), not just register A.
+    std::vector<int> definitions;
+    std::vector<int> definitionVersions;
 };
 
 struct BasicBlock {
@@ -31,6 +36,7 @@ struct BasicBlock {
     std::vector<int> instructions;
     std::vector<int> successors;
     std::vector<int> predecessors;
+    bool reachable = false;
 };
 
 struct Scope {

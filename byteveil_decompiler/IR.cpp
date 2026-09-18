@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -36,6 +37,7 @@ static bool isJump(LuauOpcode op)
     case LOP_FORGLOOP: case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT:
     case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT: case LOP_JUMPX:
     case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FORGPREP:
+    case LOP_LOADB: case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
         return true;
     default: return false;
     }
@@ -45,31 +47,28 @@ static bool isConditional(LuauOpcode op)
 {
     switch (op)
     {
-    case LOP_LOADB: case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ:
+    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ:
     case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE:
     case LOP_JUMPIFNOTLT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FORNPREP:
-    case LOP_FORNLOOP: case LOP_FORGLOOP: case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT:
-    case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT: case LOP_FORGPREP:
+    case LOP_FORNLOOP: case LOP_FORGLOOP: case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT:
+    case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
         return true;
     default: return false;
     }
 }
 
-static int writtenRegister(int opcode)
+static bool isReturn(LuauOpcode op) { return op == LOP_RETURN; }
+
+static bool hasRegisterA(LuauOpcode op)
 {
-    switch (LuauOpcode(opcode))
+    switch (op)
     {
-    case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN: case LOP_LOADK: case LOP_MOVE:
-    case LOP_GETGLOBAL: case LOP_GETUPVAL: case LOP_GETTABLE: case LOP_GETTABLEKS:
-    case LOP_GETTABLEN: case LOP_NEWCLOSURE: case LOP_NAMECALL: case LOP_CALL:
-    case LOP_GETIMPORT: case LOP_DUPTABLE: case LOP_DUPCLOSURE: case LOP_LOADKX:
-    case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
-    case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
-    case LOP_AND: case LOP_OR: case LOP_ANDK: case LOP_ORK: case LOP_CONCAT:
-    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: case LOP_FORNLOOP: case LOP_FORGLOOP:
-    case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT: case LOP_GETVARARGS:
-        return 0; // A is filled by the caller from the instruction.
-    default: return -1;
+    case LOP_NOP: case LOP_BREAK: case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPX:
+    case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+    case LOP_COVERAGE: case LOP_CAPTURE: case LOP_PREPVARARGS:
+        return false;
+    default:
+        return true;
     }
 }
 
@@ -99,60 +98,133 @@ static std::string tag(LuauOpcode op)
     if (isJump(op)) return "control-flow";
     switch (op)
     {
-    case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN: case LOP_LOADK: case LOP_MOVE:
+    case LOP_LOADNIL: case LOP_LOADN: case LOP_LOADK: case LOP_LOADKX: case LOP_MOVE:
+    case LOP_GETGLOBAL: case LOP_GETUPVAL: case LOP_GETIMPORT:
         return "load";
     case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
     case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
+    case LOP_AND: case LOP_OR: case LOP_ANDK: case LOP_ORK: case LOP_CONCAT:
         return "binary";
-    case LOP_CALL: case LOP_NAMECALL: case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH:
+        return "unary";
+    case LOP_GETTABLE: case LOP_GETTABLEKS: case LOP_GETTABLEN:
+        return "table-read";
+    case LOP_SETTABLE: case LOP_SETTABLEKS: case LOP_SETTABLEN: case LOP_NEWTABLE:
+    case LOP_DUPTABLE: case LOP_SETLIST:
+        return "table-write";
+    case LOP_SETGLOBAL: case LOP_SETUPVAL: case LOP_CLOSEUPVALS:
+        return "store";
+    case LOP_CALL: case LOP_NAMECALL:
         return "call";
     case LOP_NEWCLOSURE: case LOP_DUPCLOSURE: case LOP_CAPTURE:
         return "closure";
     case LOP_RETURN: return "return";
-    default: return "instruction";
+    case LOP_GETVARARGS: case LOP_PREPVARARGS: return "vararg";
+    case LOP_NOP: case LOP_BREAK: case LOP_COVERAGE: return "metadata";
+    default: return "unknown";
     }
 }
 
-static void annotateInstruction(Instruction& i)
+static void annotateInstruction(Instruction& i, int registerCount)
 {
     LuauOpcode op = LuauOpcode(i.opcode);
-    if (writtenRegister(i.opcode) >= 0) i.destinationRegister = i.a;
     i.isAuxiliary = i.hasAux;
-    if (op == LOP_LOADK || op == LOP_DUPCLOSURE) i.constantIndex = i.d;
+    if (op == LOP_LOADK || op == LOP_DUPCLOSURE || op == LOP_DUPTABLE || op == LOP_GETIMPORT) i.constantIndex = i.d;
+    else if (op == LOP_GETGLOBAL || op == LOP_SETGLOBAL || op == LOP_GETTABLEKS || op == LOP_SETTABLEKS ||
+             op == LOP_NAMECALL || op == LOP_LOADKX || op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK ||
+             op == LOP_FASTCALL2K) i.constantIndex = int(i.aux);
     else if (op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
              op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK) i.constantIndex = i.c;
     else i.constantIndex = -1;
-    auto add = [&](int r) { if (r >= 0) i.uses.push_back(r); };
+
+    auto addUse = [&](int r) {
+        if (r >= 0 && r < registerCount && std::find(i.uses.begin(), i.uses.end(), r) == i.uses.end())
+            i.uses.push_back(r);
+    };
+    auto addDef = [&](int r) {
+        if (r >= 0 && r < registerCount && std::find(i.definitions.begin(), i.definitions.end(), r) == i.definitions.end())
+            i.definitions.push_back(r);
+    };
+    auto addRange = [&](auto&& add, int first, int count) {
+        for (int n = 0; n < count && first + n < registerCount; ++n) add(first + n);
+    };
+
     switch (op)
     {
-    case LOP_MOVE: add(i.b); break;
-    case LOP_GETTABLE: case LOP_SETTABLE: case LOP_ADD: case LOP_SUB: case LOP_MUL:
-    case LOP_DIV: case LOP_MOD: case LOP_POW: case LOP_AND: case LOP_OR: case LOP_CONCAT:
-        add(i.b); add(i.c); break;
-    case LOP_GETTABLEKS: case LOP_SETTABLEKS: case LOP_GETTABLEN: case LOP_SETTABLEN:
-    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: add(i.b); break;
+    case LOP_MOVE: addUse(i.b); addDef(i.a); break;
+    case LOP_GETTABLE: addUse(i.b); addUse(i.c); addDef(i.a); break;
+    case LOP_SETTABLE: addUse(i.a); addUse(i.b); addUse(i.c); break;
+    case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
+    case LOP_AND: case LOP_OR:
+        addUse(i.b); addUse(i.c); addDef(i.a); break;
+    case LOP_CONCAT:
+        if (i.b <= i.c) addRange(addUse, i.b, i.c - i.b + 1);
+        addDef(i.a); break;
+    case LOP_GETTABLEKS: case LOP_GETTABLEN:
+        addUse(i.b); addDef(i.a); break;
+    case LOP_SETTABLEKS: case LOP_SETTABLEN:
+        addUse(i.a); addUse(i.b); break;
+    case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: addUse(i.b); addDef(i.a); break;
     case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
-    case LOP_ANDK: case LOP_ORK: add(i.b); break;
-    case LOP_CALL: case LOP_NAMECALL:
-        add(i.a); for (int r = 1; r < i.b; ++r) add(i.a + r); break;
-    case LOP_RETURN:
-        for (int r = 0; i.b == 0 ? r <= i.c : r < i.b - 1; ++r) add(i.a + r);
+    case LOP_ANDK: case LOP_ORK: addUse(i.b); addDef(i.a); break;
+    case LOP_NAMECALL:
+        addUse(i.b); addDef(i.a); addDef(i.a + 1); break;
+    case LOP_CALL:
+        addRange(addUse, i.a, i.b == 0 ? registerCount - i.a : i.b);
+        if (i.c == 0) addRange(addDef, i.a, registerCount - i.a);
+        else if (i.c > 1) addRange(addDef, i.a, i.c - 1);
         break;
-    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ: case LOP_JUMPIFLE:
-    case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
-        add(i.a); add(i.b); break;
-    case LOP_FORNPREP: case LOP_FORNLOOP: case LOP_FORGPREP: case LOP_FORGLOOP:
-    case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT: case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT:
-        add(i.a); add(i.a + 1); add(i.a + 2); break;
-    case LOP_GETGLOBAL: case LOP_GETIMPORT: case LOP_LOADNIL: case LOP_LOADB: case LOP_LOADN:
-    case LOP_LOADK: case LOP_NEWTABLE: case LOP_DUPTABLE: case LOP_NEWCLOSURE: case LOP_DUPCLOSURE:
+    case LOP_RETURN:
+        addRange(addUse, i.a, i.b == 0 ? registerCount - i.a : std::max(0, i.b - 1));
+        break;
+    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK:
+        addUse(i.a); break;
+    case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
+    case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
+        addUse(i.a); addUse(int(i.aux)); break;
+    case LOP_FORNPREP:
+        addRange(addUse, i.a, 3); addRange(addDef, i.a, 3); break;
+    case LOP_FORNLOOP:
+        addRange(addUse, i.a, 3); addDef(i.a + 2); break;
+    case LOP_FORGPREP:
+        addRange(addUse, i.a, 3); addRange(addDef, i.a, 3); break;
+    case LOP_FORGPREP_INEXT: case LOP_FORGPREP_NEXT:
+        addRange(addUse, i.a, 3); addDef(i.a + 2); break;
+    case LOP_FORGLOOP: {
+        addRange(addUse, i.a, 3);
+        int variables = std::max(1, int(i.aux & 0xff));
+        addDef(i.a + 2); addRange(addDef, i.a + 3, variables);
+        break;
+    }
+    case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT:
+        addRange(addUse, i.a, 3); addDef(i.a + 2); addRange(addDef, i.a + 3, 2); break;
+    case LOP_SETGLOBAL: case LOP_SETUPVAL: addUse(i.a); break;
+    case LOP_CLOSEUPVALS: addRange(addUse, i.a, registerCount - i.a); break;
+    case LOP_SETLIST:
+        addUse(i.a); addRange(addUse, i.b, i.c == 0 ? registerCount - i.b : std::max(0, i.c - 1)); break;
+    case LOP_CAPTURE:
+        if (i.a == LCT_VAL || i.a == LCT_REF) addUse(i.b);
+        break;
+    case LOP_FASTCALL1: case LOP_FASTCALL2K: addUse(i.b); break;
+    case LOP_FASTCALL2: addUse(i.b); addUse(int(i.aux & 0xff)); break;
+    case LOP_GETVARARGS:
+        addRange(addDef, i.a, i.b == 0 ? registerCount - i.a : std::max(0, i.b - 1)); break;
+    case LOP_GETGLOBAL: case LOP_GETIMPORT: case LOP_GETUPVAL: case LOP_LOADNIL: case LOP_LOADB:
+    case LOP_LOADN: case LOP_LOADK: case LOP_LOADKX: case LOP_NEWTABLE: case LOP_DUPTABLE:
+    case LOP_NEWCLOSURE: case LOP_DUPCLOSURE:
+        addDef(i.a);
+        break;
+    case LOP_NOP: case LOP_BREAK: case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPX:
+    case LOP_FASTCALL: case LOP_COVERAGE: case LOP_PREPVARARGS:
         break;
     default:
         i.hasSideEffects = true;
         break;
     }
+    if (!i.definitions.empty()) i.destinationRegister = i.definitions.front();
     if (op == LOP_CALL || op == LOP_NAMECALL || op == LOP_RETURN || op == LOP_SETGLOBAL || op == LOP_SETUPVAL ||
-        op == LOP_SETTABLE || op == LOP_SETTABLEKS || op == LOP_SETTABLEN || isJump(op))
+        op == LOP_SETTABLE || op == LOP_SETTABLEKS || op == LOP_SETTABLEN || op == LOP_SETLIST ||
+        op == LOP_CLOSEUPVALS || isJump(op))
         i.hasSideEffects = true;
     i.isPure = !i.hasSideEffects && op != LOP_GETTABLE && op != LOP_GETTABLEKS;
 }
@@ -171,10 +243,12 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
 
     // Build instruction boundaries while decoding. A jump into an AUX word is
     // not a valid CFG edge; accepting it would desynchronise later passes.
-    std::set<int> boundaries{0};
+    std::set<int> instructionBoundaries;
+    std::vector<std::pair<int, int>> jumpTargets;
     std::vector<std::pair<int, int>> decoded;
     for (int pc = 0; pc < p->sizecode;)
     {
+        instructionBoundaries.insert(pc);
         ++total;
         if (total > maxInstructions) { error = "instruction limit exceeded"; return false; }
         uint32_t raw = p->code[pc];
@@ -182,19 +256,27 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         if (op < 0 || op >= LOP__COUNT) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": unknown opcode " + std::to_string(op); return false; }
         int len = opLength(LuauOpcode(op));
         if (pc + len > p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": missing AUX instruction"; return false; }
-        if (LUAU_INSN_A(raw) >= p->maxstacksize && (op != LOP_BREAK && op != LOP_NOP && op != LOP_COVERAGE))
+        if (hasRegisterA(LuauOpcode(op)) && LUAU_INSN_A(raw) >= p->maxstacksize)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": register A out of range"; return false; }
-        bool directConstant = op == LOP_LOADK || op == LOP_DUPCLOSURE;
+        bool directConstant = op == LOP_LOADK || op == LOP_DUPCLOSURE || op == LOP_DUPTABLE || op == LOP_GETIMPORT;
         bool cConstant = op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
                          op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK;
         if ((directConstant && LUAU_INSN_D(raw) >= p->sizek) || (cConstant && LUAU_INSN_C(raw) >= p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": constant index out of range"; return false; }
-        if ((op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK) && p->code[pc + 1] >= uint32_t(p->sizek))
+        bool auxConstant = op == LOP_GETGLOBAL || op == LOP_SETGLOBAL || op == LOP_GETTABLEKS ||
+                           op == LOP_SETTABLEKS || op == LOP_NAMECALL || op == LOP_LOADKX ||
+                           op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK || op == LOP_FASTCALL2K;
+        if (auxConstant && p->code[pc + 1] >= uint32_t(p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": auxiliary constant index out of range"; return false; }
         if ((op == LOP_NEWCLOSURE) && LUAU_INSN_D(raw) >= p->sizep)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": prototype index out of range"; return false; }
         int target = jumpTarget(raw, pc);
-        if (target >= 0) { if (target < 0 || target >= p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": jump target out of range"; return false; } boundaries.insert(target); }
+        bool optionalSkip = (op == LOP_LOADB || op == LOP_FASTCALL || op == LOP_FASTCALL1 ||
+                             op == LOP_FASTCALL2 || op == LOP_FASTCALL2K) && LUAU_INSN_C(raw) == 0;
+        if (isJump(LuauOpcode(op)) && !optionalSkip) {
+            if (target < 0 || target >= p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": jump target out of range"; return false; }
+            jumpTargets.emplace_back(pc, target);
+        }
         if (op == LOP_CAPTURE && LUAU_INSN_B(raw) >= p->maxstacksize && LUAU_INSN_A(raw) != LCT_UPVAL)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": capture register out of range"; return false; }
         auto checkReg = [&](unsigned int reg, const char* field) {
@@ -212,7 +294,38 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
             if (!checkReg(LUAU_INSN_B(raw), "B") || !checkReg(LUAU_INSN_C(raw), "C")) return false;
             break;
         case LOP_GETTABLEKS: case LOP_SETTABLEKS: case LOP_GETTABLEN: case LOP_SETTABLEN:
+        case LOP_NOT: case LOP_MINUS: case LOP_LENGTH:
             if (!checkReg(LUAU_INSN_B(raw), "B")) return false;
+            break;
+        case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
+        case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
+            if (!checkReg(p->code[pc + 1], "AUX")) return false;
+            break;
+        case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+            if (!checkReg(LUAU_INSN_B(raw), "B")) return false;
+            if (op == LOP_FASTCALL2 && !checkReg(p->code[pc + 1] & 0xff, "AUX")) return false;
+            break;
+        case LOP_NAMECALL:
+            if (!checkReg(LUAU_INSN_B(raw), "B") || LUAU_INSN_A(raw) + 1 >= p->maxstacksize)
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": NAMECALL result range out of range"; return false; }
+            break;
+        case LOP_FORNPREP: case LOP_FORNLOOP:
+            if (LUAU_INSN_A(raw) + 2 >= p->maxstacksize)
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": numeric-for register range out of range"; return false; }
+            break;
+        case LOP_FORGPREP: case LOP_FORGPREP_INEXT: case LOP_FORGPREP_NEXT:
+            if (LUAU_INSN_A(raw) + 2 >= p->maxstacksize)
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": generic-for register range out of range"; return false; }
+            break;
+        case LOP_FORGLOOP: {
+            unsigned int variables = p->code[pc + 1];
+            if (variables == 0 || variables > 255 || LUAU_INSN_A(raw) + 2 + variables >= p->maxstacksize)
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": generic-for result range out of range"; return false; }
+            break;
+        }
+        case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT:
+            if (LUAU_INSN_A(raw) + 4 >= p->maxstacksize)
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": specialized generic-for result range out of range"; return false; }
             break;
         default:
             break;
@@ -220,12 +333,11 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         decoded.emplace_back(pc, len);
         pc += len;
     }
-    for (const auto& instruction : decoded)
+    for (const auto& edge : jumpTargets)
     {
-        int target = jumpTarget(p->code[instruction.first], instruction.first);
-        if (target >= 0 && !boundaries.count(target))
+        if (!instructionBoundaries.count(edge.second))
         {
-            error = "function " + std::to_string(functionId) + " offset " + std::to_string(instruction.first) + ": jump target is not an instruction boundary";
+            error = "function " + std::to_string(functionId) + " offset " + std::to_string(edge.first) + ": jump target is not an instruction boundary";
             return false;
         }
     }
@@ -234,16 +346,17 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
     return true;
 }
 
-static void addFunction(const Proto* p, Function& f, int id, int parentId, int protoIndex)
+static void addFunction(const Proto* p, Function& f, int& nextId, int parentId, int protoIndex)
 {
+    const int id = nextId++;
     f.id = id; f.parentId = parentId; f.prototypeIndex = protoIndex;
     f.parameters = p->numparams; f.registers = p->maxstacksize; f.constants = p->sizek; f.upvalues = p->nups; f.lineDefined = p->linedefined;
     f.nameHint = (p->debugname && p->debugname->data && p->debugname->data[0]) ? p->debugname->data : "function_" + std::to_string(id);
     for (int pc = 0; pc < p->sizecode;)
     {
         uint32_t raw = p->code[pc]; LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
-        Instruction i; i.offset = pc; i.opcode = int(op); i.length = opLength(op); i.a = LUAU_INSN_A(raw); i.b = LUAU_INSN_B(raw); i.c = LUAU_INSN_C(raw); i.d = LUAU_INSN_D(raw); i.e = LUAU_INSN_E(raw); i.hasAux = hasAux(op); i.jumpTarget = jumpTarget(raw, pc); i.semanticTag = tag(op);
-        annotateInstruction(i);
+        Instruction i; i.offset = pc; i.opcode = int(op); i.length = opLength(op); i.a = LUAU_INSN_A(raw); i.b = LUAU_INSN_B(raw); i.c = LUAU_INSN_C(raw); i.d = LUAU_INSN_D(raw); i.e = LUAU_INSN_E(raw); i.hasAux = hasAux(op); i.aux = i.hasAux ? p->code[pc + 1] : 0; i.jumpTarget = jumpTarget(raw, pc); i.semanticTag = tag(op);
+        annotateInstruction(i, f.registers);
         if (p->lineinfo && pc < p->sizecode) i.line = luaG_getline(const_cast<Proto*>(p), pc);
         f.instructions.push_back(i); pc += i.length;
     }
@@ -254,9 +367,9 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
     for (size_t index = 0; index < f.instructions.size(); ++index)
     {
         Instruction& instruction = f.instructions[index];
-        if (instruction.semanticTag == "instruction") ++f.unknownInstructionCount;
-        if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers)
-            ++f.registerDefinitionCount[instruction.destinationRegister];
+        if (instruction.semanticTag == "unknown") ++f.unknownInstructionCount;
+        for (int reg : instruction.definitions)
+            if (reg >= 0 && reg < f.registers) ++f.registerDefinitionCount[reg];
         for (int reg : instruction.uses)
         {
             if (reg < 0 || reg >= f.registers) continue;
@@ -267,7 +380,9 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
     }
     std::set<int> starts{0};
     for (const Instruction& i : f.instructions) if (i.jumpTarget >= 0) starts.insert(i.jumpTarget);
-    for (const Instruction& i : f.instructions) if (i.jumpTarget >= 0 && i.offset + i.length < p->sizecode) starts.insert(i.offset + i.length);
+    for (const Instruction& i : f.instructions)
+        if ((i.jumpTarget >= 0 || isReturn(LuauOpcode(i.opcode))) && i.offset + i.length < p->sizecode)
+            starts.insert(i.offset + i.length);
     std::vector<int> sorted(starts.begin(), starts.end());
     std::sort(sorted.begin(), sorted.end());
     for (size_t n = 0; n < sorted.size(); ++n)
@@ -280,6 +395,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
             if (last.jumpTarget >= 0) for (size_t j = 0; j < sorted.size(); ++j) if (sorted[j] == last.jumpTarget) block.successors.push_back(int(j));
             bool conditional = isConditional(LuauOpcode(last.opcode));
             if (conditional && n + 1 < sorted.size()) block.successors.push_back(int(n + 1));
+            else if (last.jumpTarget < 0 && !isReturn(LuauOpcode(last.opcode)) && n + 1 < sorted.size()) block.successors.push_back(int(n + 1));
             std::sort(block.successors.begin(), block.successors.end()); block.successors.erase(std::unique(block.successors.begin(), block.successors.end()), block.successors.end());
         }
         f.basicBlocks.push_back(std::move(block));
@@ -310,8 +426,8 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
             const Instruction& instruction = f.instructions[instructionIndex];
             for (int reg : instruction.uses)
                 if (reg >= 0 && reg < f.registers && !blockDefs[block.id].count(reg)) blockUses[block.id].insert(reg);
-            if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers)
-                blockDefs[block.id].insert(instruction.destinationRegister);
+            for (int reg : instruction.definitions)
+                if (reg >= 0 && reg < f.registers) blockDefs[block.id].insert(reg);
         }
     }
     bool livenessChanged = true;
@@ -336,16 +452,16 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
     }
     for (int block = 0; block < blockCount; ++block)
     {
-        std::set<int> live(f.liveIn[block].begin(), f.liveIn[block].end());
+        std::set<int> live(f.liveOut[block].begin(), f.liveOut[block].end());
         int peak = int(live.size());
-        for (int instructionIndex : f.basicBlocks[block].instructions)
+        for (auto it = f.basicBlocks[block].instructions.rbegin(); it != f.basicBlocks[block].instructions.rend(); ++it)
         {
-            const Instruction& instruction = f.instructions[instructionIndex];
-            if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers) live.insert(instruction.destinationRegister);
+            const Instruction& instruction = f.instructions[*it];
+            for (int reg : instruction.definitions) if (reg >= 0 && reg < f.registers) live.erase(reg);
             for (int reg : instruction.uses) if (reg >= 0 && reg < f.registers) live.insert(reg);
             peak = std::max(peak, int(live.size()));
         }
-        f.blockLiveRegisterCount[block] = std::max(peak, int(f.liveOut[block].size()));
+        f.blockLiveRegisterCount[block] = peak;
     }
     // Medal's restructurer relies on dominators and natural-loop headers.  Keep
     // the same useful CFG facts in the neutral ByteVeil IR so future AST passes
@@ -364,6 +480,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
             for (int successor : f.basicBlocks[block].successors) markReachable(successor);
         };
         markReachable(0);
+        for (int block = 0; block < blockCount; ++block) f.basicBlocks[block].reachable = reachable[block] != 0;
 
         std::vector<std::set<int>> dominators(blockCount);
         for (int block = 0; block < blockCount; ++block)
@@ -430,31 +547,36 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
         // them from opcode mutations or serialized edges.
         for (size_t n = 0; n < f.backEdges.size(); ++n)
         {
-            Loop loop; loop.header = f.backEdges[n].second; loop.backEdges.push_back(f.backEdges[n]);
-            if (n < f.naturalLoops.size()) loop.blocks = f.naturalLoops[n];
+            const auto edge = f.backEdges[n];
+            auto found = std::find_if(f.loops.begin(), f.loops.end(), [&](const Loop& loop) { return loop.header == edge.second; });
+            if (found == f.loops.end()) { f.loops.push_back(Loop{}); found = std::prev(f.loops.end()); found->header = edge.second; }
+            found->backEdges.push_back(edge);
+            found->latches.push_back(edge.first);
+            if (n < f.naturalLoops.size()) found->blocks.insert(found->blocks.end(), f.naturalLoops[n].begin(), f.naturalLoops[n].end());
+        }
+        for (Loop& loop : f.loops)
+        {
+            std::sort(loop.blocks.begin(), loop.blocks.end());
+            loop.blocks.erase(std::unique(loop.blocks.begin(), loop.blocks.end()), loop.blocks.end());
+            std::sort(loop.latches.begin(), loop.latches.end());
+            loop.latches.erase(std::unique(loop.latches.begin(), loop.latches.end()), loop.latches.end());
             const std::set<int> members(loop.blocks.begin(), loop.blocks.end());
+            std::vector<int> outsidePredecessors;
             for (int predecessor : predecessors[loop.header])
-                if (!members.count(predecessor))
-                {
-                    if (loop.preheader < 0) loop.preheader = predecessor;
-                    else loop.preheader = -1; // multiple incoming entries: no unique preheader
-                }
-            loop.latches.push_back(f.backEdges[n].first);
+                if (!members.count(predecessor)) outsidePredecessors.push_back(predecessor);
+            loop.preheader = outsidePredecessors.size() == 1 ? outsidePredecessors.front() : -1;
             std::set<int> exits;
             for (int member : loop.blocks)
                 for (int successor : f.basicBlocks[member].successors)
                     if (!members.count(successor)) exits.insert(successor);
             loop.exits.assign(exits.begin(), exits.end());
-            f.loops.push_back(std::move(loop));
         }
 
         // Iterative post-dominators over the finite CFG. Exit blocks
         // post-dominate themselves; unreachable blocks remain empty.
         f.postDominators.assign(blockCount, {});
-        std::set<int> allBlocks;
-        for (int block = 0; block < blockCount; ++block) allBlocks.insert(block);
         for (int block = 0; block < blockCount; ++block)
-            if (reachable[block]) f.postDominators[block] = f.basicBlocks[block].successors.empty() ? std::set<int>{block} : allBlocks;
+            if (reachable[block]) f.postDominators[block] = f.basicBlocks[block].successors.empty() ? std::set<int>{block} : allReachable;
         bool postChanged = true;
         while (postChanged)
         {
@@ -462,7 +584,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
             for (int block = blockCount - 1; block >= 0; --block)
             {
                 if (!reachable[block] || f.basicBlocks[block].successors.empty()) continue;
-                std::set<int> next = allBlocks;
+                std::set<int> next = allReachable;
                 for (int successor : f.basicBlocks[block].successors)
                 {
                     std::set<int> intersection;
@@ -504,16 +626,48 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
             }
         };
         for (int block = 0; block < blockCount; ++block) if (reachable[block] && index[block] < 0) strongConnect(block);
-        Scope rootScope; rootScope.id = 0; rootScope.entryBlock = 0; rootScope.exitBlock = blockCount - 1;
+        Scope rootScope; rootScope.id = 0; rootScope.entryBlock = 0;
+        std::vector<int> functionExits;
+        for (const BasicBlock& block : f.basicBlocks) if (block.reachable && block.successors.empty()) functionExits.push_back(block.id);
+        rootScope.exitBlock = functionExits.size() == 1 ? functionExits.front() : -1;
         for (int reg = 0; reg < f.registers; ++reg) rootScope.registers.push_back(reg);
         f.scopes.push_back(std::move(rootScope));
-        for (size_t n = 0; n < f.loops.size(); ++n) { Scope scope; scope.id = int(n + 1); scope.parent = 0; scope.entryBlock = f.loops[n].header; scope.registers.push_back(f.loops[n].header); f.scopes.push_back(std::move(scope)); }
+        for (size_t n = 0; n < f.loops.size(); ++n)
+        {
+            Scope scope; scope.id = int(n + 1); scope.parent = 0; scope.entryBlock = f.loops[n].header;
+            scope.exitBlock = f.loops[n].exits.size() == 1 ? f.loops[n].exits.front() : -1;
+            size_t parentSize = std::numeric_limits<size_t>::max();
+            const std::set<int> members(f.loops[n].blocks.begin(), f.loops[n].blocks.end());
+            for (size_t candidate = 0; candidate < f.loops.size(); ++candidate)
+                if (candidate != n && f.loops[candidate].blocks.size() > members.size() && f.loops[candidate].blocks.size() < parentSize &&
+                    std::all_of(members.begin(), members.end(), [&](int block) { return std::find(f.loops[candidate].blocks.begin(), f.loops[candidate].blocks.end(), block) != f.loops[candidate].blocks.end(); }))
+                { scope.parent = int(candidate + 1); parentSize = f.loops[candidate].blocks.size(); }
+            std::set<int> registers(f.liveIn[scope.entryBlock].begin(), f.liveIn[scope.entryBlock].end());
+            for (int block : f.loops[n].blocks)
+                for (int instructionIndex : f.basicBlocks[block].instructions)
+                {
+                    const Instruction& instruction = f.instructions[instructionIndex];
+                    registers.insert(instruction.uses.begin(), instruction.uses.end());
+                    registers.insert(instruction.definitions.begin(), instruction.definitions.end());
+                }
+            scope.registers.assign(registers.begin(), registers.end());
+            f.scopes.push_back(std::move(scope));
+        }
     }
     // Conservative register SSA: definitions are instruction-index versions;
     // joins receive deterministic phi versions when incoming definitions differ.
     f.instructionDefVersions.assign(f.instructions.size(), -1);
     if (blockCount > 0 && f.registers > 0)
     {
+        for (size_t instructionIndex = 0; instructionIndex < f.instructions.size(); ++instructionIndex)
+        {
+            Instruction& instruction = f.instructions[instructionIndex];
+            instruction.definitionVersions.clear();
+            for (int reg : instruction.definitions)
+                instruction.definitionVersions.push_back(1 + int(instructionIndex) * f.registers + reg);
+            if (!instruction.definitionVersions.empty())
+                f.instructionDefVersions[instructionIndex] = instruction.definitionVersions.front();
+        }
         std::vector<std::set<int>> predecessors(blockCount);
         for (const BasicBlock& block : f.basicBlocks)
             for (int successor : block.successors)
@@ -542,7 +696,8 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                         }
                         if (differs)
                         {
-                            int phi = 1000000 + block * 256 + reg;
+                            int phiBase = 1 + (int(f.instructions.size()) + 1) * f.registers;
+                            int phi = phiBase + block * f.registers + reg;
                             phiVersions[block][reg] = phi; next[reg] = phi;
                         }
                         else next[reg] = value;
@@ -553,11 +708,11 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                 for (int instructionIndex : f.basicBlocks[block].instructions)
                 {
                     const Instruction& instruction = f.instructions[instructionIndex];
-                    if (writtenRegister(instruction.opcode) >= 0 && instruction.a >= 0 && instruction.a < f.registers)
+                    for (size_t definition = 0; definition < instruction.definitions.size(); ++definition)
                     {
-                        int version = instructionIndex + 1;
-                        f.instructionDefVersions[instructionIndex] = version;
-                        out[instruction.a] = version;
+                        int reg = instruction.definitions[definition];
+                        if (reg >= 0 && reg < f.registers)
+                            out[reg] = instruction.definitionVersions[definition];
                     }
                 }
                 if (out != outgoing[block]) { outgoing[block] = std::move(out); changed = true; }
@@ -576,8 +731,7 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                     f.phiNodes.push_back(std::move(phi));
                 }
     }
-    int childId = id + 1;
-    for (int c = 0; c < p->sizep; ++c) { Function child; addFunction(p->p[c], child, childId, id, c); childId += 1; f.children.push_back(std::move(child)); }
+    for (int c = 0; c < p->sizep; ++c) { Function child; addFunction(p->p[c], child, nextId, id, c); f.children.push_back(std::move(child)); }
 }
 
 static void jsonFn(std::ostringstream& o, const Function& f)
@@ -587,13 +741,17 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     {
         if (n) o << ','; const auto& i = f.instructions[n];
         o << "{\"offset\":" << i.offset << ",\"opcode\":" << i.opcode << ",\"opcode_name\":\"" << opcodeName(i.opcode)
-          << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e
+          << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e << ",\"aux\":" << i.aux
           << ",\"line\":" << i.line << ",\"jump_target\":" << i.jumpTarget << ",\"target_block\":" << i.targetBlock
           << ",\"destination_register\":" << i.destinationRegister << ",\"constant_index\":" << i.constantIndex
           << ",\"source_block\":" << i.sourceBlock << ",\"has_aux\":" << (i.hasAux ? "true" : "false")
           << ",\"is_auxiliary\":" << (i.isAuxiliary ? "true" : "false") << ",\"is_pure\":" << (i.isPure ? "true" : "false")
           << ",\"has_side_effects\":" << (i.hasSideEffects ? "true" : "false") << ",\"semantic_tag\":\"" << i.semanticTag << "\",\"uses\":[";
         for (size_t k = 0; k < i.uses.size(); ++k) { if (k) o << ','; o << i.uses[k]; }
+        o << "],\"definitions\":[";
+        for (size_t k = 0; k < i.definitions.size(); ++k) { if (k) o << ','; o << i.definitions[k]; }
+        o << "],\"definition_versions\":[";
+        for (size_t k = 0; k < i.definitionVersions.size(); ++k) { if (k) o << ','; o << i.definitionVersions[k]; }
         o << "]}";
     }
     o << "],\"basic_blocks\":[";
@@ -606,7 +764,7 @@ static void jsonFn(std::ostringstream& o, const Function& f)
         o << "],\"predecessors\":["; for (size_t k = 0; k < b.predecessors.size(); ++k) { if (k) o << ','; o << b.predecessors[k]; }
         o << "],\"live_in\":["; for (size_t k = 0; k < f.liveIn[b.id].size(); ++k) { if (k) o << ','; o << f.liveIn[b.id][k]; }
         o << "],\"live_out\":["; for (size_t k = 0; k < f.liveOut[b.id].size(); ++k) { if (k) o << ','; o << f.liveOut[b.id][k]; }
-        o << "],\"live_register_count\":" << f.blockLiveRegisterCount[b.id] << "}";
+        o << "],\"live_register_count\":" << f.blockLiveRegisterCount[b.id] << ",\"reachable\":" << (b.reachable ? "true" : "false") << "}";
     }
     o << "],\"cfg_analysis\":{\"immediate_dominators\":[";
     for (size_t n = 0; n < f.immediateDominators.size(); ++n) { if (n) o << ','; o << f.immediateDominators[n]; }
@@ -664,11 +822,32 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
     {
         if (block.id < 0 || block.id >= blocks) { error = "IR contains an invalid basic-block id"; return false; }
         for (int target : block.successors)
+        {
             if (target < 0 || target >= blocks) { error = "IR contains an out-of-range CFG successor"; return false; }
+            if (std::find(f.basicBlocks[target].predecessors.begin(), f.basicBlocks[target].predecessors.end(), block.id) == f.basicBlocks[target].predecessors.end())
+            { error = "IR CFG successor/predecessor mismatch"; return false; }
+        }
         for (int predecessor : block.predecessors)
+        {
             if (predecessor < 0 || predecessor >= blocks) { error = "IR contains an out-of-range CFG predecessor"; return false; }
+            if (std::find(f.basicBlocks[predecessor].successors.begin(), f.basicBlocks[predecessor].successors.end(), block.id) == f.basicBlocks[predecessor].successors.end())
+            { error = "IR CFG predecessor/successor mismatch"; return false; }
+        }
         for (int instruction : block.instructions)
+        {
             if (instruction < 0 || instruction >= int(f.instructions.size())) { error = "IR block references an invalid instruction"; return false; }
+            if (f.instructions[instruction].sourceBlock != block.id) { error = "IR instruction has the wrong source block"; return false; }
+        }
+    }
+    for (const Instruction& instruction : f.instructions)
+    {
+        if (instruction.definitions.size() != instruction.definitionVersions.size()) { error = "IR instruction definition/version mismatch"; return false; }
+        for (int reg : instruction.uses)
+            if (reg < 0 || reg >= f.registers) { error = "IR instruction contains an invalid register use"; return false; }
+        for (int reg : instruction.definitions)
+            if (reg < 0 || reg >= f.registers) { error = "IR instruction contains an invalid register definition"; return false; }
+        if (!instruction.definitions.empty() && instruction.destinationRegister != instruction.definitions.front())
+        { error = "IR primary destination does not match definitions"; return false; }
     }
     for (int idom : f.immediateDominators)
         if (idom < -1 || idom >= blocks) { error = "IR contains an invalid immediate dominator"; return false; }
@@ -692,17 +871,27 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
             if (predecessor < 0 || predecessor >= blocks) { error = "IR phi node contains an invalid incoming block"; return false; }
     }
     for (const Function& child : f.children)
+    {
+        if (child.parentId != f.id) { error = "IR child has the wrong parent id"; return false; }
         if (!validateFunctionAnalysis(child, error)) return false;
+    }
     return true;
 }
 bool validateAnalysis(const Module& module, std::string& error)
 {
-    return validateFunctionAnalysis(module.root, error);
+    if (!validateFunctionAnalysis(module.root, error)) return false;
+    std::set<int> ids;
+    std::function<bool(const Function&)> collect = [&](const Function& function) {
+        if (!ids.insert(function.id).second) { error = "IR contains duplicate function ids"; return false; }
+        for (const Function& child : function.children) if (!collect(child)) return false;
+        return true;
+    };
+    return collect(module.root);
 }
 bool buildModule(const Proto* root, Module& module, std::string& error)
 {
     if (!validateProto(root, error)) return false;
-    module = Module{}; module.root = Function{}; addFunction(root, module.root, 0, -1, 0);
+    module = Module{}; module.root = Function{}; int nextId = 0; addFunction(root, module.root, nextId, -1, 0);
     return validateAnalysis(module, error);
 }
 
@@ -713,7 +902,7 @@ std::string toJson(const Module& m)
 
 std::string disassemble(const Module& m)
 {
-    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]"; if (b.id < int(f.immediateDominators.size())) o << " idom=block_" << f.immediateDominators[b.id]; for (const PhiNode& phi : f.phiNodes) if (phi.block == b.id) o << " phi=r" << phi.reg << ":v" << phi.version; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX"; o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
+    std::ostringstream o; std::function<void(const Function&)> go = [&](const Function& f) { o << "function " << f.id << " \"" << f.nameHint << "\" (parent=" << f.parentId << ")\n"; for (const auto& b : f.basicBlocks) { o << "  block_" << b.id << " [" << b.start << ".." << b.end << "]" << (b.reachable ? "" : " unreachable"); if (b.id < int(f.immediateDominators.size())) o << " idom=block_" << f.immediateDominators[b.id]; for (const PhiNode& phi : f.phiNodes) if (phi.block == b.id) o << " phi=r" << phi.reg << ":v" << phi.version; if (!b.successors.empty()) { o << " ->"; for (int s : b.successors) o << " block_" << s; } o << ":\n"; for (int k : b.instructions) { const auto& i = f.instructions[k]; o << "    @" << i.offset << " (0x" << std::hex << i.offset << std::dec << ") " << opcodeName(i.opcode) << " len=" << i.length << " A=" << i.a << " B=" << i.b << " C=" << i.c << " D=" << i.d << " E=" << i.e; if (i.jumpTarget >= 0) o << " -> " << i.jumpTarget; if (i.line) o << " line=" << i.line; if (i.hasAux) o << " AUX=" << i.aux; if (!i.definitions.empty()) { o << " defs="; for (size_t n = 0; n < i.definitions.size(); ++n) { if (n) o << ','; o << 'r' << i.definitions[n] << ":v" << i.definitionVersions[n]; } } o << "\n"; } } for (const auto& c : f.children) go(c); }; go(m.root); return o.str();
 }
 
 std::string cfgDot(const Module& m)
