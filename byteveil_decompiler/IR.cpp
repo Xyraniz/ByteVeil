@@ -1,6 +1,7 @@
 #include "IR.h"
 #include "Restructure.h"
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <iomanip>
 #include <iterator>
@@ -84,13 +85,141 @@ static int jumpTarget(const uint32_t raw, int pc)
 
 static std::string esc(const std::string& s)
 {
-    std::string r;
-    for (char c : s)
+    std::ostringstream out;
+    auto hexByte = [&](unsigned char byte) {
+        static const char digits[] = "0123456789abcdef";
+        out << "\\u00" << digits[byte >> 4] << digits[byte & 15];
+    };
+    for (size_t index = 0; index < s.size();)
     {
-        if (c == '\\' || c == '"') r += '\\';
-        if (c == '\n') r += "\\n"; else if (c == '\r') r += "\\r"; else r += c;
+        const unsigned char c = static_cast<unsigned char>(s[index]);
+        if (c == '"') { out << "\\\""; ++index; continue; }
+        if (c == '\\') { out << "\\\\"; ++index; continue; }
+        if (c == '\b') { out << "\\b"; ++index; continue; }
+        if (c == '\f') { out << "\\f"; ++index; continue; }
+        if (c == '\n') { out << "\\n"; ++index; continue; }
+        if (c == '\r') { out << "\\r"; ++index; continue; }
+        if (c == '\t') { out << "\\t"; ++index; continue; }
+        if (c < 0x20) { hexByte(c); ++index; continue; }
+        if (c < 0x80) { out << char(c); ++index; continue; }
+
+        size_t length = c >= 0xc2 && c <= 0xdf ? 2 : c >= 0xe0 && c <= 0xef ? 3 : c >= 0xf0 && c <= 0xf4 ? 4 : 0;
+        bool valid = length != 0 && index + length <= s.size();
+        for (size_t offset = 1; valid && offset < length; ++offset)
+            valid = (static_cast<unsigned char>(s[index + offset]) & 0xc0) == 0x80;
+        if (valid && length == 3)
+        {
+            const unsigned char second = static_cast<unsigned char>(s[index + 1]);
+            valid = !((c == 0xe0 && second < 0xa0) || (c == 0xed && second >= 0xa0));
+        }
+        if (valid && length == 4)
+        {
+            const unsigned char second = static_cast<unsigned char>(s[index + 1]);
+            valid = !((c == 0xf0 && second < 0x90) || (c == 0xf4 && second >= 0x90));
+        }
+        if (valid)
+        {
+            out.write(s.data() + index, std::streamsize(length));
+            index += length;
+        }
+        else
+        {
+            hexByte(c);
+            ++index;
+        }
     }
-    return r;
+    return out.str();
+}
+
+static std::string text(const TString* value)
+{
+    return value ? std::string(value->data, value->len) : std::string{};
+}
+
+static std::string bytesHex(const char* data, size_t size)
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(size * 2);
+    for (size_t index = 0; index < size; ++index)
+    {
+        const unsigned char byte = static_cast<unsigned char>(data[index]);
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 15]);
+    }
+    return result;
+}
+
+static std::string numberText(double value)
+{
+    if (std::isnan(value)) return "nan";
+    if (std::isinf(value)) return value < 0 ? "-inf" : "inf";
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+    return out.str();
+}
+
+static ConstantInfo describeConstant(const Proto* proto, int index)
+{
+    ConstantInfo info;
+    info.index = index;
+    if (!proto || index < 0 || index >= proto->sizek)
+    {
+        info.type = "invalid";
+        return info;
+    }
+
+    const TValue& value = proto->k[index];
+    switch (value.tt)
+    {
+    case LUA_TNIL:
+        info.type = "nil";
+        info.value = "nil";
+        break;
+    case LUA_TBOOLEAN:
+        info.type = "boolean";
+        info.value = value.value.b ? "true" : "false";
+        break;
+    case LUA_TNUMBER:
+        info.type = "number";
+        info.value = numberText(value.value.n);
+        break;
+    case LUA_TVECTOR: {
+        info.type = "vector";
+        std::ostringstream vector;
+        vector << std::setprecision(std::numeric_limits<float>::max_digits10)
+               << value.value.v[0] << ',' << value.value.v[1] << ',' << value.value.v[2];
+#if LUA_VECTOR_SIZE == 4
+        vector << ',' << value.value.v[3];
+#endif
+        info.value = vector.str();
+        break;
+    }
+    case LUA_TSTRING:
+        info.type = "string";
+        if (value.value.gc)
+        {
+            info.value = text(&value.value.gc->ts);
+            info.stringBytesHex = bytesHex(value.value.gc->ts.data, value.value.gc->ts.len);
+        }
+        break;
+    case LUA_TTABLE:
+        info.type = "table-template";
+        info.value = "table";
+        break;
+    case LUA_TFUNCTION:
+        info.type = "function";
+        info.value = "closure";
+        if (value.value.gc && !value.value.gc->cl.isC && value.value.gc->cl.l.p)
+            for (int child = 0; child < proto->sizep; ++child)
+                if (proto->p[child] == value.value.gc->cl.l.p) { info.childPrototype = child; break; }
+        break;
+    case LUA_TLIGHTUSERDATA: info.type = "lightuserdata"; info.value = "opaque"; break;
+    case LUA_TUSERDATA: info.type = "userdata"; info.value = "opaque"; break;
+    case LUA_TTHREAD: info.type = "thread"; info.value = "opaque"; break;
+    default: info.type = "unknown-" + std::to_string(value.tt); break;
+    }
+    return info;
 }
 
 static std::string tag(LuauOpcode op)
@@ -235,7 +364,7 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
     if (depth > maxDepth) { error = "function " + std::to_string(functionId) + ": prototype nesting exceeds limit"; return false; }
     if (p->sizecode < 0 || p->sizecode > maxInstructions || p->sizep < 0 || p->sizep > 100000 || p->sizek < 0 || p->sizek > 1000000)
     { error = "function " + std::to_string(functionId) + ": prototype size exceeds safe limits"; return false; }
-    if (p->maxstacksize == 0 || p->maxstacksize > 255 || p->numparams > p->maxstacksize || p->nups > 255)
+    if (p->maxstacksize == 0 || p->numparams > p->maxstacksize)
     { error = "function " + std::to_string(functionId) + ": invalid register or parameter metadata"; return false; }
     if (!p->code && p->sizecode) { error = "function " + std::to_string(functionId) + " offset 0: missing instruction storage"; return false; }
     if (!p->p && p->sizep) { error = "function " + std::to_string(functionId) + ": missing child prototype storage"; return false; }
@@ -261,7 +390,7 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         bool directConstant = op == LOP_LOADK || op == LOP_DUPCLOSURE || op == LOP_DUPTABLE || op == LOP_GETIMPORT;
         bool cConstant = op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
                          op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK;
-        if ((directConstant && LUAU_INSN_D(raw) >= p->sizek) || (cConstant && LUAU_INSN_C(raw) >= p->sizek))
+        if ((directConstant && int(LUAU_INSN_D(raw)) >= p->sizek) || (cConstant && int(LUAU_INSN_C(raw)) >= p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": constant index out of range"; return false; }
         bool auxConstant = op == LOP_GETGLOBAL || op == LOP_SETGLOBAL || op == LOP_GETTABLEKS ||
                            op == LOP_SETTABLEKS || op == LOP_NAMECALL || op == LOP_LOADKX ||
@@ -351,7 +480,20 @@ static void addFunction(const Proto* p, Function& f, int& nextId, int parentId, 
     const int id = nextId++;
     f.id = id; f.parentId = parentId; f.prototypeIndex = protoIndex;
     f.parameters = p->numparams; f.registers = p->maxstacksize; f.constants = p->sizek; f.upvalues = p->nups; f.lineDefined = p->linedefined;
-    f.nameHint = (p->debugname && p->debugname->data && p->debugname->data[0]) ? p->debugname->data : "function_" + std::to_string(id);
+    f.nameHint = p->debugname && p->debugname->len ? text(p->debugname) : "function_" + std::to_string(id);
+    for (int constant = 0; constant < p->sizek; ++constant)
+        f.constantTable.push_back(describeConstant(p, constant));
+    for (int local = 0; local < p->sizelocvars; ++local)
+    {
+        LocalInfo info;
+        info.name = text(p->locvars[local].varname);
+        info.registerIndex = p->locvars[local].reg;
+        info.start = p->locvars[local].startpc;
+        info.end = p->locvars[local].endpc;
+        f.debugLocals.push_back(std::move(info));
+    }
+    for (int upvalue = 0; upvalue < p->nups; ++upvalue)
+        f.upvalueNames.push_back(p->upvalues && upvalue < p->sizeupvalues ? text(p->upvalues[upvalue]) : std::string{});
     for (int pc = 0; pc < p->sizecode;)
     {
         uint32_t raw = p->code[pc]; LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
@@ -736,10 +878,28 @@ static void addFunction(const Proto* p, Function& f, int& nextId, int parentId, 
 
 static void jsonFn(std::ostringstream& o, const Function& f)
 {
-    o << "{\"id\":" << f.id << ",\"parent_id\":" << f.parentId << ",\"prototype_index\":" << f.prototypeIndex << ",\"name_hint\":\"" << esc(f.nameHint) << "\",\"line_defined\":" << f.lineDefined << ",\"parameters\":" << f.parameters << ",\"registers\":" << f.registers << ",\"constants\":" << f.constants << ",\"upvalues\":" << f.upvalues << ",\"instructions\":[";
+    o << "{\"id\":" << f.id << ",\"parent_id\":" << f.parentId << ",\"prototype_index\":" << f.prototypeIndex << ",\"name_hint\":\"" << esc(f.nameHint) << "\",\"line_defined\":" << f.lineDefined << ",\"parameters\":" << f.parameters << ",\"registers\":" << f.registers << ",\"constants\":" << f.constants << ",\"upvalues\":" << f.upvalues << ",\"constant_table\":[";
+    for (size_t n = 0; n < f.constantTable.size(); ++n)
+    {
+        if (n) o << ',';
+        const ConstantInfo& constant = f.constantTable[n];
+        o << "{\"index\":" << constant.index << ",\"type\":\"" << esc(constant.type) << "\",\"value\":\"" << esc(constant.value)
+          << "\",\"string_bytes_hex\":\"" << constant.stringBytesHex << "\",\"child_prototype\":" << constant.childPrototype << '}';
+    }
+    o << "],\"debug_locals\":[";
+    for (size_t n = 0; n < f.debugLocals.size(); ++n)
+    {
+        if (n) o << ',';
+        const LocalInfo& local = f.debugLocals[n];
+        o << "{\"name\":\"" << esc(local.name) << "\",\"register\":" << local.registerIndex << ",\"start\":" << local.start << ",\"end\":" << local.end << '}';
+    }
+    o << "],\"upvalue_names\":[";
+    for (size_t n = 0; n < f.upvalueNames.size(); ++n) { if (n) o << ','; o << '"' << esc(f.upvalueNames[n]) << '"'; }
+    o << "],\"instructions\":[";
     for (size_t n = 0; n < f.instructions.size(); ++n)
     {
-        if (n) o << ','; const auto& i = f.instructions[n];
+        if (n) o << ',';
+        const auto& i = f.instructions[n];
         o << "{\"offset\":" << i.offset << ",\"opcode\":" << i.opcode << ",\"opcode_name\":\"" << opcodeName(i.opcode)
           << "\",\"length\":" << i.length << ",\"a\":" << i.a << ",\"b\":" << i.b << ",\"c\":" << i.c << ",\"d\":" << i.d << ",\"e\":" << i.e << ",\"aux\":" << i.aux
           << ",\"line\":" << i.line << ",\"jump_target\":" << i.jumpTarget << ",\"target_block\":" << i.targetBlock
@@ -757,7 +917,8 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     o << "],\"basic_blocks\":[";
     for (size_t n = 0; n < f.basicBlocks.size(); ++n)
     {
-        if (n) o << ','; const auto& b = f.basicBlocks[n];
+        if (n) o << ',';
+        const auto& b = f.basicBlocks[n];
         o << "{\"id\":" << b.id << ",\"start\":" << b.start << ",\"end\":" << b.end << ",\"instructions\":[";
         for (size_t k = 0; k < b.instructions.size(); ++k) { if (k) o << ','; o << b.instructions[k]; }
         o << "],\"successors\":["; for (size_t k = 0; k < b.successors.size(); ++k) { if (k) o << ','; o << b.successors[k]; }
@@ -806,6 +967,13 @@ bool validateProto(const Proto* root, std::string& error, int maxDepth, int maxI
 static bool validateFunctionAnalysis(const Function& f, std::string& error)
 {
     const int blocks = int(f.basicBlocks.size());
+    if (int(f.constantTable.size()) != f.constants) { error = "IR constant table does not match constant count"; return false; }
+    if (int(f.upvalueNames.size()) != f.upvalues) { error = "IR upvalue names do not match upvalue count"; return false; }
+    for (size_t index = 0; index < f.constantTable.size(); ++index)
+        if (f.constantTable[index].index != int(index)) { error = "IR constant table index mismatch"; return false; }
+    for (const LocalInfo& local : f.debugLocals)
+        if (local.registerIndex < 0 || local.registerIndex >= f.registers || local.start < 0 || local.end < local.start)
+        { error = "IR contains invalid debug-local metadata"; return false; }
     if (blocks == 0) { error = "IR function has no basic blocks"; return false; }
     if (int(f.immediateDominators.size()) != blocks) { error = "IR dominator vector does not match block count"; return false; }
     if (int(f.immediatePostDominators.size()) != blocks) { error = "IR post-dominator vector does not match block count"; return false; }
@@ -891,7 +1059,9 @@ bool validateAnalysis(const Module& module, std::string& error)
 bool buildModule(const Proto* root, Module& module, std::string& error)
 {
     if (!validateProto(root, error)) return false;
-    module = Module{}; module.root = Function{}; int nextId = 0; addFunction(root, module.root, nextId, -1, 0);
+    module = Module{};
+    module.source = root && root->source ? text(root->source) : std::string{};
+    module.root = Function{}; int nextId = 0; addFunction(root, module.root, nextId, -1, 0);
     return validateAnalysis(module, error);
 }
 
@@ -911,8 +1081,39 @@ std::string cfgDot(const Module& m)
     std::ostringstream o; o << "digraph byteveil_cfg {\n"; for (const auto& b : m.root.basicBlocks) { o << "  b" << b.id << " [label=\"block_" << b.id << "\\n" << b.start << ".." << b.end; if (b.id < int(m.root.immediateDominators.size())) o << "\\nidom=" << m.root.immediateDominators[b.id]; if (loopHeaders.count(b.id)) o << "\\nloop-header"; o << "\"];\n"; for (int s : b.successors) o << "  b" << b.id << " -> b" << s << ";\n"; } o << "}\n"; return o.str();
 }
 
-std::string constantsText(const Proto* p) { std::ostringstream o; o << "function 0 constants: " << (p ? p->sizek : 0) << "\n"; return o.str(); }
-std::string prototypesText(const Proto* p) { std::ostringstream o; o << "function 0 prototypes: " << (p ? p->sizep : 0) << "\n"; return o.str(); }
+std::string constantsText(const Module& module)
+{
+    std::ostringstream out;
+    std::function<void(const Function&)> render = [&](const Function& function) {
+        out << "function " << function.id << " \"" << esc(function.nameHint) << "\" constants: " << function.constants << '\n';
+        for (const ConstantInfo& constant : function.constantTable)
+        {
+            out << "  [" << constant.index << "] " << constant.type;
+            if (!constant.value.empty()) out << " value=\"" << esc(constant.value) << '"';
+            if (!constant.stringBytesHex.empty()) out << " bytes=" << constant.stringBytesHex;
+            if (constant.childPrototype >= 0) out << " child_prototype=" << constant.childPrototype;
+            out << '\n';
+        }
+        for (const Function& child : function.children) render(child);
+    };
+    render(module.root);
+    return out.str();
+}
+
+std::string prototypesText(const Module& module)
+{
+    std::ostringstream out;
+    std::function<void(const Function&, int)> render = [&](const Function& function, int depth) {
+        out << std::string(size_t(depth * 2), ' ') << "function " << function.id << " \"" << esc(function.nameHint) << "\""
+            << " parent=" << function.parentId << " prototype_index=" << function.prototypeIndex
+            << " line=" << function.lineDefined << " params=" << function.parameters << " registers=" << function.registers
+            << " upvalues=" << function.upvalues << " constants=" << function.constants
+            << " instructions=" << function.instructions.size() << " children=" << function.children.size() << '\n';
+        for (const Function& child : function.children) render(child, depth + 1);
+    };
+    render(module.root, 0);
+    return out.str();
+}
 }
 
 namespace Luau::Decompiler {
@@ -925,8 +1126,8 @@ std::string inspectBytecode(lua_State* L, std::string& bytecode, const std::stri
     if (mode == "disassemble") return IR::disassemble(m);
     if (mode == "cfg") return IR::cfgDot(m);
     if (mode == "structured") return Restructure::render(m);
-    if (mode == "constants") return IR::constantsText(c->l.p);
-    if (mode == "prototypes") return IR::prototypesText(c->l.p);
+    if (mode == "constants") return IR::constantsText(m);
+    if (mode == "prototypes") return IR::prototypesText(m);
     error = "unknown inspection mode: " + mode; return {};
 }
 }

@@ -52,6 +52,46 @@ def check_phis(fn):
         check_phis(child)
 check_phis(x["root_function"])
 PY
+cat >"$TMP/constants.luau" <<'LUA'
+local payload = "quote:\34 newline:\10 nul:\0 ctrl:\31 utf8:é raw:\255"
+local function child(named)
+    local debugLocal = payload .. named
+    return debugLocal
+end
+return child("ok")
+LUA
+"$BIN" --format json "$TMP/constants.luau" >"$TMP/constants.json"
+"$BIN" --dump-constants "$TMP/constants.luau" >"$TMP/constants.txt"
+"$BIN" --dump-prototypes "$TMP/constants.luau" >"$TMP/prototypes.txt"
+"$BYTEVEIL_PYTHON" - "$TMP/constants.json" <<'PY'
+import json, sys
+module = json.load(open(sys.argv[1], encoding="utf-8"))
+root = module["root_function"]
+assert len(root["constant_table"]) == root["constants"]
+assert len(root["upvalue_names"]) == root["upvalues"]
+assert root["children"] and root["children"][0]["parent_id"] == root["id"]
+
+functions = []
+def collect(fn):
+    functions.append(fn)
+    for child in fn["children"]:
+        collect(child)
+collect(root)
+strings = [constant for fn in functions for constant in fn["constant_table"] if constant["type"] == "string"]
+payload = next(constant for constant in strings if constant["value"].startswith('quote:"'))
+expected = b'quote:" newline:\n nul:\0 ctrl:\x1f utf8:\xc3\xa9 raw:\xff'
+assert payload["string_bytes_hex"] == expected.hex()
+for fn in functions:
+    assert len(fn["constant_table"]) == fn["constants"]
+    for local in fn["debug_locals"]:
+        assert 0 <= local["register"] < fn["registers"]
+        assert 0 <= local["start"] <= local["end"]
+PY
+grep -q '^function 0 .* constants:' "$TMP/constants.txt"
+grep -q 'string value=.*quote:' "$TMP/constants.txt"
+grep -q 'bytes=' "$TMP/constants.txt"
+grep -q '^  function 1 ' "$TMP/prototypes.txt"
+grep -q 'parent=0 prototype_index=0' "$TMP/prototypes.txt"
 "$BIN" --disassemble "$TMP/sample.luau" >"$TMP/disassembly"
 grep -q '^function 0' "$TMP/disassembly"
 grep -q 'LOAD' "$TMP/disassembly"

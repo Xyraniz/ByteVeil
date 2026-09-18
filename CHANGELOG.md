@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased - Exact constant and prototype metadata
+
+### Added
+
+- JSON functions now expose a typed `constant_table`, exact `string_bytes_hex`, debug-local register/lifetime records, and upvalue names recursively for every prototype.
+- `--dump-constants` prints every typed value in every nested function instead of returning only the root count.
+- `--dump-prototypes` prints the complete indented function tree with stable IDs, parent/prototype indices, source line, parameters, registers, upvalues, constants, instructions, and child counts.
+
+### Corrected
+
+- JSON string encoding now handles every control character, preserves valid UTF-8, and escapes invalid byte sequences without producing malformed JSON. Exact Luau string bytes remain recoverable from the hexadecimal field.
+- Function and source names are constructed with their explicit Luau string lengths instead of assuming null termination.
+
+### Validation
+
+- Added constant/prototype regressions covering nested functions, debug metadata, quotes, newlines, NUL/control bytes, valid UTF-8, and an invalid UTF-8 byte.
+
 ## 0.5.0 - Register-state Luau reconstruction
 
 ### Added

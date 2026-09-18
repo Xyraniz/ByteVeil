@@ -19,13 +19,13 @@ ByteVeil can:
 
 - Compile Luau source to bytecode for analysis.
 
-- Emit JSON or IR-style descriptions of Luau functions, prototypes, constants, instructions, source lines, jump targets, basic blocks, and nested functions.
+- Emit JSON or IR-style descriptions of Luau functions, exact constant tables, debug locals, upvalue names, prototypes, instructions, source lines, jump targets, basic blocks, and nested functions.
 
 - Print deterministic instruction disassembly with opcode operands, block successors, line information, auxiliary-word markers, and jump targets.
 
 - Produce a Graphviz DOT control-flow graph for the root function.
 
-- Print constant-table and prototype summaries.
+- Print recursive constant-table inventories and prototype trees, including exact hexadecimal string bytes and parent/child metadata.
 
 - Lift supported Lua 5.1 instructions into Lua source, keeping unsupported instructions as comments with program-counter and operand information.
 
@@ -149,7 +149,7 @@ Write the root control-flow graph as Graphviz DOT:
 ./build/byteveil --bytecode sample.luac --cfg graph.dot
 ```
 
-The JSON/IR representation contains nested functions, parameters, register and constant counts, instructions, basic blocks, successors and predecessors, reachability, line information, jump targets, decoded AUX words, complete register use/definition sets, purity/effects, loop/SCC facts, scopes, and SSA information. Multi-register operations such as `CALL`, `NAMECALL`, `GETVARARGS`, and loop instructions retain every defined register and its SSA version. The internal IR validates prototype depth, total instruction count, real instruction boundaries (including rejection of jumps into AUX words), operand ranges, and constant/prototype references before building the representation.
+The JSON/IR representation contains nested functions, parameters, register counts, typed constant entries, exact hexadecimal bytes for Luau strings, debug-local lifetimes, upvalue names, instructions, basic blocks, successors and predecessors, reachability, line information, jump targets, decoded AUX words, complete register use/definition sets, purity/effects, loop/SCC facts, scopes, and SSA information. Its JSON encoder preserves valid UTF-8 and safely escapes control or invalid byte sequences. Multi-register operations such as `CALL`, `NAMECALL`, `GETVARARGS`, and loop instructions retain every defined register and its SSA version. The internal IR validates prototype depth, total instruction count, real instruction boundaries (including rejection of jumps into AUX words), operand ranges, constant/prototype references, and constant/debug metadata before building the representation.
 
 ## Lift to source-like output
 
