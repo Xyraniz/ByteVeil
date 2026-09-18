@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased - Binary-safe Lua 5.1 strings and metadata
+
+### Added
+
+- Lua 5.1 JSON now includes typed `constant_table` entries plus exact hexadecimal bytes for string constants, chunk source names, local names, and upvalue names.
+- `--dump-constants` recursively lists typed constants for every Lua 5.1 prototype with source-safe values and exact string bytes.
+
+### Corrected
+
+- Lua 5.1 string literals use fixed-width decimal byte escapes accepted by Lua 5.1 instead of non-portable `\xNN` escapes.
+- JSON encoding for Lua 5.1 metadata now escapes every control or invalid UTF-8 byte and preserves valid UTF-8, preventing malformed JSON for binary debug strings.
+- Invalid or reserved debug identifiers no longer leak into reconstructed source; registers and upvalues fall back to deterministic safe names.
+- The Lua 5.1 reader builds cleanly under the repository's warning audit after removing signed-index, unused-variable, and misleading-indentation diagnostics.
+
+### Validation
+
+- Added a self-contained synthetic Lua 5.1 chunk covering quotes, newlines, embedded NUL, control bytes, valid UTF-8, invalid `0xff`, and unsafe local/upvalue/source names without requiring a system Lua installation.
+
 ## Unreleased - Optimized-bytecode equivalence matrix
 
 ### Added
