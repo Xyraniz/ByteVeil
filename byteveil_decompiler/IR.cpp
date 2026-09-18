@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -295,10 +296,60 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                 for (const BasicBlock& target : f.basicBlocks)
                     if (target.start == instruction.jumpTarget) { instruction.targetBlock = target.id; break; }
         }
+    // Medal's SSA destruction pass computes register liveness with a backward
+    // fixed point. Preserve that useful information in the neutral C++ IR.
+    const int blockCount = int(f.basicBlocks.size());
+    f.liveIn.assign(blockCount, {});
+    f.liveOut.assign(blockCount, {});
+    f.blockLiveRegisterCount.assign(blockCount, 0);
+    std::vector<std::set<int>> blockUses(blockCount), blockDefs(blockCount);
+    for (const BasicBlock& block : f.basicBlocks)
+    {
+        for (int instructionIndex : block.instructions)
+        {
+            const Instruction& instruction = f.instructions[instructionIndex];
+            for (int reg : instruction.uses)
+                if (reg >= 0 && reg < f.registers && !blockDefs[block.id].count(reg)) blockUses[block.id].insert(reg);
+            if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers)
+                blockDefs[block.id].insert(instruction.destinationRegister);
+        }
+    }
+    bool livenessChanged = true;
+    while (livenessChanged)
+    {
+        livenessChanged = false;
+        for (int block = blockCount - 1; block >= 0; --block)
+        {
+            std::set<int> nextOut;
+            for (int successor : f.basicBlocks[block].successors)
+                if (successor >= 0 && successor < blockCount) nextOut.insert(f.liveIn[successor].begin(), f.liveIn[successor].end());
+            std::set<int> nextIn = blockUses[block];
+            for (int reg : nextOut) if (!blockDefs[block].count(reg)) nextIn.insert(reg);
+            if (nextOut != std::set<int>(f.liveOut[block].begin(), f.liveOut[block].end()) ||
+                nextIn != std::set<int>(f.liveIn[block].begin(), f.liveIn[block].end()))
+            {
+                f.liveOut[block] = std::vector<int>(nextOut.begin(), nextOut.end());
+                f.liveIn[block] = std::vector<int>(nextIn.begin(), nextIn.end());
+                livenessChanged = true;
+            }
+        }
+    }
+    for (int block = 0; block < blockCount; ++block)
+    {
+        std::set<int> live(f.liveIn[block].begin(), f.liveIn[block].end());
+        int peak = int(live.size());
+        for (int instructionIndex : f.basicBlocks[block].instructions)
+        {
+            const Instruction& instruction = f.instructions[instructionIndex];
+            if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers) live.insert(instruction.destinationRegister);
+            for (int reg : instruction.uses) if (reg >= 0 && reg < f.registers) live.insert(reg);
+            peak = std::max(peak, int(live.size()));
+        }
+        f.blockLiveRegisterCount[block] = std::max(peak, int(f.liveOut[block].size()));
+    }
     // Medal's restructurer relies on dominators and natural-loop headers.  Keep
     // the same useful CFG facts in the neutral ByteVeil IR so future AST passes
     // do not need to rediscover them from serialized instructions.
-    const int blockCount = int(f.basicBlocks.size());
     if (blockCount > 0)
     {
         std::vector<std::set<int>> predecessors(blockCount);
@@ -408,6 +459,17 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                 next.insert(block);
                 if (next != f.postDominators[block]) { f.postDominators[block] = std::move(next); postChanged = true; }
             }
+        }
+        f.immediatePostDominators.assign(blockCount, -1);
+        for (int block = 0; block < blockCount; ++block)
+        {
+            if (!reachable[block]) continue;
+            int best = -1;
+            size_t bestSize = std::numeric_limits<size_t>::max();
+            for (int candidate : f.postDominators[block])
+                if (candidate != block && f.postDominators[candidate].size() < bestSize)
+                { best = candidate; bestSize = f.postDominators[candidate].size(); }
+            f.immediatePostDominators[block] = best;
         }
 
         // Tarjan SCCs identify irreducible cycles and nested loop components.
@@ -525,14 +587,20 @@ static void jsonFn(std::ostringstream& o, const Function& f)
         for (size_t k = 0; k < b.instructions.size(); ++k) { if (k) o << ','; o << b.instructions[k]; }
         o << "],\"successors\":["; for (size_t k = 0; k < b.successors.size(); ++k) { if (k) o << ','; o << b.successors[k]; }
         o << "],\"predecessors\":["; for (size_t k = 0; k < b.predecessors.size(); ++k) { if (k) o << ','; o << b.predecessors[k]; }
-        o << "]}";
+        o << "],\"live_in\":["; for (size_t k = 0; k < f.liveIn[b.id].size(); ++k) { if (k) o << ','; o << f.liveIn[b.id][k]; }
+        o << "],\"live_out\":["; for (size_t k = 0; k < f.liveOut[b.id].size(); ++k) { if (k) o << ','; o << f.liveOut[b.id][k]; }
+        o << "],\"live_register_count\":" << f.blockLiveRegisterCount[b.id] << "}";
     }
     o << "],\"cfg_analysis\":{\"immediate_dominators\":[";
     for (size_t n = 0; n < f.immediateDominators.size(); ++n) { if (n) o << ','; o << f.immediateDominators[n]; }
     o << "],\"back_edges\":["; for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
     o << "],\"natural_loops\":["; for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
     o << "],\"sccs\":["; for (size_t n = 0; n < f.stronglyConnectedComponents.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.stronglyConnectedComponents[n].size(); ++k) { if (k) o << ','; o << f.stronglyConnectedComponents[n][k]; } o << ']'; }
-    o << "]},\"ssa\":{\"instruction_def_versions\":[";
+    o << "],\"immediate_post_dominators\":[";
+    for (size_t n = 0; n < f.immediatePostDominators.size(); ++n) { if (n) o << ','; o << f.immediatePostDominators[n]; }
+    o << "],\"liveness\":{\"block_live_register_count\":[";
+    for (size_t n = 0; n < f.blockLiveRegisterCount.size(); ++n) { if (n) o << ','; o << f.blockLiveRegisterCount[n]; }
+    o << "]}},\"ssa\":{\"instruction_def_versions\":[";
     for (size_t n = 0; n < f.instructionDefVersions.size(); ++n) { if (n) o << ','; o << f.instructionDefVersions[n]; }
     o << "],\"phi_nodes\":["; for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
     o << "]},\"dataflow\":{\"register_first_use\":["; for (size_t n = 0; n < f.registerFirstUse.size(); ++n) { if (n) o << ','; o << f.registerFirstUse[n]; }
@@ -560,6 +628,16 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
     const int blocks = int(f.basicBlocks.size());
     if (blocks == 0) { error = "IR function has no basic blocks"; return false; }
     if (int(f.immediateDominators.size()) != blocks) { error = "IR dominator vector does not match block count"; return false; }
+    if (int(f.immediatePostDominators.size()) != blocks) { error = "IR post-dominator vector does not match block count"; return false; }
+    if (int(f.liveIn.size()) != blocks || int(f.liveOut.size()) != blocks || int(f.blockLiveRegisterCount.size()) != blocks)
+    { error = "IR liveness vectors do not match block count"; return false; }
+    for (int block = 0; block < blocks; ++block)
+    {
+        for (int reg : f.liveIn[block])
+            if (reg < 0 || reg >= f.registers) { error = "IR liveness contains an invalid live-in register"; return false; }
+        for (int reg : f.liveOut[block])
+            if (reg < 0 || reg >= f.registers) { error = "IR liveness contains an invalid live-out register"; return false; }
+    }
     for (const BasicBlock& block : f.basicBlocks)
     {
         if (block.id < 0 || block.id >= blocks) { error = "IR contains an invalid basic-block id"; return false; }
@@ -572,6 +650,8 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
     }
     for (int idom : f.immediateDominators)
         if (idom < -1 || idom >= blocks) { error = "IR contains an invalid immediate dominator"; return false; }
+    for (int ipdom : f.immediatePostDominators)
+        if (ipdom < -1 || ipdom >= blocks) { error = "IR contains an invalid immediate post-dominator"; return false; }
     for (const auto& edge : f.backEdges)
         if (edge.first < 0 || edge.second < 0 || edge.first >= blocks || edge.second >= blocks) { error = "IR contains an invalid back-edge"; return false; }
     for (const PhiNode& phi : f.phiNodes)

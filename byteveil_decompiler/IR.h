@@ -68,12 +68,18 @@ struct Function {
     std::vector<BasicBlock> basicBlocks;
     // CFG facts used by restructuring passes and exposed by --format json.
     std::vector<int> immediateDominators;
+    std::vector<int> immediatePostDominators;
     std::vector<std::set<int>> postDominators;
     std::vector<std::pair<int, int>> backEdges;
     std::vector<std::vector<int>> naturalLoops;
     std::vector<std::vector<int>> stronglyConnectedComponents;
     std::vector<Scope> scopes;
     std::vector<Loop> loops;
+    // Backward dataflow facts inspired by Medal's SSA destruction pass.
+    // Each entry contains registers live immediately before/after a block.
+    std::vector<std::vector<int>> liveIn;
+    std::vector<std::vector<int>> liveOut;
+    std::vector<int> blockLiveRegisterCount;
     std::vector<int> instructionDefVersions;
     std::vector<PhiNode> phiNodes;
     // Register dataflow summaries used by variable naming and restructuring.
