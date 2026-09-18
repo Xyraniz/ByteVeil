@@ -43,6 +43,7 @@ namespace Luau::Decompiler::BlockGen {
     }
 
     void BodyHandler::updateWhileCond(AstExpr *condition) {
-        ((AstGen::AstStatWhileGenerator*)generators[generators.size() - 1])->updateCondition(condition);
+        if (!condition || generators.empty() || getType() != BodyType::WHILE) return;
+        static_cast<AstGen::AstStatWhileGenerator*>(generators.back())->updateCondition(condition);
     }
 }
