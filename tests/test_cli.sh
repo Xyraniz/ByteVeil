@@ -43,6 +43,12 @@ import json, sys
 x = json.load(open(sys.argv[1]))
 assert x["root_function"]["dataflow"]["unknown_instructions"] >= 0
 assert x["root_function"]["instructions"]
+def check_phis(fn):
+    for phi in fn["ssa"]["phi_nodes"]:
+        assert len(phi["incoming_blocks"]) == len(phi["incoming"])
+    for child in fn["children"]:
+        check_phis(child)
+check_phis(x["root_function"])
 PY
 "$BIN" --disassemble "$TMP/sample.luau" >"$TMP/disassembly"
 grep -q '^function 0' "$TMP/disassembly"
