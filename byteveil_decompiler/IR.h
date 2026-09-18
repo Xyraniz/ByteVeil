@@ -43,8 +43,11 @@ struct Scope {
 
 struct Loop {
     int header = -1;
+    int preheader = -1;
     std::vector<int> blocks;
     std::vector<std::pair<int, int>> backEdges;
+    std::vector<int> latches;
+    std::vector<int> exits;
 };
 
 struct PhiNode {
