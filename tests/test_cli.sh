@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 BIN="${1:-./build/byteveil}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -37,3 +37,12 @@ grep -q '^format:' "$TMP/static-report"
 printf '\033Luau' >"$TMP/truncated.luau"
 if "$BIN" --bytecode "$TMP/truncated.luau" >/dev/null 2>&1; then exit 1; fi
 echo "synthetic CLI tests: PASS"
+
+if "$BIN" --format definitely-not-a-format "$TMP/sample.luau" >/dev/null 2>&1; then
+    echo "unknown format was accepted" >&2
+    exit 1
+fi
+if "$BIN" --timeout nope "$TMP/sample.luau" >/dev/null 2>&1; then
+    echo "invalid timeout was accepted" >&2
+    exit 1
+fi
