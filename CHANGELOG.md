@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased - Optimized-bytecode equivalence matrix
+
+### Added
+
+- The vendored Luau test harness can now emit identity-encoded bytecode at compiler optimization levels 0, 1, and 2 with full debug metadata.
+- Behavioral equivalence tests decompile each optimized binary through the real `--bytecode` route and execute the reconstruction, covering optimizer-dependent `FASTCALL`, import, closure, loop, table, vararg, and register-layout choices.
+
+### Validation
+
+- Source reconstruction and all three optimized-bytecode variants produce identical stdout/stderr for the comprehensive Luau fixture.
+
 ## Unreleased - Exact constant and prototype metadata
 
 ### Added
