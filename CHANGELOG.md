@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 - Register-state Luau reconstruction
+
+### Added
+
+- A new `RegisterDecompile` pipeline renders complex Luau bytecode as a valid, explicit program-counter state machine when the inherited `luauDec` AST lifter cannot safely structure it.
+- The renderer models register values, fixed and multiple-result calls, returns, globals, imports, table reads and writes, arithmetic and logical operations, numeric loops, generic iterators, varargs, method calls, nested prototypes, and by-value/by-reference/upvalue closure captures.
+- Risky prototype trees are routed to the state renderer before the legacy lifter can lose loop bodies or closure values. Legacy output remains available automatically for compatible straight-line functions.
+- Every reconstructed result is compiled and loaded with the vendored Luau toolchain before ByteVeil returns success.
+- A test-only Luau runner executes trusted fixtures with the vendored VM. The equivalence suite compares original and reconstructed output across branches, forward and backward numeric loops, while/repeat loops, generic iteration, table operations, multiple returns, varargs, methods, and captured upvalue mutation.
+
+### Corrected
+
+- Complex Luau samples that previously returned `structurally incomplete output` now produce source-valid, control-flow-complete reconstruction instead of stopping at the integrity guard.
+- Captured register cells preserve `false` and `nil` without falling through to stale register storage.
+
+### Validation
+
+- Eight-test CTest suite in Debug and Release: **PASS**.
+- Luau behavioral-equivalence fixtures: **PASS**.
+
 ## Unreleased - Exact Luau CFG and multi-register dataflow
 
 ### Corrected

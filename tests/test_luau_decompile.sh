@@ -13,10 +13,11 @@ for i = 1, 3 do
 end
 return classify(total)
 LUA
-if "$BIN" --format lua "$TMP/complex.luau" >"$TMP/out.lua" 2>"$TMP/err.txt"; then
-    echo 'expected Luau decompiler integrity failure, got success' >&2
-    cat "$TMP/out.lua" >&2
-    exit 1
-fi
-grep -q 'structurally incomplete output' "$TMP/err.txt"
-printf 'Luau integrity regression: PASS\n'
+"$BIN" --format lua "$TMP/complex.luau" >"$TMP/out.lua" 2>"$TMP/err.txt"
+test ! -s "$TMP/err.txt"
+grep -q '^-- ByteVeil Luau register-state reconstruction' "$TMP/out.lua"
+grep -q 'while true do' "$TMP/out.lua"
+grep -q 'byteveil_functions\[1\]' "$TMP/out.lua"
+grep -q 'FORN\|get(4) + get(3)\|pc = 7' "$TMP/out.lua"
+! grep -q 'unsupported opcode' "$TMP/out.lua"
+printf 'Luau register-state reconstruction: PASS\n'

@@ -111,7 +111,7 @@ private:
 };
 
 struct Options { std::string input, output, format = "lua", cfg; bool analyze = false, compileSource = true, quiet = false, noColor = false; unsigned int timeoutSec = 20; };
-static constexpr const char* VERSION = "ByteVeil 0.4.8";
+static constexpr const char* VERSION = "ByteVeil 0.5.0";
 
 static void usage(const char* n)
 {
