@@ -2,6 +2,7 @@
 // Created by xgladius on 8/7/22.
 //
 #include "Decompile.h"
+#include "RegisterDecompile.h"
 #include <Luau/Compiler.h>
 
 namespace Luau::Decompiler {
@@ -12,6 +13,29 @@ namespace Luau::Decompiler {
         if (!closure || !closure->l.p)
             return "error: loaded chunk has no Lua prototype";
         Proto* p = closure->l.p;
+
+        auto validSource = [&](const std::string& source) {
+            std::string syntaxBytecode = Luau::compile(source);
+            if (syntaxBytecode.empty())
+                return false;
+            int stackTop = lua_gettop(L);
+            bool valid = luau_load(L, "byteveil-reconstruction", syntaxBytecode.data(), syntaxBytecode.size(), 0) == 0;
+            lua_settop(L, stackTop);
+            return valid;
+        };
+        auto registerFallback = [&]() {
+            std::string error;
+            std::string source = RegisterDecompile::render(p, error);
+            if (source.empty())
+                return std::string("error: register-state reconstruction failed: ") + (error.empty() ? "no output" : error);
+            if (!validSource(source))
+                return std::string("error: register-state reconstruction produced syntactically invalid source");
+            return source;
+        };
+
+        if (RegisterDecompile::shouldPrefer(p))
+            return registerFallback();
+
         std::vector<AstExpr*> subFuncs;
         for (auto i = 0; i < p->sizep; i++) {
             BlockGen::BlockGen<false> block(p->p[i]);
@@ -21,7 +45,7 @@ namespace Luau::Decompiler {
         BlockGen::BlockGen<true> main(p, subFuncs);
         auto* block = main.generate();
         if (!block)
-            return "error: block lifting failed for this chunk";
+            return registerFallback();
         std::string output = transpile(*block);
         // A successful printer call is not sufficient evidence that the
         // reconstruction is valid. The previous lifter could silently emit
@@ -30,20 +54,12 @@ namespace Luau::Decompiler {
         // presenting them as a successful decompilation.
         if (output.find(" do end") != std::string::npos ||
             output.find("loc0=false") != std::string::npos)
-            return "error: Luau lifter produced structurally incomplete output; control-flow body or closure value was lost";
+            return registerFallback();
         // The printer can emit text even when a control-flow shape was only
         // partially recovered. Parse/compile the result before returning it;
         // invalid source is a failed decompilation, not a usable result.
-        std::string syntaxBytecode = Luau::compile(output);
-        if (syntaxBytecode.empty())
-            return "error: Luau lifter produced syntactically invalid source";
-        int stackTop = lua_gettop(L);
-        if (luau_load(L, "byteveil-reconstruction", syntaxBytecode.data(), syntaxBytecode.size(), 0) != 0)
-        {
-            lua_settop(L, stackTop);
-            return "error: Luau lifter produced syntactically invalid source";
-        }
-        lua_settop(L, stackTop);
+        if (!validSource(output))
+            return registerFallback();
         return output;
     }
 }

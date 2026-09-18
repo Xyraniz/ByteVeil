@@ -6,7 +6,7 @@ BIN="${1:-./build/byteveil}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-"$BIN" --version | grep -q '^ByteVeil 0.4.8'
+"$BIN" --version | grep -q '^ByteVeil 0.5.0'
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format json >"$TMP/a.json"
 "$BYTEVEIL_PYTHON" - "$TMP/a.json" <<'PY'
 import json, sys

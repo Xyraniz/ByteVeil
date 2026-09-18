@@ -29,7 +29,7 @@ ByteVeil can:
 
 - Lift supported Lua 5.1 instructions into Lua source, keeping unsupported instructions as comments with program-counter and operand information.
 
-- Lift supported Luau bytecode through a block and AST pipeline based on Luau's internal AST types.
+- Lift straightforward Luau bytecode through the inherited block/AST pipeline and reconstruct complex control flow through a validated register-state backend.
 
 - Preserve structured state transitions for control-flow shapes that are not safely reducible to an ordinary `if` or `while` construct.
 
@@ -167,7 +167,7 @@ The Lua 5.1 path uses the same output format for supported instructions:
 
 The Lua 5.1 route covers common register, constant, global, upvalue, table, arithmetic, concatenation, unary, closure, call, vararg, and return instructions. Unsupported instructions remain visible in the output as comments instead of silently disappearing.
 
-The Luau lifter builds blocks from bytecode and feeds them into an AST-generation and transpilation pipeline. It includes guards for malformed or unusual register accesses and a wall-clock timeout for decompilation. A timeout or unsupported bytecode shape should be treated as an analysis boundary, not as evidence that the original program is invalid.
+The Luau path selects between two backends. Straight-line, compatible functions use the inherited block/AST lifter. Functions with branches, loops, table mutation, varargs, calls, or captures use a register-state backend that preserves the program counter, register values, fixed and multiple returns, nested prototypes, and by-value/by-reference/upvalue captures explicitly. Both results are compiled and loaded with the vendored Luau toolchain before the CLI reports success. Runtime-dependent behavior that cannot be reproduced statically remains visible in comments rather than being silently invented.
 
 ## Static protector indicators
 
@@ -229,7 +229,7 @@ The equivalence harness compares an original Lua 5.1 program with a candidate li
 ./tests/equivalence_lua51.sh original.lua candidate.lua
 ```
 
-The project builds successfully as `ByteVeil 0.4.8`; the CLI, Luau integrity, Luau regression, Lua 5.1 reader, extended, and reconstruction suites pass in the maintained checkout. The equivalence harness remains separate and requires an external `lua5.1` executable.
+The project builds successfully as `ByteVeil 0.5.0`; the CLI, Luau integrity, Luau regression, IR-semantic, Lua 5.1 reader, extended, reconstruction, and Luau behavioral-equivalence suites pass in the maintained checkout. The Lua 5.1 equivalence harness remains separate and requires an external `lua5.1` executable; the Luau equivalence suite uses the vendored VM and needs no system interpreter.
 
 The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lifting, Luau loop metadata, simple return/call regressions, and truncated-bytecode rejection. The project's existing documentation also records validation against 18 Lua 5.1 chunks derived from a MoonSec V3 corpus. That result describes the recorded test run; it is not a guarantee that every protector sample can be analyzed or lifted.
 
@@ -240,6 +240,7 @@ The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lif
 | `byteveil_cli.cpp` | CLI parsing, input detection, source compilation, static analysis, and output routing. |
 | `byteveil_decompiler/Lua51.*` | Lua 5.1 chunk detection and inspection. |
 | `byteveil_decompiler/IR.*` | Luau function, instruction, basic-block, JSON, disassembly, and CFG representation. |
+| `byteveil_decompiler/RegisterDecompile.*` | Validated register-state reconstruction for complex Luau control flow, calls, tables, loops, and closures. |
 | `byteveil_decompiler/Protectors.*` | Static protector and loader-marker heuristics. |
 | `byteveil_decompiler/Unpack.*` | Literal `loadstring` payload inspection. |
 | `byteveil_decompiler/BlockGen/` | Luau bytecode block generation and lifting helpers. |
@@ -249,7 +250,7 @@ The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lif
 
 ## Known limitations
 
-The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow. Luau IR scopes and effects are conservative analysis metadata, not complete source-level lexical lifetime recovery. Luau output remains guarded by structural-integrity checks: when the body, loop, or closure cannot be recovered safely, the CLI fails instead of returning code 0 with a plausible-looking false reconstruction.
+The lifters cover a defined subset of Lua 5.1 and Luau behavior. Complex aliasing, fully dynamic `SETLIST` arity, calculated metamethods, irreducible loops, difficult scope shapes, and some closure, upvalue, vararg, and multiple-return cases can exceed the current lifting model. The structured Lua 5.1 output preserves branch targets but is intentionally a state machine rather than Medal-style fully idiomatic source; the SCC analysis identifies cycles but does not automatically turn every cycle into idiomatic Lua control flow. Luau IR scopes and effects are conservative analysis metadata, not complete source-level lexical lifetime recovery. The Luau register-state backend prioritizes semantic fidelity over idiomatic output and documents approximations such as optimized fast-call fallback, generic-iterator preparation, calculated imports, and dynamic stack-top recovery. Every Luau reconstruction still passes a compile/load gate; a result that is not valid Luau is rejected instead of being returned as plausible-looking source.
 
 The automatic unpack route is intentionally narrow. It extracts literal payloads only. Loaders that calculate their payload dynamically, virtualize execution, or depend on a runtime-specific environment require separate family-specific analysis and validation.
 
@@ -276,5 +277,5 @@ CTest passes the generator-specific executable path to every script, so the same
 
 The Luau inspection path is deliberately split into validated phases. Bytecode is decoded into an IR, basic blocks are connected into a CFG with explicit fallthrough and unreachable regions, dominators/post-dominators and merged natural loops are computed, and register lifetimes, definitions, uses and phi nodes are exposed as dataflow metadata. The `--format structured` mode consumes those facts to render conditional diamonds, joins, loop headers and irreducible edges as an explicit control-flow plan. It preserves unsafe edges instead of guessing source that merely looks plausible.
 
-The source decompiler retains the legacy AST lifter for compatible output, but now applies two safety gates: known incomplete shapes are rejected and the generated Luau is compiled and loaded before it is returned. This follows the analysis recommendation to keep ByteVeil's validation layer while moving toward a Medal-style restructuring phase.
+The source decompiler retains the legacy AST lifter for compatible output and routes risky prototype trees to a register-state backend before the AST pass can discard loop bodies, branch paths, or captured values. The fallback represents execution as explicit `pc` transitions and models closures with shared cells where Luau's `CAPTURE REF` semantics require aliasing. Known incomplete AST shapes are rejected, and every generated program is compiled and loaded before it is returned. This keeps ByteVeil's validation layer while moving toward Medal-style semantic reconstruction without pretending the fallback is already idiomatic source.
 

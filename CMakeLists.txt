@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ByteVeil VERSION 0.4.8 LANGUAGES CXX)
+project(ByteVeil VERSION 0.5.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 
 # Luau's vendored build still declares a 3.0 policy baseline. CMake 4 removed
@@ -15,7 +15,7 @@ else()
     add_compile_options(-include stdint.h)
 endif()
 
-add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_decompiler/Lua51.h byteveil_decompiler/Protectors.cpp byteveil_decompiler/Protectors.h byteveil_decompiler/Unpack.cpp byteveil_decompiler/Unpack.h byteveil_decompiler/IR.cpp byteveil_decompiler/AstGen/src/Common.cpp byteveil_decompiler/BlockGen/include/Lifter.h byteveil_decompiler/BlockGen/src/Lifter.cpp byteveil_decompiler/Common.h byteveil_decompiler/BlockGen/src/BlockGen.cpp byteveil_decompiler/BlockGen/include/BlockGen.h byteveil_decompiler/AstGen/include/VirtualAstStack.h byteveil_decompiler/AstGen/src/VirtualAstStack.cpp byteveil_decompiler/BlockGen/include/BodyHandler.h byteveil_decompiler/BlockGen/src/BodyHandler.cpp byteveil_decompiler/AstGen/include/Generator.h byteveil_decompiler/AstGen/src/Generator.cpp byteveil_decompiler/AstGen/include/Handlers.h byteveil_decompiler/AstGen/src/Handlers.cpp byteveil_decompiler/Decompile.h byteveil_decompiler/Decompile.cpp byteveil_decompiler/Restructure.cpp byteveil_decompiler/Restructure.h luau/Analysis/src/Transpiler.cpp)
+add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_decompiler/Lua51.h byteveil_decompiler/Protectors.cpp byteveil_decompiler/Protectors.h byteveil_decompiler/Unpack.cpp byteveil_decompiler/Unpack.h byteveil_decompiler/IR.cpp byteveil_decompiler/AstGen/src/Common.cpp byteveil_decompiler/BlockGen/include/Lifter.h byteveil_decompiler/BlockGen/src/Lifter.cpp byteveil_decompiler/Common.h byteveil_decompiler/BlockGen/src/BlockGen.cpp byteveil_decompiler/BlockGen/include/BlockGen.h byteveil_decompiler/AstGen/include/VirtualAstStack.h byteveil_decompiler/AstGen/src/VirtualAstStack.cpp byteveil_decompiler/BlockGen/include/BodyHandler.h byteveil_decompiler/BlockGen/src/BodyHandler.cpp byteveil_decompiler/AstGen/include/Generator.h byteveil_decompiler/AstGen/src/Generator.cpp byteveil_decompiler/AstGen/include/Handlers.h byteveil_decompiler/AstGen/src/Handlers.cpp byteveil_decompiler/Decompile.h byteveil_decompiler/Decompile.cpp byteveil_decompiler/Restructure.cpp byteveil_decompiler/Restructure.h byteveil_decompiler/RegisterDecompile.cpp byteveil_decompiler/RegisterDecompile.h luau/Analysis/src/Transpiler.cpp)
 
 include(CTest)
 enable_testing()
@@ -52,6 +52,21 @@ if(MINGW)
     # Git Bash and other MSYS environments often prepend their own, possibly
     # ABI-incompatible libstdc++ DLL to PATH. Keep the produced CLI standalone.
     target_link_options(byteveil PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(byteveil_luau_runner tests/luau_runner.cpp)
+    target_include_directories(byteveil_luau_runner PRIVATE
+        ${CMAKE_SOURCE_DIR}/luau/Common/include
+        ${CMAKE_SOURCE_DIR}/luau/Compiler/include
+        ${CMAKE_SOURCE_DIR}/luau/VM/include)
+    target_link_libraries(byteveil_luau_runner PRIVATE Luau.Compiler Luau.VM)
+    if(MINGW)
+        target_link_options(byteveil_luau_runner PRIVATE -static-libgcc -static-libstdc++)
+    endif()
+    add_test(NAME byteveil_test_luau_equivalence.sh
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_luau_equivalence.sh $<TARGET_FILE:byteveil> $<TARGET_FILE:byteveil_luau_runner>)
+    set_tests_properties(byteveil_test_luau_equivalence.sh PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
