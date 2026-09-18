@@ -52,6 +52,13 @@ grep -q '^-- ByteVeil Luau register-state reconstruction' "$TMP/reconstructed.lu
 "$RUNNER" "$TMP/reconstructed.luau" >"$TMP/reconstructed.out" 2>"$TMP/reconstructed.err"
 cmp "$TMP/original.out" "$TMP/reconstructed.out"
 cmp "$TMP/original.err" "$TMP/reconstructed.err"
+for level in 0 1 2; do
+    "$RUNNER" --compile "$level" "$TMP/original.luau" "$TMP/original-o$level.luauc"
+    "$BIN" --bytecode --format lua "$TMP/original-o$level.luauc" >"$TMP/reconstructed-o$level.luau"
+    "$RUNNER" "$TMP/reconstructed-o$level.luau" >"$TMP/reconstructed-o$level.out" 2>"$TMP/reconstructed-o$level.err"
+    cmp "$TMP/original.out" "$TMP/reconstructed-o$level.out"
+    cmp "$TMP/original.err" "$TMP/reconstructed-o$level.err"
+done
 
 cat >"$TMP/control_edges.luau" <<'LUA'
 local captured = false

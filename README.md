@@ -270,7 +270,7 @@ tests/run_all.sh
 
 The runner configures and builds a debug-capable binary, then invokes CTest with `--output-on-failure`. Individual scripts can still be run with `build/byteveil` as their first argument. CLI options are rejected when a format is unknown or when `--timeout` is not a decimal value in the safe range `0..86400`; this prevents accidental silent fallback to a different inspection mode.
 
-CTest passes the generator-specific executable path to every script, so the same suite works with single- and multi-config generators and with the `.exe` suffix on Windows. JSON assertions auto-detect `python3` or `python`; Lua 5.1 equivalence/reconstruction checks report an explicit skip when `lua5.1` and `luac5.1` are unavailable.
+CTest passes the generator-specific executable path to every script, so the same suite works with single- and multi-config generators and with the `.exe` suffix on Windows. JSON assertions auto-detect `python3` or `python`; Lua 5.1 equivalence/reconstruction checks report an explicit skip when `lua5.1` and `luac5.1` are unavailable. The vendored Luau runner also compiles the main semantic fixture at optimization levels 0, 1, and 2, decompiles each binary through `--bytecode`, and compares the reconstruction's stdout/stderr with the original program.
 
 
 ## Luau reconstruction pipeline
