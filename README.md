@@ -267,3 +267,10 @@ tests/run_all.sh
 
 The runner configures and builds a debug-capable binary, then invokes CTest with `--output-on-failure`. Individual scripts can still be run with `build/byteveil` as their first argument. CLI options are rejected when a format is unknown or when `--timeout` is not a decimal value in the safe range `0..86400`; this prevents accidental silent fallback to a different inspection mode.
 
+
+## Luau reconstruction pipeline
+
+The Luau inspection path is deliberately split into validated phases. Bytecode is decoded into an IR, basic blocks are connected into a CFG, dominators/post-dominators and natural loops are computed, and register lifetimes, definitions, uses and phi nodes are exposed as dataflow metadata. The `--format structured` mode consumes those facts to render conditional diamonds, joins, loop headers and irreducible edges as an explicit control-flow plan. It preserves unsafe edges instead of guessing source that merely looks plausible.
+
+The source decompiler retains the legacy AST lifter for compatible output, but now applies two safety gates: known incomplete shapes are rejected and the generated Luau is compiled and loaded before it is returned. This follows the analysis recommendation to keep ByteVeil's validation layer while moving toward a Medal-style restructuring phase.
+
