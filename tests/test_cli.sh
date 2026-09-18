@@ -24,6 +24,20 @@ cmp "$TMP/a.json" "$TMP/b.json"
 grep -q '^-- ByteVeil structured control-flow reconstruction' "$TMP/structured"
 grep -q 'loop-header' "$TMP/structured"
 grep -q 'join=block_' "$TMP/structured"
+cat >"$TMP/arithmetic.luau" <<'LUA'
+local function f(value)
+    if value % 2 == 0 then return value + 7 end
+    return value * 3 - 1
+end
+return f(5)
+LUA
+"$BIN" --format json "$TMP/arithmetic.luau" >"$TMP/arithmetic.json"
+python3 - "$TMP/arithmetic.json" <<'PY'
+import json, sys
+x = json.load(open(sys.argv[1]))
+assert x["root_function"]["dataflow"]["unknown_instructions"] >= 0
+assert x["root_function"]["instructions"]
+PY
 "$BIN" --disassemble "$TMP/sample.luau" >"$TMP/disassembly"
 grep -q '^function 0' "$TMP/disassembly"
 grep -q 'LOAD' "$TMP/disassembly"
