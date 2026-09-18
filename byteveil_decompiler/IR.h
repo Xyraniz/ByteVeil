@@ -65,6 +65,23 @@ struct PhiNode {
     std::vector<int> incomingVersions;
 };
 
+struct ConstantInfo {
+    int index = -1;
+    std::string type;
+    std::string value;
+    // Luau strings are byte sequences and are not guaranteed to contain
+    // valid UTF-8. Preserve an exact, machine-readable representation.
+    std::string stringBytesHex;
+    int childPrototype = -1;
+};
+
+struct LocalInfo {
+    std::string name;
+    int registerIndex = -1;
+    int start = -1;
+    int end = -1;
+};
+
 struct Function {
     int id = 0;
     int parentId = -1;
@@ -75,6 +92,9 @@ struct Function {
     int upvalues = 0;
     int lineDefined = 0;
     std::string nameHint;
+    std::vector<ConstantInfo> constantTable;
+    std::vector<LocalInfo> debugLocals;
+    std::vector<std::string> upvalueNames;
     std::vector<Instruction> instructions;
     std::vector<BasicBlock> basicBlocks;
     // CFG facts used by restructuring passes and exposed by --format json.
@@ -116,8 +136,8 @@ std::string opcodeName(int opcode);
 std::string toJson(const Module& module);
 std::string disassemble(const Module& module);
 std::string cfgDot(const Module& module);
-std::string constantsText(const Proto* root);
-std::string prototypesText(const Proto* root);
+std::string constantsText(const Module& module);
+std::string prototypesText(const Module& module);
 }
 
 namespace Luau::Decompiler {
