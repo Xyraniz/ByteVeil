@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - Portable build and watchdog hardening
+
+### Corrected
+
+- CMake 4.x can configure the project even though the vendored Luau checkout still declares a CMake 3.0 policy baseline.
+- The root build no longer builds and links all of `Luau.Analysis` merely to obtain `Transpiler.cpp`. Only the transpiler is compiled, avoiding unrelated legacy-analysis compiler failures and reducing the build graph.
+- The address-space guard now uses a Windows Job Object on Windows and `RLIMIT_AS` on POSIX systems.
+- The decompiler timeout no longer uses `siglongjmp` across live C++ objects. A portable watchdog exits the CLI with code 124 after printing the timeout diagnostic.
+- CTest passes the real target path to shell tests, including the Windows executable suffix, and JSON tests find a working `python3` or `python` interpreter rather than trusting a broken application alias.
+- Lua 5.1 tests that require an external interpreter now skip explicitly when `lua5.1`/`luac5.1` are unavailable instead of reporting an unrelated product regression.
+
+### Validation
+
+- CMake 4.4.1 configure and Ninja/MinGW build: **PASS**.
+- Six-test CTest suite on Windows: **PASS** (Lua 5.1 external-interpreter tests skipped when the interpreter is absent).
+
 ## Unreleased - Conservative register SSA and phi analysis
 
 ### Added

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+byteveil_find_python
 BIN="${1:-./build/byteveil}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -38,7 +40,7 @@ end
 return f(5)
 LUA
 "$BIN" --format json "$TMP/arithmetic.luau" >"$TMP/arithmetic.json"
-python3 - "$TMP/arithmetic.json" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/arithmetic.json" <<'PY'
 import json, sys
 x = json.load(open(sys.argv[1]))
 assert x["root_function"]["dataflow"]["unknown_instructions"] >= 0
