@@ -432,6 +432,19 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
         {
             Loop loop; loop.header = f.backEdges[n].second; loop.backEdges.push_back(f.backEdges[n]);
             if (n < f.naturalLoops.size()) loop.blocks = f.naturalLoops[n];
+            const std::set<int> members(loop.blocks.begin(), loop.blocks.end());
+            for (int predecessor : predecessors[loop.header])
+                if (!members.count(predecessor))
+                {
+                    if (loop.preheader < 0) loop.preheader = predecessor;
+                    else loop.preheader = -1; // multiple incoming entries: no unique preheader
+                }
+            loop.latches.push_back(f.backEdges[n].first);
+            std::set<int> exits;
+            for (int member : loop.blocks)
+                for (int successor : f.basicBlocks[member].successors)
+                    if (!members.count(successor)) exits.insert(successor);
+            loop.exits.assign(exits.begin(), exits.end());
             f.loops.push_back(std::move(loop));
         }
 
@@ -595,6 +608,11 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     for (size_t n = 0; n < f.immediateDominators.size(); ++n) { if (n) o << ','; o << f.immediateDominators[n]; }
     o << "],\"back_edges\":["; for (size_t n = 0; n < f.backEdges.size(); ++n) { if (n) o << ','; o << "[" << f.backEdges[n].first << "," << f.backEdges[n].second << "]"; }
     o << "],\"natural_loops\":["; for (size_t n = 0; n < f.naturalLoops.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.naturalLoops[n].size(); ++k) { if (k) o << ','; o << f.naturalLoops[n][k]; } o << ']'; }
+    o << "],\"loop_regions\":["; for (size_t n = 0; n < f.loops.size(); ++n) { if (n) o << ','; const Loop& loop = f.loops[n];
+    o << "{\"header\":" << loop.header << ",\"preheader\":" << loop.preheader << ",\"blocks\":[";
+    for (size_t k = 0; k < loop.blocks.size(); ++k) { if (k) o << ','; o << loop.blocks[k]; }
+    o << "],\"latches\":["; for (size_t k = 0; k < loop.latches.size(); ++k) { if (k) o << ','; o << loop.latches[k]; }
+    o << "],\"exits\":["; for (size_t k = 0; k < loop.exits.size(); ++k) { if (k) o << ','; o << loop.exits[k]; } o << "]}"; }
     o << "],\"sccs\":["; for (size_t n = 0; n < f.stronglyConnectedComponents.size(); ++n) { if (n) o << ','; o << '['; for (size_t k = 0; k < f.stronglyConnectedComponents[n].size(); ++k) { if (k) o << ','; o << f.stronglyConnectedComponents[n][k]; } o << ']'; }
     o << "],\"immediate_post_dominators\":[";
     for (size_t n = 0; n < f.immediatePostDominators.size(); ++n) { if (n) o << ','; o << f.immediatePostDominators[n]; }
@@ -654,6 +672,13 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
         if (ipdom < -1 || ipdom >= blocks) { error = "IR contains an invalid immediate post-dominator"; return false; }
     for (const auto& edge : f.backEdges)
         if (edge.first < 0 || edge.second < 0 || edge.first >= blocks || edge.second >= blocks) { error = "IR contains an invalid back-edge"; return false; }
+    for (const Loop& loop : f.loops)
+    {
+        if (loop.header < 0 || loop.header >= blocks || loop.preheader >= blocks) { error = "IR contains an invalid loop region"; return false; }
+        for (int block : loop.blocks) if (block < 0 || block >= blocks) { error = "IR loop contains an invalid member"; return false; }
+        for (int latch : loop.latches) if (latch < 0 || latch >= blocks) { error = "IR loop contains an invalid latch"; return false; }
+        for (int exit : loop.exits) if (exit < 0 || exit >= blocks) { error = "IR loop contains an invalid exit"; return false; }
+    }
     for (const PhiNode& phi : f.phiNodes)
     {
         if (phi.block < 0 || phi.block >= blocks || phi.reg < 0 || phi.reg >= f.registers) { error = "IR contains an invalid phi node"; return false; }
