@@ -239,6 +239,24 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
         if (p->lineinfo && pc < p->sizecode) i.line = luaG_getline(const_cast<Proto*>(p), pc);
         f.instructions.push_back(i); pc += i.length;
     }
+    f.registerFirstUse.assign(f.registers, -1);
+    f.registerLastUse.assign(f.registers, -1);
+    f.registerDefinitionCount.assign(f.registers, 0);
+    f.registerUseCount.assign(f.registers, 0);
+    for (size_t index = 0; index < f.instructions.size(); ++index)
+    {
+        Instruction& instruction = f.instructions[index];
+        if (instruction.semanticTag == "instruction") ++f.unknownInstructionCount;
+        if (instruction.destinationRegister >= 0 && instruction.destinationRegister < f.registers)
+            ++f.registerDefinitionCount[instruction.destinationRegister];
+        for (int reg : instruction.uses)
+        {
+            if (reg < 0 || reg >= f.registers) continue;
+            ++f.registerUseCount[reg];
+            if (f.registerFirstUse[reg] < 0) f.registerFirstUse[reg] = int(index);
+            f.registerLastUse[reg] = int(index);
+        }
+    }
     std::set<int> starts{0};
     for (const Instruction& i : f.instructions) if (i.jumpTarget >= 0) starts.insert(i.jumpTarget);
     for (const Instruction& i : f.instructions) if (i.jumpTarget >= 0 && i.offset + i.length < p->sizecode) starts.insert(i.offset + i.length);
@@ -510,7 +528,11 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     o << "]},\"ssa\":{\"instruction_def_versions\":[";
     for (size_t n = 0; n < f.instructionDefVersions.size(); ++n) { if (n) o << ','; o << f.instructionDefVersions[n]; }
     o << "],\"phi_nodes\":["; for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
-    o << "]},\"scopes\":["; for (size_t n = 0; n < f.scopes.size(); ++n) { if (n) o << ','; const Scope& s = f.scopes[n]; o << "{\"id\":" << s.id << ",\"parent\":" << s.parent << ",\"entry\":" << s.entryBlock << ",\"exit\":" << s.exitBlock << ",\"registers\":["; for (size_t k = 0; k < s.registers.size(); ++k) { if (k) o << ','; o << s.registers[k]; } o << "]}"; }
+    o << "]},\"dataflow\":{\"register_first_use\":["; for (size_t n = 0; n < f.registerFirstUse.size(); ++n) { if (n) o << ','; o << f.registerFirstUse[n]; }
+    o << "],\"register_last_use\":["; for (size_t n = 0; n < f.registerLastUse.size(); ++n) { if (n) o << ','; o << f.registerLastUse[n]; }
+    o << "],\"definition_count\":["; for (size_t n = 0; n < f.registerDefinitionCount.size(); ++n) { if (n) o << ','; o << f.registerDefinitionCount[n]; }
+    o << "],\"use_count\":["; for (size_t n = 0; n < f.registerUseCount.size(); ++n) { if (n) o << ','; o << f.registerUseCount[n]; }
+    o << "],\"unknown_instructions\":" << f.unknownInstructionCount << "},\"scopes\":["; for (size_t n = 0; n < f.scopes.size(); ++n) { if (n) o << ','; const Scope& s = f.scopes[n]; o << "{\"id\":" << s.id << ",\"parent\":" << s.parent << ",\"entry\":" << s.entryBlock << ",\"exit\":" << s.exitBlock << ",\"registers\":["; for (size_t k = 0; k < s.registers.size(); ++k) { if (k) o << ','; o << s.registers[k]; } o << "]}"; }
     o << "],\"children\":["; for (size_t n = 0; n < f.children.size(); ++n) { if (n) o << ','; jsonFn(o, f.children[n]); } o << "]}";
 }
 }

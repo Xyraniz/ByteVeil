@@ -76,6 +76,12 @@ struct Function {
     std::vector<Loop> loops;
     std::vector<int> instructionDefVersions;
     std::vector<PhiNode> phiNodes;
+    // Register dataflow summaries used by variable naming and restructuring.
+    std::vector<int> registerFirstUse;
+    std::vector<int> registerLastUse;
+    std::vector<int> registerDefinitionCount;
+    std::vector<int> registerUseCount;
+    int unknownInstructionCount = 0;
     std::vector<Function> children;
 };
 
