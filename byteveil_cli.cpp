@@ -104,7 +104,7 @@ static bool parse(int ac, char** av, Options& o)
             if (++i >= ac) return false;
             o.format = av[i];
             if (o.format != "lua" && o.format != "luau" && o.format != "json" && o.format != "ir" &&
-                o.format != "disassemble" && o.format != "cfg" && o.format != "constants" &&
+                o.format != "disassemble" && o.format != "cfg" && o.format != "structured" && o.format != "constants" &&
                 o.format != "prototypes" && o.format != "protectors" && o.format != "unpack") return false;
         }
         else if (a == "--disassemble") o.format = "disassemble";
