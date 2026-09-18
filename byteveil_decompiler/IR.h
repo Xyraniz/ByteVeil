@@ -54,6 +54,8 @@ struct PhiNode {
     int block = -1;
     int reg = -1;
     int version = -1;
+    // Incoming values are ordered by these predecessor block ids.
+    std::vector<int> incomingBlocks;
     std::vector<int> incomingVersions;
 };
 

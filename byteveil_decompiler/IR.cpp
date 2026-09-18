@@ -568,7 +568,11 @@ static void addFunction(const Proto* p, Function& f, int id, int parentId, int p
                 if (phiVersions[block][reg] >= 0)
                 {
                     PhiNode phi; phi.block = block; phi.reg = reg; phi.version = phiVersions[block][reg];
-                    for (int predecessor : predecessors[block]) phi.incomingVersions.push_back(outgoing[predecessor][reg]);
+                    for (int predecessor : predecessors[block])
+                    {
+                        phi.incomingBlocks.push_back(predecessor);
+                        phi.incomingVersions.push_back(outgoing[predecessor][reg]);
+                    }
                     f.phiNodes.push_back(std::move(phi));
                 }
     }
@@ -620,7 +624,7 @@ static void jsonFn(std::ostringstream& o, const Function& f)
     for (size_t n = 0; n < f.blockLiveRegisterCount.size(); ++n) { if (n) o << ','; o << f.blockLiveRegisterCount[n]; }
     o << "]}},\"ssa\":{\"instruction_def_versions\":[";
     for (size_t n = 0; n < f.instructionDefVersions.size(); ++n) { if (n) o << ','; o << f.instructionDefVersions[n]; }
-    o << "],\"phi_nodes\":["; for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
+    o << "],\"phi_nodes\":["; for (size_t n = 0; n < f.phiNodes.size(); ++n) { if (n) o << ','; const PhiNode& phi = f.phiNodes[n]; o << "{\"block\":" << phi.block << ",\"register\":" << phi.reg << ",\"version\":" << phi.version << ",\"incoming_blocks\":["; for (size_t k = 0; k < phi.incomingBlocks.size(); ++k) { if (k) o << ','; o << phi.incomingBlocks[k]; } o << "],\"incoming\":["; for (size_t k = 0; k < phi.incomingVersions.size(); ++k) { if (k) o << ','; o << phi.incomingVersions[k]; } o << "]}"; }
     o << "]},\"dataflow\":{\"register_first_use\":["; for (size_t n = 0; n < f.registerFirstUse.size(); ++n) { if (n) o << ','; o << f.registerFirstUse[n]; }
     o << "],\"register_last_use\":["; for (size_t n = 0; n < f.registerLastUse.size(); ++n) { if (n) o << ','; o << f.registerLastUse[n]; }
     o << "],\"definition_count\":["; for (size_t n = 0; n < f.registerDefinitionCount.size(); ++n) { if (n) o << ','; o << f.registerDefinitionCount[n]; }
@@ -683,6 +687,9 @@ static bool validateFunctionAnalysis(const Function& f, std::string& error)
     {
         if (phi.block < 0 || phi.block >= blocks || phi.reg < 0 || phi.reg >= f.registers) { error = "IR contains an invalid phi node"; return false; }
         if (phi.incomingVersions.size() != f.basicBlocks[phi.block].predecessors.size()) { error = "IR phi node has the wrong number of incoming versions"; return false; }
+        if (phi.incomingBlocks.size() != phi.incomingVersions.size()) { error = "IR phi node has the wrong number of incoming blocks"; return false; }
+        for (int predecessor : phi.incomingBlocks)
+            if (predecessor < 0 || predecessor >= blocks) { error = "IR phi node contains an invalid incoming block"; return false; }
     }
     for (const Function& child : f.children)
         if (!validateFunctionAnalysis(child, error)) return false;
