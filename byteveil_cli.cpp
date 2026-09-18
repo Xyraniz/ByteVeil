@@ -97,10 +97,16 @@ static bool parse(int ac, char** av, Options& o)
 {
     for (int i = 1; i < ac; ++i) {
         std::string a = av[i];
-        if (a == "-h" || a == "--help") return false;
+        if (a == "-h" || a == "--help") { usage(av[0]); std::exit(0); }
         if (a == "--version") { std::cout << VERSION << '\n'; std::exit(0); }
         if (a == "-o" || a == "--output" || a == "--cfg") { if (++i >= ac) return false; if (a == "--cfg") { o.cfg = av[i]; o.format = "cfg"; } else o.output = av[i]; }
-        else if (a == "--format") { if (++i >= ac) return false; o.format = av[i]; }
+        else if (a == "--format") {
+            if (++i >= ac) return false;
+            o.format = av[i];
+            if (o.format != "lua" && o.format != "luau" && o.format != "json" && o.format != "ir" &&
+                o.format != "disassemble" && o.format != "cfg" && o.format != "constants" &&
+                o.format != "prototypes" && o.format != "protectors" && o.format != "unpack") return false;
+        }
         else if (a == "--disassemble") o.format = "disassemble";
         else if (a == "--dump-constants") o.format = "constants";
         else if (a == "--dump-prototypes") o.format = "prototypes";
@@ -108,7 +114,13 @@ static bool parse(int ac, char** av, Options& o)
         else if (a == "--bytecode") o.compileSource = false;
         else if (a == "--source") o.compileSource = true;
         else if (a == "--no-color") o.noColor = true;
-        else if (a == "--timeout") { if (++i >= ac) return false; o.timeoutSec = static_cast<unsigned int>(std::strtoul(av[i], nullptr, 10)); }
+        else if (a == "--timeout") {
+            if (++i >= ac) return false;
+            char* end = nullptr;
+            unsigned long timeout = std::strtoul(av[i], &end, 10);
+            if (!end || *end != 0 || timeout > 86400) return false;
+            o.timeoutSec = static_cast<unsigned int>(timeout);
+        }
         else if (a == "-q" || a == "--quiet") o.quiet = true;
         else if (o.input.empty()) o.input = a;
         else return false;
