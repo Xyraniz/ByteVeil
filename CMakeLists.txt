@@ -7,6 +7,28 @@ add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_
 
 include(CTest)
 enable_testing()
+set(BYTEVEIL_TEST_SCRIPTS
+    test_cli.sh
+    test_lua51.sh
+    test_lua51_extended.sh
+    test_lua51_reconstruction.sh
+    test_luau_decompile.sh
+    test_luau_regressions.sh)
+foreach(TEST_SCRIPT IN LISTS BYTEVEIL_TEST_SCRIPTS)
+    add_test(NAME byteveil_${TEST_SCRIPT} COMMAND bash ${CMAKE_SOURCE_DIR}/tests/${TEST_SCRIPT})
+    set_tests_properties(byteveil_${TEST_SCRIPT} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endforeach()
+set(BYTEVEIL_TEST_SCRIPTS
+    test_cli.sh
+    test_lua51.sh
+    test_lua51_extended.sh
+    test_lua51_reconstruction.sh
+    test_luau_decompile.sh
+    test_luau_regressions.sh)
+foreach(TEST_SCRIPT IN LISTS BYTEVEIL_TEST_SCRIPTS)
+    add_test(NAME byteveil_${TEST_SCRIPT} COMMAND bash ${CMAKE_SOURCE_DIR}/tests/${TEST_SCRIPT})
+    set_tests_properties(byteveil_${TEST_SCRIPT} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endforeach()
 
 target_include_directories(byteveil PRIVATE include)
 
