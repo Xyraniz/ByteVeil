@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+byteveil_find_python
 BIN="${1:-./build/byteveil}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 "$BIN" --version | grep -q '^ByteVeil 0.4.8'
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format json >"$TMP/a.json"
-python3 - "$TMP/a.json" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/a.json" <<'PY'
 import json, sys
 x=json.load(open(sys.argv[1]))
 assert x['format'] == 'Lua 5.1 bytecode'

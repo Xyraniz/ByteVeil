@@ -63,7 +63,7 @@ Static indicators are heuristic evidence. A marker can be absent, misleading, or
 
 ## Build requirements
 
-ByteVeil uses CMake, Ninja, and C++17. The repository vendors the Luau source tree needed for the compiler, VM, AST, and analysis libraries, so the main build does not require downloading Luau at build time.
+ByteVeil uses CMake, Ninja, and C++17. The repository vendors the Luau source tree needed for the compiler, VM, AST, and source transpiler, so the main build does not require downloading Luau at build time. The root build supplies a modern policy floor for the older vendored Luau CMake project, including CMake 4.x.
 
 On Ubuntu, install the basic toolchain with:
 
@@ -85,7 +85,7 @@ The resulting executable is:
 build/byteveil
 ```
 
-The CMake project uses the vendored Luau components `Luau.Compiler`, `Luau.Analysis`, `Luau.VM`, and `Luau.Ast`.
+The CMake project links the vendored `Luau.Compiler`, `Luau.VM`, and `Luau.Ast` targets. It compiles Luau's standalone transpiler source directly instead of pulling the entire, otherwise unused `Luau.Analysis` library into the build.
 
 ## Command-line usage
 
@@ -266,6 +266,8 @@ tests/run_all.sh
 ```
 
 The runner configures and builds a debug-capable binary, then invokes CTest with `--output-on-failure`. Individual scripts can still be run with `build/byteveil` as their first argument. CLI options are rejected when a format is unknown or when `--timeout` is not a decimal value in the safe range `0..86400`; this prevents accidental silent fallback to a different inspection mode.
+
+CTest passes the generator-specific executable path to every script, so the same suite works with single- and multi-config generators and with the `.exe` suffix on Windows. JSON assertions auto-detect `python3` or `python`; Lua 5.1 equivalence/reconstruction checks report an explicit skip when `lua5.1` and `luac5.1` are unavailable.
 
 
 ## Luau reconstruction pipeline

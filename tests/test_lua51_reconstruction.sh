@@ -2,6 +2,10 @@
 set -euo pipefail
 BIN="${1:-./build/byteveil}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if ! command -v luac5.1 >/dev/null 2>&1 || ! command -v lua5.1 >/dev/null 2>&1; then
+    printf 'Lua 5.1 reconstruction tests: SKIP (lua5.1/luac5.1 not installed)\n'
+    exit 0
+fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cat >"$TMP/control.lua" <<'LUA'

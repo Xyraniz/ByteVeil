@@ -1,14 +1,20 @@
 #include <cstdint>
 #include <cstdlib>
-#include <csignal>
-#include <csetjmp>
-#include <unistd.h>
-#include <sys/resource.h>
+#include <chrono>
+#include <condition_variable>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <sys/resource.h>
+#endif
 #include "byteveil_decompiler/Decompile.h"
 #include "byteveil_decompiler/IR.h"
 #include "byteveil_decompiler/Lua51.h"
@@ -29,14 +35,32 @@ namespace luau { struct IdentityEncoder final : Luau::BytecodeEncoder { uint8_t 
 // makes malloc fail predictably instead, which libstdc++ reports as
 // std::bad_alloc: a normal, catchable exception the existing decompile()
 // try/catch below already handles.
-static void limitAddressSpace(rlim_t bytes) {
+static void limitAddressSpace(std::uint64_t bytes) {
+#if defined(_WIN32)
+    // A Job Object is the Windows equivalent of the POSIX address-space
+    // resource limit. Keep the handle alive for the lifetime of the process.
+    static HANDLE job = nullptr;
+    job = CreateJobObjectW(nullptr, nullptr);
+    if (!job)
+        return;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    limits.ProcessMemoryLimit = static_cast<SIZE_T>(bytes);
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
+        !AssignProcessToJobObject(job, GetCurrentProcess()))
+    {
+        CloseHandle(job);
+        job = nullptr;
+    }
+#else
     struct rlimit rl{};
     if (getrlimit(RLIMIT_AS, &rl) == 0) {
         if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur > bytes) {
-            rl.rlim_cur = bytes;
+            rl.rlim_cur = static_cast<rlim_t>(bytes);
             setrlimit(RLIMIT_AS, &rl);
         }
     }
+#endif
 }
 
 // The Luau-path decompiler is a best-effort static lifter, not a verified one:
@@ -47,8 +71,44 @@ static void limitAddressSpace(rlim_t bytes) {
 // codebase. Rather than let a single pathological input hang the CLI
 // indefinitely, bound the whole decompile() call with a wall-clock watchdog
 // and fail cleanly instead.
-static sigjmp_buf g_decompileTimeoutJmp;
-static void onDecompileTimeout(int) { siglongjmp(g_decompileTimeoutJmp, 1); }
+class DecompileWatchdog {
+public:
+    explicit DecompileWatchdog(unsigned int timeoutSec) : timeoutSec(timeoutSec) {
+        if (timeoutSec == 0)
+            return;
+        worker = std::thread([this] {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (!condition.wait_for(lock, std::chrono::seconds(this->timeoutSec), [this] { return stopped; })) {
+                std::cerr << "error: decompiler exceeded " << this->timeoutSec
+                          << "s timeout (bytecode shape likely defeats this lifter's assumptions; "
+                             "raise with --timeout or use --format protectors/unpack instead)\n";
+                std::cerr.flush();
+                std::_Exit(124);
+            }
+        });
+    }
+
+    ~DecompileWatchdog() { stop(); }
+    DecompileWatchdog(const DecompileWatchdog&) = delete;
+    DecompileWatchdog& operator=(const DecompileWatchdog&) = delete;
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopped = true;
+        }
+        condition.notify_one();
+        if (worker.joinable())
+            worker.join();
+    }
+
+private:
+    unsigned int timeoutSec;
+    bool stopped = false;
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::thread worker;
+};
 
 struct Options { std::string input, output, format = "lua", cfg; bool analyze = false, compileSource = true, quiet = false, noColor = false; unsigned int timeoutSec = 20; };
 static constexpr const char* VERSION = "ByteVeil 0.4.8";
@@ -178,22 +238,11 @@ int main(int ac, char** av)
         if (result.empty()) { std::cerr << "error: " << error << '\n'; return 1; }
         if (!o.cfg.empty() && o.format == "cfg" && !writeFile(o.cfg, result)) { std::cerr << "error: cannot write " << o.cfg << '\n'; return 1; }
     } else {
-        struct sigaction sa{}, oldSa{};
-        sa.sa_handler = onDecompileTimeout;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        bool watchdogArmed = o.timeoutSec > 0;
-        if (watchdogArmed) { sigaction(SIGALRM, &sa, &oldSa); alarm(o.timeoutSec); }
-        if (watchdogArmed && sigsetjmp(g_decompileTimeoutJmp, 1) != 0) {
-            std::cerr << "error: decompiler exceeded " << o.timeoutSec
-                      << "s timeout (bytecode shape likely defeats this lifter's assumptions; "
-                         "raise with --timeout or use --format protectors/unpack instead)\n";
-            return 1;
-        }
+        DecompileWatchdog watchdog(o.timeoutSec);
         try { result = Luau::Decompiler::decompile(state.get(), bc); }
         catch (const std::exception& e) { std::cerr << "error: decompiler exception: " << e.what() << '\n'; return 1; }
         catch (...) { std::cerr << "error: decompiler exception: unknown failure\n"; return 1; }
-        if (watchdogArmed) { alarm(0); sigaction(SIGALRM, &oldSa, nullptr); }
+        watchdog.stop();
         if (result.empty() || result.rfind("error:", 0) == 0) { std::cerr << "error: " << (result.empty() ? "decompiler returned no output" : result) << '\n'; return 1; }
     }
     if (o.output.empty()) std::cout << result << (result.empty() || result.back() == '\n' ? "" : "\n");
