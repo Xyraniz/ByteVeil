@@ -1,4 +1,5 @@
 #include "IR.h"
+#include "Restructure.h"
 #include <algorithm>
 #include <functional>
 #include <iomanip>
@@ -593,6 +594,7 @@ std::string inspectBytecode(lua_State* L, std::string& bytecode, const std::stri
     if (mode == "json" || mode == "ir") return IR::toJson(m);
     if (mode == "disassemble") return IR::disassemble(m);
     if (mode == "cfg") return IR::cfgDot(m);
+    if (mode == "structured") return Restructure::render(m);
     if (mode == "constants") return IR::constantsText(c->l.p);
     if (mode == "prototypes") return IR::prototypesText(c->l.p);
     error = "unknown inspection mode: " + mode; return {};
