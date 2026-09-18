@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased - Exact Luau CFG and multi-register dataflow
+
+### Corrected
+
+- Basic blocks now retain ordinary fallthrough edges when a block boundary exists only because another branch targets the next instruction. `RETURN` also terminates and splits blocks, so unreachable trailing code no longer contaminates the reachable CFG.
+- Generic-for preparation and `LOADB` skips are modeled as unconditional transfers; conditional jumps, loop latches, and `FASTCALL*` retain both paths.
+- Comparison instructions read their second register from AUX, not the unrelated `B` byte. `SETGLOBAL`, `SETUPVAL`, `SETTABLE*`, `SETLIST`, captures, fast calls, and variable ranges now expose their actual register uses.
+- `CALL`, `NAMECALL`, `GETVARARGS`, numeric loops, and generic loops record every register they define. Liveness, definition counts, and SSA consume the full definition set instead of assuming every opcode writes only register A.
+- SSA assigns a deterministic version to each individual register definition. JSON includes `definitions`, `definition_versions`, the raw `aux` value, and block `reachable` state while keeping the original primary `destination_register` field for compatibility.
+- Function IDs are allocated recursively without collisions between a nested prototype and a later sibling.
+- Natural loops with multiple latches are merged by header, loop scopes contain register sets instead of block IDs, and backward per-block liveness peaks are computed from `live_out` with definition kills.
+- Bytecode validation now distinguishes decoded instruction boundaries from requested jump targets, rejecting jumps into AUX words. AUX constants/registers and multi-register loop/name-call ranges receive explicit bounds checks.
+- MinGW builds link the GCC and C++ runtimes statically. This prevents Git Bash/MSYS from loading an ABI-incompatible `libstdc++-6.dll` from `PATH`, a failure that only reproduced in optimized builds launched from Bash.
+
+### Validation
+
+- Added a semantic IR regression covering table/global/upvalue writes, AUX comparisons, multi-result calls, method calls, varargs, numeric and generic loops, nested prototypes, CFG reciprocity/reachability, unique function IDs, and SSA definition alignment.
+- Seven-test CTest suite in both Debug and Release: **PASS**.
+
 ## Unreleased - Portable build and watchdog hardening
 
 ### Corrected

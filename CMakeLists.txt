@@ -25,7 +25,8 @@ set(BYTEVEIL_TEST_SCRIPTS
     test_lua51_extended.sh
     test_lua51_reconstruction.sh
     test_luau_decompile.sh
-    test_luau_regressions.sh)
+    test_luau_regressions.sh
+    test_ir_semantics.sh)
 foreach(TEST_SCRIPT IN LISTS BYTEVEIL_TEST_SCRIPTS)
     add_test(NAME byteveil_${TEST_SCRIPT} COMMAND bash ${CMAKE_SOURCE_DIR}/tests/${TEST_SCRIPT} $<TARGET_FILE:byteveil>)
     set_tests_properties(byteveil_${TEST_SCRIPT} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
@@ -47,6 +48,11 @@ option(LUAU_STATIC_CRT "Link with the static CRT (/MT)" OFF)
 
 add_subdirectory(luau EXCLUDE_FROM_ALL)
 target_link_libraries(byteveil PRIVATE Luau.Compiler Luau.VM Luau.Ast)
+if(MINGW)
+    # Git Bash and other MSYS environments often prepend their own, possibly
+    # ABI-incompatible libstdc++ DLL to PATH. Keep the produced CLI standalone.
+    target_link_options(byteveil PRIVATE -static-libgcc -static-libstdc++)
+endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
