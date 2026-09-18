@@ -178,6 +178,14 @@ namespace Luau::Decompiler::BlockGen {
                 materialize(LUAU_INSN_A(*insn));
                 break;
             }
+            case LOP_GETUPVAL: {
+                // Debug names are optional in Luau bytecode; keep the read
+                // visible with a stable synthetic name instead of dropping it.
+                auto name = new std::string("upvalue_" + std::to_string(LUAU_INSN_B(*insn)));
+                virtualStack.set(LUAU_INSN_A(*insn), makeGlobal(name->c_str()));
+                materialize(LUAU_INSN_A(*insn));
+                break;
+            }
             case LOP_GETIMPORT: {
                 // aux packs up to 3 path components as 10-bit constant-table
                 // indices (see BytecodeBuilder::getImportId): top 2 bits are the
@@ -344,11 +352,6 @@ namespace Luau::Decompiler::BlockGen {
                 }
                 break;
             }
-            case LOP_GETUPVAL: {
-                // Upvalue names are not available in all Luau bytecode versions.
-                // Do not fall through into a different opcode or fabricate a global.
-                break;
-            }
             case LOP_GETVARARGS: {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprVarargs{Location()});
                 break;
@@ -375,16 +378,19 @@ namespace Luau::Decompiler::BlockGen {
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Div,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_MOD:
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Mod,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_POW:
                 virtualStack.set(LUAU_INSN_A(*insn), new AstExprBinary {Location(), AstExprBinary::Op::Pow,
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_B(*insn)]),
                                                                         Luau::Decompiler::orPlaceholder(virtualStack[LUAU_INSN_C(*insn)])});
+                materialize(LUAU_INSN_A(*insn));
                 break;
             case LOP_RETURN: {
                 // B == 1 encodes one returned value; dropping that case made
