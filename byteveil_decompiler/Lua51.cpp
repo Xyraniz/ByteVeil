@@ -250,7 +250,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
     }
 }
 static void readableProto(std::ostringstream& o,const Proto& p){
-    o<<"-- ByteVeil reconstructed Lua 5.1 function "<<p.id<<" (CFG/SSA conservative)\n";
+    o<<"-- ByteVeil Lua 5.1 lifted (reconstructed) function "<<p.id<<" (CFG/SSA conservative)\n";
     for(int i=0;i<p.params;i++) o<<"local "<<localReg(p,i,0)<<"\n";
     emitRange(o,p,0,int(p.code.size()),0);
     if(p.id==0 && (p.code.empty()||p.code.back().op!=30)) o<<"return nil\n";

@@ -256,3 +256,14 @@ The automatic unpack route is intentionally narrow. It extracts literal payloads
 ByteVeil includes the Luau source tree required for its compiler, VM, AST, and analysis libraries. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), [luau/LICENSE.txt](luau/LICENSE.txt), and [luau/lua_LICENSE.txt](luau/lua_LICENSE.txt) for the applicable notices.
 
 The repository also documents design references and inspiration, including Oracle Decompiler, `luauDec`, and `unluau`. ByteVeil is not an official fork of those projects and is not affiliated with them.
+
+## Development and verification
+
+ByteVeil now exposes its CFG and SSA metadata through the inspection formats and validates that metadata before returning a module. The recommended local verification command is:
+
+```bash
+tests/run_all.sh
+```
+
+The runner configures and builds a debug-capable binary, then invokes CTest with `--output-on-failure`. Individual scripts can still be run with `build/byteveil` as their first argument. CLI options are rejected when a format is unknown or when `--timeout` is not a decimal value in the safe range `0..86400`; this prevents accidental silent fallback to a different inspection mode.
+
