@@ -117,8 +117,10 @@ static void annotateInstruction(Instruction& i)
     LuauOpcode op = LuauOpcode(i.opcode);
     if (writtenRegister(i.opcode) >= 0) i.destinationRegister = i.a;
     i.isAuxiliary = i.hasAux;
-    i.constantIndex = (op == LOP_LOADK || op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK ||
-                       op == LOP_DIVK || op == LOP_MODK || op == LOP_POWK || op == LOP_DUPCLOSURE) ? i.d : -1;
+    if (op == LOP_LOADK || op == LOP_DUPCLOSURE) i.constantIndex = i.d;
+    else if (op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
+             op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK) i.constantIndex = i.c;
+    else i.constantIndex = -1;
     auto add = [&](int r) { if (r >= 0) i.uses.push_back(r); };
     switch (op)
     {
@@ -181,8 +183,13 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         if (pc + len > p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": missing AUX instruction"; return false; }
         if (LUAU_INSN_A(raw) >= p->maxstacksize && (op != LOP_BREAK && op != LOP_NOP && op != LOP_COVERAGE))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": register A out of range"; return false; }
-        if ((op == LOP_LOADK || op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK || op == LOP_MODK || op == LOP_POWK || op == LOP_DUPCLOSURE) && LUAU_INSN_D(raw) >= p->sizek)
+        bool directConstant = op == LOP_LOADK || op == LOP_DUPCLOSURE;
+        bool cConstant = op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
+                         op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK;
+        if ((directConstant && LUAU_INSN_D(raw) >= p->sizek) || (cConstant && LUAU_INSN_C(raw) >= p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": constant index out of range"; return false; }
+        if ((op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK) && p->code[pc + 1] >= uint32_t(p->sizek))
+        { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": auxiliary constant index out of range"; return false; }
         if ((op == LOP_NEWCLOSURE) && LUAU_INSN_D(raw) >= p->sizep)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": prototype index out of range"; return false; }
         int target = jumpTarget(raw, pc);
