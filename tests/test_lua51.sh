@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -31,6 +31,28 @@ def u32(value):
 def lua_string(value):
     return u32(len(value) + 1) + value + b"\0"
 
+def build(code, constants, *, source=b"@synthetic", maxstack=2, nups=0, locals=(), upvalues=()):
+    chunk = bytearray(b"\x1bLua\x51\x00\x01\x04\x04\x04\x08\x00")
+    chunk += lua_string(source)
+    chunk += struct.pack("<iiBBBB", 0, 0, nups, 0, 2, maxstack)
+    chunk += u32(len(code)) + b"".join(u32(word) for word in code)
+    chunk += u32(len(constants))
+    for tag, value in constants:
+        chunk += bytes([tag])
+        if tag == 1:
+            chunk += bytes([bool(value)])
+        elif tag == 3:
+            chunk += struct.pack("<d", value)
+        elif tag == 4:
+            chunk += lua_string(value)
+    chunk += u32(0)  # child prototypes
+    chunk += u32(len(code)) + b"".join(u32(1) for _ in code)
+    chunk += u32(len(locals))
+    for name, start, end in locals:
+        chunk += lua_string(name) + u32(start) + u32(end)
+    chunk += u32(len(upvalues)) + b"".join(lua_string(name) for name in upvalues)
+    return chunk
+
 source = b"@synthetic\x1f\xff"
 literal = b'quote:" newline:\n nul:\0 ctrl:\x1f utf8:\xc3\xa9 raw:\xff'
 local_name = b"local\x1f\xff"
@@ -38,17 +60,21 @@ upvalue_name = b"upvalue\0\xff"
 loadk = 1  # LOADK A=0 Bx=0
 close = 35 | (1 << 6)  # CLOSE A=1; keeps LOADK separate from RETURN folding
 ret = 30 | (2 << 23)  # RETURN A=0 B=2 C=0
+open(sys.argv[1], "wb").write(build([loadk, close, ret], [(4, literal)], source=source, nups=1,
+    locals=[(local_name, 0, 3)], upvalues=[upvalue_name]))
 
-chunk = bytearray(b"\x1bLua\x51\x00\x01\x04\x04\x04\x08\x00")
-chunk += lua_string(source)
-chunk += struct.pack("<iiBBBB", 0, 0, 1, 0, 2, 2)
-chunk += u32(3) + u32(loadk) + u32(close) + u32(ret)
-chunk += u32(1) + b"\x04" + lua_string(literal)
-chunk += u32(0)  # child prototypes
-chunk += u32(3) + u32(1) + u32(1) + u32(1)
-chunk += u32(1) + lua_string(local_name) + u32(0) + u32(3)
-chunk += u32(1) + lua_string(upvalue_name)
-open(sys.argv[1], "wb").write(chunk)
+newtable = 10
+loadk_r1 = 1 | (1 << 6)
+setlist_extended = 34 | (1 << 23)  # A=0 B=1 C=0; next word is block number
+open(sys.argv[2], "wb").write(build([newtable, loadk_r1, setlist_extended, 2, ret], [(4, b"value")]))
+
+jump_far = 22 | ((131071 + 100) << 14)
+open(sys.argv[3], "wb").write(build([jump_far, ret], []))
+load_missing_constant = 1 | (3 << 14)
+open(sys.argv[4], "wb").write(build([load_missing_constant, ret], [(0, None)]))
+move_bad_register = 0 | (7 << 23)
+open(sys.argv[5], "wb").write(build([move_bad_register, ret], []))
+open(sys.argv[6], "wb").write(build([setlist_extended], []))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -68,4 +94,27 @@ PY
 grep -q 'bytes=.*ff$' "$TMP/binary-strings.txt"
 grep -q '\\000' "$TMP/binary-strings.lua"
 grep -q '^r0 = ' "$TMP/binary-strings.lua"
+"$BIN" --bytecode "$TMP/setlist-extra.luac" --disassemble >"$TMP/setlist-extra.dis"
+"$BIN" --bytecode "$TMP/setlist-extra.luac" --format json >"$TMP/setlist-extra.json"
+"$BIN" --bytecode "$TMP/setlist-extra.luac" --format lua >"$TMP/setlist-extra.lua"
+grep -q 'SETLIST .* block=2' "$TMP/setlist-extra.dis"
+grep -q 'EXTRAARG raw=2' "$TMP/setlist-extra.dis"
+grep -q 'r0\[51\] = r1' "$TMP/setlist-extra.lua"
+"$BYTEVEIL_PYTHON" - "$TMP/setlist-extra.json" <<'PY'
+import json, sys
+instructions = json.load(open(sys.argv[1]))["root_function"]["instructions"]
+assert instructions[2]["setlist_block"] == 2
+assert instructions[3]["opcode_name"] == "EXTRAARG"
+assert instructions[3]["extra_word"] is True
+PY
+for case in bad-jump bad-constant bad-register missing-extra; do
+    if "$BIN" --bytecode "$TMP/$case.luac" --format json >"$TMP/$case.out" 2>"$TMP/$case.err"; then
+        echo "malformed Lua 5.1 case $case was accepted" >&2
+        exit 1
+    fi
+done
+grep -q 'jump target is not an instruction boundary' "$TMP/bad-jump.err"
+grep -q 'constant index out of range' "$TMP/bad-constant.err"
+grep -q 'register B out of range' "$TMP/bad-register.err"
+grep -q 'SETLIST is missing its extra block word' "$TMP/missing-extra.err"
 printf 'Lua 5.1 reader tests: PASS\n'

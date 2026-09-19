@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - Lua 5.1 instruction-boundary validation
+
+### Corrected
+
+- Lua 5.1 `SETLIST C=0` now consumes and exposes its following block-number word as `EXTRAARG` instead of decoding it as a second instruction. The reconstructed list index uses that block number and preserves open multiple-return tails.
+- Lua 5.1 `TFORLOOP`, comparison skips, and `LOADBOOL` skips now point at their real instruction boundaries; jumps into `SETLIST` extra words are rejected.
+- The reader validates opcode values, register/RK/upvalue/constant ranges, call/return/loop result ranges, child-prototype indices, jump targets, line/debug spans, and aggregate prototype/code/constant limits before emitting output.
+- CTest now resolves a real Git/MSYS `bash` when Windows' Store WSL alias is first on `PATH`, so Windows paths are translated correctly when tests run from PowerShell or CI.
+
+### Validation
+
+- Added valid `SETLIST`-with-extra-word coverage and malformed Lua 5.1 chunks for out-of-range jumps, constants, registers, and missing extra words. Debug and Release CTest: **8/8 PASS**.
+
 ## Unreleased - Binary-safe Lua 5.1 strings and metadata
 
 ### Added

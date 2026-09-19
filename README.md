@@ -229,7 +229,7 @@ The equivalence harness compares an original Lua 5.1 program with a candidate li
 ./tests/equivalence_lua51.sh original.lua candidate.lua
 ```
 
-The project builds successfully as `ByteVeil 0.5.0`; the CLI, Luau integrity, Luau regression, IR-semantic, Lua 5.1 reader, extended, reconstruction, and Luau behavioral-equivalence suites pass in the maintained checkout. The Lua 5.1 equivalence harness remains separate and requires an external `lua5.1` executable; the Luau equivalence suite uses the vendored VM and needs no system interpreter.
+The project builds successfully as `ByteVeil 0.5.0`; the CLI, Luau integrity, Luau regression, IR-semantic, Lua 5.1 reader, extended, reconstruction, and Luau behavioral-equivalence suites pass in the maintained checkout. The Lua 5.1 reader also validates instruction boundaries and malformed operands before lifting. The Lua 5.1 equivalence harness remains separate and requires an external `lua5.1` executable; the Luau equivalence suite uses the vendored VM and needs no system interpreter.
 
 The checked fixtures cover JSON output, disassembly, CFG generation, Lua 5.1 lifting, Luau loop metadata, simple return/call regressions, and truncated-bytecode rejection. The project's existing documentation also records validation against 18 Lua 5.1 chunks derived from a MoonSec V3 corpus. That result describes the recorded test run; it is not a guarantee that every protector sample can be analyzed or lifted.
 

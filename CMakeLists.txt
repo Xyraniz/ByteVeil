@@ -19,6 +19,19 @@ add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_
 
 include(CTest)
 enable_testing()
+find_program(BYTEVEIL_BASH_EXECUTABLE NAMES bash.exe bash)
+if(WIN32 AND BYTEVEIL_BASH_EXECUTABLE MATCHES "[/\\\\]WindowsApps[/\\\\]")
+    # The Windows Store WSL alias accepts POSIX commands but cannot translate
+    # CMake's Windows paths. Prefer a real Git/MSYS bash when the alias wins
+    # PATH lookup; this keeps CTest usable from PowerShell and CI alike.
+    unset(BYTEVEIL_BASH_EXECUTABLE CACHE)
+    find_program(BYTEVEIL_BASH_EXECUTABLE NAMES bash.exe bash
+        HINTS "$ENV{LOCALAPPDATA}/hermes/git/bin" "$ENV{ProgramFiles}/Git/bin" "$ENV{ProgramFiles}/Git/usr/bin"
+        NO_DEFAULT_PATH)
+endif()
+if(NOT BYTEVEIL_BASH_EXECUTABLE)
+    message(FATAL_ERROR "ByteVeil tests require a bash executable")
+endif()
 set(BYTEVEIL_TEST_SCRIPTS
     test_cli.sh
     test_lua51.sh
@@ -28,7 +41,7 @@ set(BYTEVEIL_TEST_SCRIPTS
     test_luau_regressions.sh
     test_ir_semantics.sh)
 foreach(TEST_SCRIPT IN LISTS BYTEVEIL_TEST_SCRIPTS)
-    add_test(NAME byteveil_${TEST_SCRIPT} COMMAND bash ${CMAKE_SOURCE_DIR}/tests/${TEST_SCRIPT} $<TARGET_FILE:byteveil>)
+    add_test(NAME byteveil_${TEST_SCRIPT} COMMAND ${BYTEVEIL_BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/${TEST_SCRIPT} $<TARGET_FILE:byteveil>)
     set_tests_properties(byteveil_${TEST_SCRIPT} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endforeach()
 
@@ -65,7 +78,7 @@ if(BUILD_TESTING)
         target_link_options(byteveil_luau_runner PRIVATE -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME byteveil_test_luau_equivalence.sh
-        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/test_luau_equivalence.sh $<TARGET_FILE:byteveil> $<TARGET_FILE:byteveil_luau_runner>)
+        COMMAND ${BYTEVEIL_BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_luau_equivalence.sh $<TARGET_FILE:byteveil> $<TARGET_FILE:byteveil_luau_runner>)
     set_tests_properties(byteveil_test_luau_equivalence.sh PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
