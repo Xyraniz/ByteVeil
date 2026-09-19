@@ -21,6 +21,10 @@ struct Reader {
     int sizeT = 4;
     int numberSize = 8;
     int maxString = 64 * 1024 * 1024;
+    uint64_t totalInstructions = 0;
+    uint64_t totalConstants = 0;
+    uint64_t totalDebugEntries = 0;
+    uint64_t totalPrototypes = 0;
     explicit Reader(const std::string& d) : data(d) {}
     void need(size_t n) { if (n > data.size() - pos) throw std::runtime_error("truncated Lua 5.1 chunk"); }
     uint8_t u8() { need(1); return uint8_t(data[pos++]); }
@@ -33,12 +37,12 @@ struct Reader {
 };
 
 struct LocalInfo { std::string name; int start=0; int end=0; };
-struct Instr { uint32_t raw=0; int pc=0, op=0, a=0,b=0,c=0,bx=0,sbx=0; int target=-1; int openProducer=-1; };
+struct Instr { uint32_t raw=0; int pc=0, op=0, a=0,b=0,c=0,bx=0,sbx=0; int target=-1; int openProducer=-1; int setlistBlock=-1; bool extraWord=false; };
 struct ConstantInfo { std::string type; std::string lua; std::string value; std::string stringBytesHex; };
 struct Proto { int id=0,parent=-1,linedefined=0,lastline=0,nups=0,params=0,vararg=0,maxstack=0; std::string source; std::vector<int> lines; std::vector<LocalInfo> locals; std::vector<std::string> upvalues; std::vector<Instr> code; std::vector<std::string> constants; std::vector<ConstantInfo> constantTable; std::vector<Proto> children; };
 
 static const char* ops[] = {"MOVE","LOADK","LOADBOOL","LOADNIL","GETUPVAL","GETGLOBAL","GETTABLE","SETGLOBAL","SETUPVAL","SETTABLE","NEWTABLE","SELF","ADD","SUB","MUL","DIV","MOD","POW","UNM","NOT","LEN","CONCAT","JMP","EQ","LT","LE","TEST","TESTSET","CALL","TAILCALL","RETURN","FORLOOP","FORPREP","TFORLOOP","SETLIST","CLOSE","CLOSURE","VARARG"};
-static const char* opName(int op) { return op>=0 && op<38 ? ops[op] : "UNKNOWN"; }
+static const char* opName(int op) { return op==-1 ? "EXTRAARG" : op>=0 && op<38 ? ops[op] : "UNKNOWN"; }
 
 static std::string bytesHex(const std::string& value) {
     static const char digits[]="0123456789abcdef"; std::string result; result.reserve(value.size()*2);
@@ -110,17 +114,82 @@ static void advanced(std::ostringstream& o,const Proto& p){
     std::vector<int> idx(p.code.size(),-1),low(p.code.size()),st;std::vector<char> on(p.code.size());int seq=0,scc=0;std::function<void(int)> visit=[&](int v){idx[v]=low[v]=seq++;st.push_back(v);on[v]=1;for(int w:g[v]){if(idx[w]<0){visit(w);low[v]=std::min(low[v],low[w]);}else if(on[w])low[v]=std::min(low[v],idx[w]);}if(low[v]==idx[v]){int n=0,w;do{w=st.back();st.pop_back();on[w]=0;n++;}while(w!=v);if(n>1)scc++;}};for(size_t i=0;i<p.code.size();i++)if(idx[i]<0)visit(int(i));
     o<<"\"analysis\":{\"alias_hazards\":"<<alias<<",\"scope_overlaps\":"<<scope<<",\"dynamic_metamethod_sites\":"<<metamethod<<",\"irreducible_or_loop_sccs\":"<<scc<<"},";
 }
+
+static void validateProtoData(const Proto& p){
+    auto failure=[&](const Instr& i,const std::string& message){throw std::runtime_error("Lua function "+std::to_string(p.id)+" pc "+std::to_string(i.pc)+": "+message);};
+    auto checkReg=[&](const Instr& i,int reg,const char* field){if(reg<0||reg>=p.maxstack)failure(i,std::string("register ")+field+" out of range");};
+    auto checkRange=[&](const Instr& i,int first,int count,const char* field){if(count<0||first<0||first+count>p.maxstack)failure(i,std::string("register range ")+field+" out of range");};
+    auto checkRK=[&](const Instr& i,int operand,const char* field){if(operand&256){if((operand&255)>=int(p.constants.size()))failure(i,std::string("constant ")+field+" out of range");}else checkReg(i,operand,field);};
+    auto checkConstant=[&](const Instr& i,int index){if(index<0||index>=int(p.constants.size()))failure(i,"constant index out of range");};
+    auto checkUpvalue=[&](const Instr& i,int index){if(index<0||index>=p.nups)failure(i,"upvalue index out of range");};
+    auto checkTarget=[&](const Instr& i){if(i.target<0||i.target>=int(p.code.size())||p.code[i.target].extraWord)failure(i,"jump target is not an instruction boundary");};
+
+    for(const Instr& i:p.code){
+        if(i.extraWord)continue;
+        if(i.op<0||i.op>=38)failure(i,"unknown opcode "+std::to_string(i.op));
+        switch(i.op){
+        case 0:checkReg(i,i.a,"A");checkReg(i,i.b,"B");break;
+        case 1:checkReg(i,i.a,"A");checkConstant(i,i.bx);break;
+        case 2:checkReg(i,i.a,"A");if(i.b>1)failure(i,"LOADBOOL boolean operand out of range");if(i.c)checkTarget(i);break;
+        case 3:checkReg(i,i.a,"A");checkReg(i,i.b,"B");if(i.b<i.a)failure(i,"LOADNIL range is reversed");break;
+        case 4:checkReg(i,i.a,"A");checkUpvalue(i,i.b);break;
+        case 5:checkReg(i,i.a,"A");checkConstant(i,i.bx);break;
+        case 6:checkReg(i,i.a,"A");checkReg(i,i.b,"B");checkRK(i,i.c,"C");break;
+        case 7:checkReg(i,i.a,"A");checkConstant(i,i.bx);break;
+        case 8:checkReg(i,i.a,"A");checkUpvalue(i,i.b);break;
+        case 9:checkReg(i,i.a,"A");checkRK(i,i.b,"B");checkRK(i,i.c,"C");break;
+        case 10:checkReg(i,i.a,"A");break;
+        case 11:checkRange(i,i.a,2,"SELF results");checkReg(i,i.b,"B");checkRK(i,i.c,"C");break;
+        case 12:case 13:case 14:case 15:case 16:case 17:checkReg(i,i.a,"A");checkRK(i,i.b,"B");checkRK(i,i.c,"C");break;
+        case 18:case 19:case 20:checkReg(i,i.a,"A");checkReg(i,i.b,"B");break;
+        case 21:checkReg(i,i.a,"A");checkReg(i,i.b,"B");checkReg(i,i.c,"C");if(i.b>i.c)failure(i,"CONCAT range is reversed");break;
+        case 22:if(i.a>p.maxstack)failure(i,"JMP close register out of range");checkTarget(i);break;
+        case 23:case 24:case 25:if(i.a>1)failure(i,"comparison inversion flag out of range");checkRK(i,i.b,"B");checkRK(i,i.c,"C");checkTarget(i);break;
+        case 26:checkReg(i,i.a,"A");if(i.c>1)failure(i,"TEST boolean operand out of range");checkTarget(i);break;
+        case 27:checkReg(i,i.a,"A");checkReg(i,i.b,"B");if(i.c>1)failure(i,"TESTSET boolean operand out of range");checkTarget(i);break;
+        case 28:case 29:checkReg(i,i.a,"A");if(i.b>1)checkRange(i,i.a+1,i.b-1,"call arguments");if(i.op==28&&i.c>1)checkRange(i,i.a,i.c-1,"call results");break;
+        case 30:checkReg(i,i.a,"A");if(i.b>0)checkRange(i,i.a,i.b-1,"return values");break;
+        case 31:case 32:checkRange(i,i.a,4,"numeric for");checkTarget(i);break;
+        case 33:if(i.c==0)failure(i,"TFORLOOP result count is zero");checkRange(i,i.a,3+i.c,"generic for");checkTarget(i);break;
+        case 34:checkReg(i,i.a,"A");if(i.b>0)checkRange(i,i.a+1,i.b,"SETLIST values");if(i.setlistBlock<=0)failure(i,"SETLIST block index is zero");break;
+        case 35:if(i.a<0||i.a>p.maxstack)failure(i,"CLOSE register out of range");break;
+        case 36:checkReg(i,i.a,"A");if(i.bx<0||i.bx>=int(p.children.size()))failure(i,"child prototype index out of range");break;
+        case 37:checkReg(i,i.a,"A");if(i.b>1)checkRange(i,i.a,i.b-1,"vararg results");break;
+        }
+    }
+    if(!p.lines.empty()&&p.lines.size()!=p.code.size())throw std::runtime_error("Lua function "+std::to_string(p.id)+": lineinfo count does not match code size");
+    if(p.upvalues.size()>size_t(p.nups))throw std::runtime_error("Lua function "+std::to_string(p.id)+": upvalue debug count exceeds upvalue count");
+    for(const LocalInfo& local:p.locals)if(local.start<0||local.end<local.start||local.end>int(p.code.size()))throw std::runtime_error("Lua function "+std::to_string(p.id)+": invalid local debug range");
+}
+
 static void parseProto(Reader& r, Proto& p, int& next, int parent, int depth) {
     if(depth>128) throw std::runtime_error("Lua prototype nesting exceeds 128");
+    if(++r.totalPrototypes>100000) throw std::runtime_error("Lua prototype limit exceeded");
     p.id=next++; p.parent=parent; p.source=r.luaString(); p.linedefined=r.i32(); p.lastline=r.i32(); p.nups=r.u8(); p.params=r.u8(); p.vararg=r.u8(); p.maxstack=r.u8();
     if(p.maxstack==0) throw std::runtime_error("Lua prototype has zero maxstack");
-    uint32_t ncode=r.u32(); if(ncode>1000000) throw std::runtime_error("Lua instruction limit exceeded"); p.code.reserve(ncode);
-    for(uint32_t pc=0;pc<ncode;pc++){ Instr i; i.pc=int(pc); i.raw=r.u32(); i.op=i.raw&0x3f; i.a=(i.raw>>6)&0xff; i.c=(i.raw>>14)&0x1ff; i.b=(i.raw>>23)&0x1ff; i.bx=(i.raw>>14)&0x3ffff; i.sbx=i.bx-131071; if(i.a>=p.maxstack && i.op!=35) throw std::runtime_error("Lua register A out of range"); if(i.op==22||i.op==31||i.op==32) i.target=i.pc+i.sbx+1; else if(i.op==33) i.target=i.pc+i.c+1; if(i.op==34&&i.b==0) for(int prev=int(pc)-1;prev>=0;--prev) if(p.code[prev].op==28||p.code[prev].op==29||p.code[prev].op==37){i.openProducer=prev;break;} p.code.push_back(i); }
-    uint32_t nk=r.u32(); if(nk>1000000) throw std::runtime_error("Lua constant limit exceeded"); for(uint32_t i=0;i<nk;i++){ConstantInfo info=constant(r);p.constants.push_back(info.lua);p.constantTable.push_back(std::move(info));}
+    uint32_t ncode=r.u32(); if(ncode>1000000-r.totalInstructions) throw std::runtime_error("Lua instruction limit exceeded"); r.totalInstructions+=ncode; p.code.reserve(ncode);
+    std::vector<uint32_t> rawCode; rawCode.reserve(ncode); for(uint32_t pc=0;pc<ncode;pc++)rawCode.push_back(r.u32());
+    bool nextIsExtra=false;
+    for(uint32_t pc=0;pc<ncode;pc++){
+        Instr i; i.pc=int(pc); i.raw=rawCode[pc];
+        if(nextIsExtra){i.op=-1;i.extraWord=true;i.setlistBlock=int(i.raw);nextIsExtra=false;p.code.push_back(i);continue;}
+        i.op=i.raw&0x3f; i.a=(i.raw>>6)&0xff; i.c=(i.raw>>14)&0x1ff; i.b=(i.raw>>23)&0x1ff; i.bx=(i.raw>>14)&0x3ffff; i.sbx=i.bx-131071;
+        if(i.op==22||i.op==31||i.op==32)i.target=i.pc+i.sbx+1;
+        else if((i.op>=23&&i.op<=27)||i.op==33)i.target=i.pc+2;
+        else if(i.op==2&&i.c)i.target=i.pc+2;
+        if(i.op==34){
+            if(i.c==0){if(pc+1>=ncode)throw std::runtime_error("Lua SETLIST is missing its extra block word");i.setlistBlock=int(rawCode[pc+1]);nextIsExtra=true;}
+            else i.setlistBlock=i.c;
+            if(i.b==0)for(int prev=int(pc)-1;prev>=0;--prev)if(p.code[prev].op==28||p.code[prev].op==29||p.code[prev].op==37){i.openProducer=prev;break;}
+        }
+        p.code.push_back(i);
+    }
+    uint32_t nk=r.u32(); if(nk>1000000-r.totalConstants) throw std::runtime_error("Lua constant limit exceeded"); r.totalConstants+=nk; for(uint32_t i=0;i<nk;i++){ConstantInfo info=constant(r);p.constants.push_back(info.lua);p.constantTable.push_back(std::move(info));}
     uint32_t np=r.u32(); if(np>100000) throw std::runtime_error("Lua child prototype limit exceeded"); p.children.resize(np); for(auto& c:p.children)parseProto(r,c,next,p.id,depth+1);
-    uint32_t lines=r.u32(); if(lines>1000000)throw std::runtime_error("Lua lineinfo limit exceeded"); p.lines.reserve(lines); for(uint32_t i=0;i<lines;i++)p.lines.push_back(r.i32());
-    uint32_t locals=r.u32(); if(locals>1000000)throw std::runtime_error("Lua local debug limit exceeded"); p.locals.reserve(locals); for(uint32_t i=0;i<locals;i++){LocalInfo x; x.name=r.luaString(); x.start=int(r.u32()); x.end=int(r.u32()); p.locals.push_back(std::move(x));}
-    uint32_t ups=r.u32(); if(ups>1000000)throw std::runtime_error("Lua upvalue debug limit exceeded"); p.upvalues.reserve(ups); for(uint32_t i=0;i<ups;i++)p.upvalues.push_back(r.luaString());
+    uint32_t lines=r.u32(); if(lines>1000000-r.totalDebugEntries)throw std::runtime_error("Lua lineinfo limit exceeded"); r.totalDebugEntries+=lines; p.lines.reserve(lines); for(uint32_t i=0;i<lines;i++)p.lines.push_back(r.i32());
+    uint32_t locals=r.u32(); if(locals>1000000-r.totalDebugEntries)throw std::runtime_error("Lua local debug limit exceeded"); r.totalDebugEntries+=locals; p.locals.reserve(locals); for(uint32_t i=0;i<locals;i++){LocalInfo x; x.name=r.luaString(); x.start=int(r.u32()); x.end=int(r.u32()); p.locals.push_back(std::move(x));}
+    uint32_t ups=r.u32(); if(ups>1000000-r.totalDebugEntries)throw std::runtime_error("Lua upvalue debug limit exceeded"); r.totalDebugEntries+=ups; p.upvalues.reserve(ups); for(uint32_t i=0;i<ups;i++)p.upvalues.push_back(r.luaString());
+    validateProtoData(p);
 }
 static Proto parse(const std::string& d) { Reader r(d); header(r); Proto p; int next=0; parseProto(r,p,next,-1,0); if(r.pos!=d.size()) throw std::runtime_error("trailing bytes after Lua chunk"); return p; }
 
@@ -155,11 +224,12 @@ static void jsonProto(std::ostringstream& o,const Proto& p){
         o<<"{\"pc\":"<<i.pc<<",\"line\":"<<(i.pc<int(p.lines.size())?p.lines[i.pc]:-1)<<",\"opcode\":"<<i.op
          <<",\"opcode_name\":\""<<opName(i.op)<<"\",\"a\":"<<i.a<<",\"b\":"<<i.b<<",\"c\":"<<i.c
          <<",\"bx\":"<<i.bx<<",\"sbx\":"<<i.sbx<<",\"jump_target\":"<<i.target
+         <<",\"extra_word\":"<<(i.extraWord?"true":"false")<<",\"setlist_block\":"<<i.setlistBlock
          <<",\"open_tail\":"<<(i.op==34&&i.b==0?"true":"false")<<",\"open_producer_pc\":"<<i.openProducer<<"}";
     }
     o<<"],\"children\":[";for(size_t i=0;i<p.children.size();i++){if(i)o<<',';jsonProto(o,p.children[i]);}o<<"]}";
 }
-static void disProto(std::ostringstream& o,const Proto& p){ o<<"function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" constants="<<p.constants.size()<<"\n"; for(const auto&i:p.code){ o<<"  @"<<i.pc<<" "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" Bx="<<i.bx<<" sBx="<<i.sbx; if(i.target>=0)o<<" -> "<<i.target; if(i.op==34&&i.b==0)o<<" OPEN_TAIL producer="<<i.openProducer; o<<"\n"; } for(const auto&c:p.children)disProto(o,c); }
+static void disProto(std::ostringstream& o,const Proto& p){ o<<"function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" constants="<<p.constants.size()<<"\n"; for(const auto&i:p.code){ o<<"  @"<<i.pc<<" "<<opName(i.op); if(i.extraWord)o<<" raw="<<i.raw;else{o<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" Bx="<<i.bx<<" sBx="<<i.sbx;if(i.op==34)o<<" block="<<i.setlistBlock;} if(i.target>=0)o<<" -> "<<i.target; if(i.op==34&&i.b==0)o<<" OPEN_TAIL producer="<<i.openProducer; o<<"\n"; } for(const auto&c:p.children)disProto(o,c); }
 static void cfgProto(std::ostringstream& o,const Proto& p){ o<<"digraph lua51_cfg_"<<p.id<<" {\n"; std::vector<int> starts{0}; for(const auto&i:p.code)if(i.target>=0){starts.push_back(i.target);if(i.pc+1<int(p.code.size()))starts.push_back(i.pc+1);} std::sort(starts.begin(),starts.end());starts.erase(std::unique(starts.begin(),starts.end()),starts.end()); for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;o<<"  b"<<i<<" [label=\""<<starts[i]<<".."<<end<<"\"];\n";} for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;const Instr* last=nullptr;for(const auto&ins:p.code)if(ins.pc>=starts[i]&&ins.pc<=end)last=&ins;if(last&&last->target>=0){auto it=std::find(starts.begin(),starts.end(),last->target);if(it!=starts.end())o<<"  b"<<i<<" -> b"<<(it-starts.begin())<<";\n";} if(last&& (last->op==23||last->op==24||last->op==25||last->op==26||last->op==27||last->op==33) && i+1<starts.size())o<<"  b"<<i<<" -> b"<<i+1<<";\n";}o<<"}\n"; }
 static void luaProto(std::ostringstream& o,const Proto& p){ o<<"-- ByteVeil Lua 5.1 diagnostic decompilation\n-- function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" instructions="<<p.code.size()<<"\n";for(const auto&i:p.code)o<<"-- ["<<i.pc<<"] "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<"\n";for(const auto&c:p.children)luaProto(o,c);if(p.id==0)o<<"return nil\n";}
 static std::string reg(int a){return "r"+std::to_string(a);}
@@ -236,7 +306,7 @@ static void liftFunctionBody(std::ostringstream& o,const Proto& p){
         case 28:o<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")";if(i.c==0)o<<" -- open multiple returns";o<<"\n";break;
         case 29:o<<"do return "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<") end\n";break;
         case 30:{int n=i.b==0?1:i.b-1;o<<"do return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<localReg(p,i.a+k,i.pc);}if(i.b==0 && (p.vararg&2))o<<", ...";o<<" end\n";break;}
-        case 34:if(i.b==0)o<<"-- recovered open SETLIST at pc "<<i.pc<<" from producer pc "<<i.openProducer<<"\n";else { int base=(i.c-1)*50; for(int k=1;k<i.b;k++) o<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n"; } break;
+        case 34:if(i.b==0)o<<"-- recovered open SETLIST at pc "<<i.pc<<" from producer pc "<<i.openProducer<<" block "<<i.setlistBlock<<"\n";else { int base=(i.setlistBlock-1)*50; for(int k=1;k<=i.b;k++) o<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n"; } break;
         case 35:o<<"-- CLOSE registers >= "<<i.a<<"; captured upvalues remain represented\n";break;
         case 36:if(size_t(i.bx)<p.children.size()){const Proto& c=p.children[i.bx];o<<reg(i.a)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<reg(k);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";for(int k=0;k<c.nups;k++)o<<"    local __upvalue_"<<k<<" = nil\n";liftFunctionBody(o,c);o<<"end\n";}else o<<"-- CLOSURE child index "<<i.bx<<" unavailable\n";break;
         case 37:if(!(p.vararg&2)){o<<"-- VARARG used by a non-variadic prototype\n";o<<localReg(p,i.a,i.pc)<<" = nil\n";}else if(i.b==0)o<<localReg(p,i.a,i.pc)<<" = ...\n";else{o<<localReg(p,i.a,i.pc);for(int k=1;k<i.b-1;k++)o<<", "<<localReg(p,i.a+k,i.pc);o<<" = ...\n";}break;
@@ -272,7 +342,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 28:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
     case 29:o<<pad<<"return "<<valueAt(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
     case 30:{int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<valueAt(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
-    case 34: if(i.b>0){int base=(i.c-1)*50;for(int k=1;k<i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}break;
+    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}break;
     case 36: if(size_t(i.bx)<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}break;
     default: break;
     }
