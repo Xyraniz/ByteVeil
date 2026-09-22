@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased - Lua 5.1 TESTSET short-circuit recovery
+
+### Corrected
+
+- The readable route now models a forward `TESTSET + JMP` pair. It writes `A = B` only on the VM branch where `truth(B) == C`, takes that pair's jump on the same branch, and emits the fallthrough range as the other branch.
+- Register-value propagation now stops at a definition that a previous forward edge can bypass. This avoids turning a path-dependent `TESTSET` result into a false fixed constant at a later `RETURN` or call.
+
+### Explicit limit
+
+- `TESTSET` with a missing/non-`JMP` follower, a backward target, or an unproven join remains a visible diagnostic. It is not treated as a complete general CFG solution.
+
+### Validation
+
+- Added self-contained binary regressions for both `C=0` (`and`-style) and `C=1` (`or`-style) short-circuit forms. Each asserts the conditional write, the fallthrough assignment, the join value, and absence of the unresolved-opcode marker.
+
 ## Unreleased - Lua 5.1 CLOSURE capture integrity
 
 ### Corrected
@@ -22,7 +37,7 @@
 
 - The readable lifter now emits `GETUPVAL`, `SETUPVAL`, `SELF`, `VARARG`, full-range `LOADNIL`, `CLOSE`, and fixed-result `CALL` operations instead of omitting them from reconstructed source.
 - `LOADBOOL C=1` now skips the following instruction on the readable route, matching the Lua 5.1 VM.
-- Open-arity calls, open `SETLIST` tails, unpaired loop instructions, `TESTSET`, and every other unresolved opcode now carry an explicit PC/operand diagnostic. No reachable instruction is silently discarded by the readable renderer.
+- Open-arity calls, open `SETLIST` tails, unpaired loop instructions, unpaired `TESTSET`, and every other unresolved opcode now carry an explicit PC/operand diagnostic. No reachable instruction is silently discarded by the readable renderer.
 
 ### Validation
 

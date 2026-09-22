@@ -399,6 +399,13 @@ static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const
     for(int n=pc-1;n>=0;--n){
         const Instr& definition=p.code[n];
         if(definition.closureBindingFor>=0 || definition.a!=registerIndex) continue;
+        // A forward edge that bypasses this definition can reach the current
+        // use without assigning it.  In that case a local textual fold would
+        // turn a path-dependent TESTSET/branch result into a false constant.
+        // Keep the register reference until CFG-aware SSA reaches this path.
+        for(const Instr& edge:p.code)
+            if(edge.pc<n && edge.target>=pc && edge.target>n)
+                return renderedLocal(p,registerIndex,pc,context);
         if(definition.op==1) return definition.bx<int(p.constants.size())?p.constants[definition.bx]:"nil";
         if(definition.op==0) return renderedValueAt(p,definition.b,n,context);
         if(definition.op==3) return "nil";
@@ -632,6 +639,27 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             emitRange(o,p,pc+1,i.target,indent+4,context);
             o<<pad<<"end\n";
             pc=i.target+2;
+            continue;
+        }
+        // TESTSET consumes the following JMP.  Lua 5.1 copies B into A only
+        // when truth(B) equals C, then takes that JMP; otherwise it skips the
+        // JMP and evaluates the fallthrough range.  This is the usual shape
+        // for `and`/`or` assignment lowering.  Reconstruct it only when the
+        // branch is forward and therefore has a proven join; unusual or
+        // cyclic shapes retain the explicit TESTSET diagnostic below.
+        if(i.op==27 && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
+            const int fallthrough=pc+2;
+            const int join=p.code[pc+1].target;
+            const std::string tested=renderedLocal(p,i.b,i.pc,context);
+            const std::string condition=i.c ? tested : "not ("+tested+")";
+            o<<pad<<"if "<<condition<<" then\n";
+            o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<tested<<"\n";
+            if(fallthrough<join){
+                o<<pad<<"else\n";
+                emitRange(o,p,fallthrough,join,indent+4,context);
+            }
+            o<<pad<<"end\n";
+            pc=join;
             continue;
         }
         // Repeat/until: a conditional immediately followed by a backward jump.

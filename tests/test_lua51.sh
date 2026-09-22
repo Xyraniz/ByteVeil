@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -161,6 +161,19 @@ jump_to_closure_binding = 22 | ((131071 + 1) << 14)  # pc 0 -> pc 2
 open(sys.argv[17], "wb").write(build(
     [jump_to_closure_binding, closure_r1_child0, binding_move_r255_from_r0, ret], [], maxstack=2,
     children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
+
+# TESTSET assigns A = B only on the branch that consumes the following JMP.
+# C=0 is the compiler's short-circuit `and` shape; C=1 is its `or` shape.
+jump_over_fallback = 22 | ((131071 + 1) << 14)  # pc 2 -> pc 4
+loadk_fallback_r0 = 1 | (1 << 14)
+testset_and = 27 | (1 << 23)                 # A=0 B=1 C=0
+testset_or = 27 | (1 << 23) | (1 << 14)      # A=0 B=1 C=1
+open(sys.argv[18], "wb").write(build(
+    [loadk_r1, testset_and, jump_over_fallback, loadk_fallback_r0, ret],
+    [(1, False), (4, b"fallback")], maxstack=2))
+open(sys.argv[19], "wb").write(build(
+    [loadk_r1, testset_or, jump_over_fallback, loadk_fallback_r0, ret],
+    [(1, True), (4, b"fallback")], maxstack=2))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -219,6 +232,20 @@ if grep -q '^r2 = nil$' "$TMP/readable-coverage.lua"; then
     echo "LOADBOOL C=1 did not skip the following instruction" >&2
     exit 1
 fi
+"$BIN" --bytecode "$TMP/testset-and.luac" --format lua >"$TMP/testset-and.lua"
+"$BIN" --bytecode "$TMP/testset-or.luac" --format lua >"$TMP/testset-or.lua"
+grep -q '^if not (r1) then$' "$TMP/testset-and.lua"
+grep -q '^if r1 then$' "$TMP/testset-or.lua"
+for case in testset-and testset-or; do
+    grep -q '^    r0 = r1$' "$TMP/$case.lua"
+    grep -q '^else$' "$TMP/$case.lua"
+    grep -q '^    r0 = "fallback"$' "$TMP/$case.lua"
+    grep -q '^return r0$' "$TMP/$case.lua"
+    if grep -q 'TESTSET at pc' "$TMP/$case.lua"; then
+        echo "paired TESTSET remained a diagnostic" >&2
+        exit 1
+    fi
+done
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"
 "$BIN" --bytecode "$TMP/closure-local.luac" --format lua >"$TMP/closure-local.lua"
