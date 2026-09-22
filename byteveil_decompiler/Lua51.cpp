@@ -315,13 +315,18 @@ static void liftFunctionBody(std::ostringstream& o,const Proto& p){
     }
 }
 
-static bool isCompare(int op){ return op==23 || op==24 || op==25; }
-static std::string compareExpr(const Proto& p,const Instr& i){
+static bool isCondition(int op){ return op==23 || op==24 || op==25 || op==26; }
+static std::string conditionExpr(const Proto& p,const Instr& i){
+    if(i.op==26){
+        std::string test=localReg(p,i.a,i.pc);
+        return i.c ? "not ("+test+")" : test;
+    }
     std::string lhs=value(p,i.b,i.pc), rhs=value(p,i.c,i.pc);
     const char* op=i.op==23 ? " == " : i.op==24 ? " < " : " <= ";
-    return "("+lhs+op+rhs+")";
+    std::string comparison="("+lhs+op+rhs+")";
+    return i.a ? comparison : "not "+comparison;
 }
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent);
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,bool allowInfiniteLoop=true);
 static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent){
     std::string pad(indent,' ');
     switch(i.op){
@@ -347,7 +352,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     default: break;
     }
 }
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent){
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,bool allowInfiniteLoop){
     const std::string pad(indent,' ');
     // A readable reconstruction must never follow an unstructured back-edge
     // forever.  Structured loops below consume their back-edge; anything that
@@ -355,14 +360,41 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
     std::vector<unsigned int> visits(p.code.size(),0);
     for(int pc=begin;pc<end;){
         if(pc<begin){
-            o<<pad<<"-- ByteVeil: left reconstructed range at pc "<<pc<<"\n";
+            o<<pad<<"-- ByteVeil: function "<<p.id<<" left reconstructed range at pc "<<pc<<"\n";
             return;
         }
         if(++visits[size_t(pc)]>1){
-            o<<pad<<"-- ByteVeil: stopped at repeated control-flow pc "<<pc<<" (unstructured cycle)\n";
+            o<<pad<<"-- ByteVeil: function "<<p.id<<" stopped at repeated control-flow pc "<<pc<<" (unstructured cycle)\n";
             return;
         }
         const Instr& i=p.code[pc];
+        // A closed, entry-anchored back-edge with no jump out of its body is
+        // an unconditional source loop.  Treat it structurally; cycles that
+        // have an exit or competing latch are deliberately left visible.
+        if(allowInfiniteLoop && pc==begin){
+            int latch=-1;
+            bool closed=true;
+            for(int scan=begin+1;scan<end;scan++){
+                const Instr& edge=p.code[scan];
+                if(edge.op==22 && edge.target==begin){
+                    if(latch>=0){closed=false;break;}
+                    latch=scan;
+                }
+            }
+            if(latch>=0&&closed){
+                for(int scan=begin;scan<latch;scan++){
+                    const Instr& edge=p.code[scan];
+                    if(edge.target>=0&&(edge.target>=latch+1||edge.target<begin)){closed=false;break;}
+                }
+            }
+            if(latch>=0&&closed){
+                o<<pad<<"while true do\n";
+                emitRange(o,p,begin,latch,indent+4,false);
+                o<<pad<<"end\n";
+                pc=latch+1;
+                continue;
+            }
+        }
         // GETGLOBAL/MOVE/CALL (or TAILCALL) is the common compiler shape for
         // a direct global call. Emit the source-level call and consume the
         // temporary function/argument registers.
@@ -402,22 +434,22 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             continue;
         }
         // Repeat/until: a conditional immediately followed by a backward jump.
-        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>=begin && p.code[pc+1].target<pc){
-            o<<pad<<"repeat\n"; emitRange(o,p,p.code[pc+1].target,pc,indent+4); o<<pad<<"until "<<compareExpr(p,i)<<"\n"; pc+=2; continue;
+        if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>=begin && p.code[pc+1].target<pc){
+            o<<pad<<"repeat\n"; emitRange(o,p,p.code[pc+1].target,pc,indent+4); o<<pad<<"until "<<conditionExpr(p,i)<<"\n"; pc+=2; continue;
         }
         // While: condition, forward exit jump, body, backward jump to condition.
-        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
+        if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
             int bodyBegin=pc+2, exit=p.code[pc+1].target;
             if(exit<=end && exit>bodyBegin && p.code[exit-1].op==22 && p.code[exit-1].target==pc){
-                o<<pad<<"while "<<compareExpr(p,i)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4); o<<pad<<"end\n"; pc=exit; continue;
+                o<<pad<<"while "<<conditionExpr(p,i)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4); o<<pad<<"end\n"; pc=exit; continue;
             }
         }
         // If/elseif/else: conditional, jump over true branch, optional join jump.
-        if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
+        if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
             int trueBegin=pc+2, falseBegin=p.code[pc+1].target;
             int join=falseBegin;
             if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22 && p.code[falseBegin-1].target>falseBegin){ join=p.code[falseBegin-1].target; }
-            o<<pad<<"if "<<compareExpr(p,i)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4);
+            o<<pad<<"if "<<conditionExpr(p,i)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4);
             if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4); }
             o<<pad<<"end\n"; pc=join; continue;
         }

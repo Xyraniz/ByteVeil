@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - Lua 5.1 conditional-CFG semantics
+
+### Corrected
+
+- Readable Lua 5.1 conditions now honor the VM's polarity operands: `EQ`, `LT`, and `LE` use `A`, while `TEST` uses `C`. The old renderer treated every comparison as positive, which could invert a lifted branch.
+- `TEST + JMP` pairs now participate in conservative `if`, `while`, and `repeat/until` recognition. The readable lifter consequently follows ordinary truthiness-loop back-edges structurally instead of revisiting their entry PC.
+- Closed, unconditional entry loops are rendered as `while true do`; a cycle with exits or competing latches remains an explicit diagnostic. CFG diagnostics include the affected nested function ID.
+
+### Validation
+
+- Added a self-contained `TEST`-based `repeat/until` bytecode fixture, alongside the unconditional-loop fixture. Full CTest: **9/9 PASS**.
+- On the three normalized MoonSec V3 trees used for regression, all lifts still finish in 19–30 ms. The 858-function tree's visible cycle markers fell from three to zero; remaining complex exits are reported with their function IDs.
+
 ## Unreleased - Lua 5.1 generic-loop reconstruction hardening
 
 ### Corrected

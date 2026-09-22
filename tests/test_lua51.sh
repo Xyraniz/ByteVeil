@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -91,6 +91,20 @@ open(sys.argv[7], "wb").write(build(
 # it is not safe for a readable renderer to execute its control flow forever.
 jump_to_self = 22 | ((131071 - 1) << 14)      # pc 0 -> pc 0
 open(sys.argv[8], "wb").write(build([jump_to_self], [], maxstack=1))
+
+# A closed loop with one entry-anchored latch is safe to render as `while
+# true`; the trailing return is unreachable but retained as a diagnostic line.
+move_self = 0                                  # MOVE A=0 B=0
+jump_to_entry = 22 | ((131071 - 2) << 14)     # pc 1 -> pc 0
+open(sys.argv[9], "wb").write(build(
+    [move_self, jump_to_entry, return_empty], [], maxstack=1))
+
+# TEST followed by a backward JMP is the compiler's repeat/until terminator.
+# C=0 means the loop completes when register A is truthy.
+test_truthy = 26                            # TEST A=0 C=0
+jump_back_to_repeat = 22 | ((131071 - 3) << 14)  # pc 2 -> pc 0
+open(sys.argv[10], "wb").write(build(
+    [move_self, test_truthy, jump_back_to_repeat, return_empty], [], maxstack=1))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -123,7 +137,20 @@ if grep -q 'stopped at repeated control-flow' "$TMP/generic-for.lua"; then
     exit 1
 fi
 "$BIN" --bytecode "$TMP/cyclic-jump.luac" --format lua >"$TMP/cyclic-jump.lua"
-grep -q 'stopped at repeated control-flow pc 0 (unstructured cycle)' "$TMP/cyclic-jump.lua"
+grep -q 'function 0 stopped at repeated control-flow pc 0 (unstructured cycle)' "$TMP/cyclic-jump.lua"
+"$BIN" --bytecode "$TMP/infinite-loop.luac" --format lua >"$TMP/infinite-loop.lua"
+grep -q '^while true do$' "$TMP/infinite-loop.lua"
+if grep -q 'stopped at repeated control-flow' "$TMP/infinite-loop.lua"; then
+    echo "closed unconditional loop was not structurally reconstructed" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/test-repeat.luac" --format lua >"$TMP/test-repeat.lua"
+grep -q '^repeat$' "$TMP/test-repeat.lua"
+grep -q '^until r0$' "$TMP/test-repeat.lua"
+if grep -q 'stopped at repeated control-flow' "$TMP/test-repeat.lua"; then
+    echo "TEST-based repeat loop was not structurally reconstructed" >&2
+    exit 1
+fi
 "$BYTEVEIL_PYTHON" - "$TMP/setlist-extra.json" <<'PY'
 import json, sys
 instructions = json.load(open(sys.argv[1]))["root_function"]["instructions"]
