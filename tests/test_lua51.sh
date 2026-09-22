@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -75,6 +75,22 @@ open(sys.argv[4], "wb").write(build([load_missing_constant, ret], [(0, None)]))
 move_bad_register = 0 | (7 << 23)
 open(sys.argv[5], "wb").write(build([move_bad_register, ret], []))
 open(sys.argv[6], "wb").write(build([setlist_extended], []))
+
+# JMP -> TFORLOOP -> backward JMP is Lua 5.1's generic-for layout.  The
+# source lifter must consume the whole CFG shape, rather than following the
+# back-edge indefinitely.
+jmp_to_tfor = 22 | ((131071 + 1) << 14)       # pc 0 -> pc 2
+move_body = 0 | (3 << 23)                     # MOVE A=0 B=3
+tforloop = 33 | (1 << 14)                     # TFORLOOP A=0 C=1
+jmp_to_body = 22 | ((131071 - 3) << 14)       # pc 3 -> pc 1
+return_empty = 30 | (1 << 23)                 # RETURN A=0 B=1
+open(sys.argv[7], "wb").write(build(
+    [jmp_to_tfor, move_body, tforloop, jmp_to_body, return_empty], [], maxstack=4))
+
+# A valid but irreducible self-jump must terminate with an explicit marker;
+# it is not safe for a readable renderer to execute its control flow forever.
+jump_to_self = 22 | ((131071 - 1) << 14)      # pc 0 -> pc 0
+open(sys.argv[8], "wb").write(build([jump_to_self], [], maxstack=1))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -100,6 +116,14 @@ grep -q '^r0 = ' "$TMP/binary-strings.lua"
 grep -q 'SETLIST .* block=2' "$TMP/setlist-extra.dis"
 grep -q 'EXTRAARG raw=2' "$TMP/setlist-extra.dis"
 grep -q 'r0\[51\] = r1' "$TMP/setlist-extra.lua"
+"$BIN" --bytecode "$TMP/generic-for.luac" --format lua >"$TMP/generic-for.lua"
+grep -q '^for r3 in r0, r1, r2 do$' "$TMP/generic-for.lua"
+if grep -q 'stopped at repeated control-flow' "$TMP/generic-for.lua"; then
+    echo "generic for was not structurally reconstructed" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/cyclic-jump.luac" --format lua >"$TMP/cyclic-jump.lua"
+grep -q 'stopped at repeated control-flow pc 0 (unstructured cycle)' "$TMP/cyclic-jump.lua"
 "$BYTEVEIL_PYTHON" - "$TMP/setlist-extra.json" <<'PY'
 import json, sys
 instructions = json.load(open(sys.argv[1]))["root_function"]["instructions"]

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased - Lua 5.1 generic-loop reconstruction hardening
+
+### Corrected
+
+- The readable Lua 5.1 lifter now recognizes the compiler's `JMP -> TFORLOOP -> backward JMP` generic-`for` CFG shape and renders its iterator triple and all loop result variables as a Lua `for ... in ... do` block.
+- An unstructured backward control-flow edge no longer makes `--format lua` spin forever. The renderer emits an explicit `ByteVeil: stopped at repeated control-flow` marker, making the analysis boundary visible to callers.
+
+### Validation
+
+- Added self-contained binary fixtures for a generic `for` loop and a valid self-jump. The generic loop must be reconstructed without a cycle marker; the self-jump must return promptly with a visible marker. Full CTest: **9/9 PASS**.
+- Re-ran the readable lifter over normalized Lua 5.1 bytecode obtained from three MoonSec V3 corpus members, including a tree with 858 functions. All three now finish in 21–30 ms instead of hanging on generic-loop back-edges.
+
 ## Unreleased - Native MoonSec V3 serialized-bytecode extraction
 
 ### Added

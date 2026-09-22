@@ -349,7 +349,19 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
 }
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent){
     const std::string pad(indent,' ');
+    // A readable reconstruction must never follow an unstructured back-edge
+    // forever.  Structured loops below consume their back-edge; anything that
+    // remains is reported in the output instead of making the decompiler hang.
+    std::vector<unsigned int> visits(p.code.size(),0);
     for(int pc=begin;pc<end;){
+        if(pc<begin){
+            o<<pad<<"-- ByteVeil: left reconstructed range at pc "<<pc<<"\n";
+            return;
+        }
+        if(++visits[size_t(pc)]>1){
+            o<<pad<<"-- ByteVeil: stopped at repeated control-flow pc "<<pc<<" (unstructured cycle)\n";
+            return;
+        }
         const Instr& i=p.code[pc];
         // GETGLOBAL/MOVE/CALL (or TAILCALL) is the common compiler shape for
         // a direct global call. Emit the source-level call and consume the
@@ -370,6 +382,24 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             std::string var=localReg(p,i.a+3,bodyBegin);
             o<<pad<<"for "<<var<<" = "<<valueAt(p,i.a,pc)<<", "<<valueAt(p,i.a+1,pc)<<", "<<valueAt(p,i.a+2,pc)<<" do\n";
             emitRange(o,p,bodyBegin,bodyEnd,indent+4); o<<pad<<"end\n"; pc=i.target+1; continue;
+        }
+        // Generic for: the initial JMP lands on TFORLOOP.  TFORLOOP skips the
+        // following backward JMP on exhaustion; otherwise that JMP enters the
+        // body.  Reconstruct the iterator triple and all C loop variables.
+        if(i.op==22 && i.target>pc && i.target+1<end &&
+           p.code[i.target].op==33 && p.code[i.target+1].op==22 &&
+           p.code[i.target+1].target==pc+1){
+            const Instr& loop=p.code[i.target];
+            o<<pad<<"for ";
+            for(int n=0;n<loop.c;n++){
+                if(n)o<<", ";
+                o<<localReg(p,loop.a+3+n,pc+1);
+            }
+            o<<" in "<<localReg(p,loop.a,pc)<<", "<<localReg(p,loop.a+1,pc)<<", "<<localReg(p,loop.a+2,pc)<<" do\n";
+            emitRange(o,p,pc+1,i.target,indent+4);
+            o<<pad<<"end\n";
+            pc=i.target+2;
+            continue;
         }
         // Repeat/until: a conditional immediately followed by a backward jump.
         if(isCompare(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>=begin && p.code[pc+1].target<pc){
