@@ -18,6 +18,7 @@
 #include "byteveil_decompiler/Decompile.h"
 #include "byteveil_decompiler/IR.h"
 #include "byteveil_decompiler/Lua51.h"
+#include "byteveil_decompiler/MoonSec.h"
 #include "byteveil_decompiler/Protectors.h"
 #include "byteveil_decompiler/Unpack.h"
 #include "Luau/Compiler.h"
@@ -117,7 +118,7 @@ static void usage(const char* n)
 {
     std::cout << "ByteVeil - Luau bytecode decompiler and safe static analyzer\n\nUsage: " << n << " <input> [options]\n\nOptions:\n"
               << "  -o, --output FILE       Write output to FILE\n"
-              << "  --format lua|luau|json|ir|structured|protectors|unpack Output format (default: lua)\n"
+              << "  --format lua|luau|json|ir|structured|protectors|unpack|moonsec|moonsec-bytecode Output format (default: lua)\n"
               << "  --disassemble           Print deterministic low-level disassembly\n"
               << "  --dump-constants        Print constant table summary\n"
               << "  --dump-prototypes       Print prototype summary\n"
@@ -165,7 +166,8 @@ static bool parse(int ac, char** av, Options& o)
             o.format = av[i];
             if (o.format != "lua" && o.format != "luau" && o.format != "json" && o.format != "ir" &&
                 o.format != "disassemble" && o.format != "cfg" && o.format != "structured" && o.format != "constants" &&
-                o.format != "prototypes" && o.format != "protectors" && o.format != "unpack") return false;
+                o.format != "prototypes" && o.format != "protectors" && o.format != "unpack" && o.format != "moonsec" &&
+                o.format != "moonsec-bytecode") return false;
         }
         else if (a == "--disassemble") o.format = "disassemble";
         else if (a == "--dump-constants") o.format = "constants";
@@ -211,6 +213,32 @@ int main(int ac, char** av)
         std::string result = ByteVeil::Unpack::inspect(input);
         if (o.output.empty()) std::cout << result;
         else if (!writeFile(o.output, result)) { std::cerr << "error: cannot write " << o.output << '\n'; return 1; }
+        return 0;
+    }
+    if (o.format == "moonsec") {
+        std::string result = ByteVeil::MoonSec::inspect(input);
+        if (o.output.empty()) std::cout << result;
+        else if (!writeFile(o.output, result)) { std::cerr << "error: cannot write " << o.output << '\n'; return 1; }
+        return 0;
+    }
+    if (o.format == "moonsec-bytecode") {
+        if (o.output.empty()) {
+            std::cerr << "error: --format moonsec-bytecode requires -o/--output for the binary serialized prototype\n";
+            return 2;
+        }
+        ByteVeil::MoonSec::Payload payload;
+        std::string error;
+        if (!ByteVeil::MoonSec::extract(input, payload, error)) {
+            std::cerr << "error: " << error << '\n';
+            return 1;
+        }
+        if (!writeFile(o.output, payload.bytes)) {
+            std::cerr << "error: cannot write " << o.output << '\n';
+            return 1;
+        }
+        if (!o.quiet)
+            std::cerr << "wrote " << o.output << " (" << payload.bytes.size()
+                      << " bytes; MoonSec virtual opcode mapping has not been applied)\n";
         return 0;
     }
     if (lua51) {

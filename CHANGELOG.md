@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - Native MoonSec V3 serialized-bytecode extraction
+
+### Added
+
+- Added a native MoonSec V3 adapter that lexes quoted Lua strings without evaluating the input, decodes the family’s 16-symbol alphabet/nibble transport, and validates the entire serialized prototype tree recursively.
+- The `moonsec` format reports the recovered decoder key, source offset, prototype layout, constant-tag mapping, function/instruction/constant counts, and a deterministic FNV-1a checksum. `unpack` automatically returns this richer result when extraction succeeds.
+- `moonsec-bytecode -o FILE` writes the validated pre-devirtualization serialized tree for low-level analysis without invoking LuaDec, UnLuaC, Java, Node.js, or a Lua runtime.
+- Added an isolated regression fixture and a CTest suite that verifies successful extraction and the visible failure result for a malformed candidate.
+
+### Explicit limit
+
+- The extracted tree still uses MoonSec’s sample-specific virtual opcode numbers. This change deliberately does not label it as a normal Lua 5.1 chunk or as recovered source; native opcode-handler recovery is the next required stage before ByteVeil’s Lua 5.1 lifter can consume it.
+
 ## Unreleased - Lua 5.1 instruction-boundary validation
 
 ### Corrected

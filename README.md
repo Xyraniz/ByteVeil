@@ -37,6 +37,8 @@ ByteVeil can:
 
 - Extract only literal strings passed to `loadstring` through the `unpack` route, returning JSON with `executed: false`.
 
+- Natively extract and validate the alphabet/nibble-encoded serialized Lua 5.1 prototype tree used by the public MoonSec V3 loader family. This path never invokes Lua or runs a recovered payload; it reports the selected decoder key, serialized layout, constant-tag layout, function/instruction counts, and a deterministic checksum.
+
 ## Comparison and design choices
 
 ByteVeil was audited against [shrimp-nz/medal](https://github.com/shrimp-nz/medal), whose strongest contribution is a Rust AST/SSA pipeline with dominator-based control-flow restructuring, local renaming, and a formatter that handles precedence and statement disambiguation. ByteVeil keeps those ideas as design targets, but does not copy Medal's code: it already provides a broader safety-oriented CLI, static protector and loader analysis, deterministic JSON/IR, Graphviz output, automatic Lua 5.1/Luau detection, and a vendored Luau execution-free inspection path.
@@ -108,7 +110,7 @@ Important options are:
 
 ```
 -o, --output FILE       Write output to FILE
---format lua|luau|json|ir|structured|protectors|unpack
+  --format lua|luau|json|ir|structured|protectors|unpack|moonsec|moonsec-bytecode
 --disassemble           Print deterministic low-level disassembly
 --dump-constants        Print constant table summary
 --dump-prototypes       Print prototype summary
@@ -201,7 +203,25 @@ The `unpack` route searches for literal strings passed to `loadstring`:
 ./build/byteveil --format unpack script.lua
 ```
 
-The result identifies the visible family, lists extracted literal payloads, sets `executed` to `false`, and reports `no-literal-payload` when there is no literal payload to extract. Dynamically computed payloads are not reconstructed by this route.
+The result identifies the visible family, lists extracted literal payloads, sets `executed` to `false`, and reports `no-literal-payload` when there is no literal payload to extract. For a recognized MoonSec V3 source, `unpack` now delegates to the validated serialized-bytecode adapter described below.
+
+## MoonSec V3 serialized-bytecode extraction
+
+For a visible MoonSec V3 marker, use the dedicated inspection route:
+
+```bash
+./build/byteveil --format moonsec protected.lua
+```
+
+The adapter lexes Lua strings, tries the family’s 16-symbol alphabet/nibble decoder, and accepts a result only after a bounded recursive parser validates a complete serialized prototype tree. It reports the decoder key and the exact prototype/constant layouts used by that sample. It does **not** execute Lua, load the reconstructed bytecode, call an external decompiler, or treat a merely printable decoded string as a result.
+
+For low-level research, the validated pre-devirtualization serialized tree can be saved as binary:
+
+```bash
+./build/byteveil --format moonsec-bytecode protected.lua -o protected.moonsec.bin
+```
+
+This is not yet an ordinary `\x1bLua` chunk: MoonSec’s per-sample virtual opcode mapping still has to be resolved before it can be sent through the Lua 5.1 lifter. ByteVeil states that boundary in the report and in the extraction diagnostic rather than silently claiming source recovery.
 
 ## Analysis mode
 
