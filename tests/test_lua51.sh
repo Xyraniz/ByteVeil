@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -105,6 +105,19 @@ test_truthy = 26                            # TEST A=0 C=0
 jump_back_to_repeat = 22 | ((131071 - 3) << 14)  # pc 2 -> pc 0
 open(sys.argv[10], "wb").write(build(
     [move_self, test_truthy, jump_back_to_repeat, return_empty], [], maxstack=1))
+
+# Core register/upvalue operations must survive the readable route.  The
+# LOADBOOL C=1 skips the following LOADNIL instruction exactly as the VM does.
+getupval = 4
+setupval = 8
+self_op = 11
+vararg_one = 37 | (2 << 23)
+loadnil_r1 = 3 | (1 << 6) | (1 << 23)
+loadbool_skip = 2 | (1 << 23) | (1 << 14)
+loadnil_skipped_r2 = 3 | (2 << 6) | (2 << 23)
+open(sys.argv[11], "wb").write(build(
+    [getupval, setupval, self_op, vararg_one, loadnil_r1, loadbool_skip,
+     loadnil_skipped_r2, return_empty], [], maxstack=3, nups=1))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -149,6 +162,18 @@ grep -q '^repeat$' "$TMP/test-repeat.lua"
 grep -q '^until r0$' "$TMP/test-repeat.lua"
 if grep -q 'stopped at repeated control-flow' "$TMP/test-repeat.lua"; then
     echo "TEST-based repeat loop was not structurally reconstructed" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/readable-coverage.luac" --format lua >"$TMP/readable-coverage.lua"
+grep -q '^r0 = __upvalue_0$' "$TMP/readable-coverage.lua"
+grep -q '^__upvalue_0 = r0$' "$TMP/readable-coverage.lua"
+grep -q '^r1 = r0$' "$TMP/readable-coverage.lua"
+grep -q '^r0 = r0\[r0\]$' "$TMP/readable-coverage.lua"
+grep -q '^r1 = nil$' "$TMP/readable-coverage.lua"
+grep -q '^r0 = true$' "$TMP/readable-coverage.lua"
+grep -q '^r0 = \.\.\.$' "$TMP/readable-coverage.lua"
+if grep -q '^r2 = nil$' "$TMP/readable-coverage.lua"; then
+    echo "LOADBOOL C=1 did not skip the following instruction" >&2
     exit 1
 fi
 "$BYTEVEIL_PYTHON" - "$TMP/setlist-extra.json" <<'PY'

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - Lua 5.1 readable-operation coverage
+
+### Corrected
+
+- The readable lifter now emits `GETUPVAL`, `SETUPVAL`, `SELF`, `VARARG`, full-range `LOADNIL`, `CLOSE`, and fixed-result `CALL` operations instead of omitting them from reconstructed source.
+- `LOADBOOL C=1` now skips the following instruction on the readable route, matching the Lua 5.1 VM.
+- Open-arity calls, open `SETLIST` tails, unpaired loop instructions, `TESTSET`, and every other unresolved opcode now carry an explicit PC/operand diagnostic. No reachable instruction is silently discarded by the readable renderer.
+
+### Validation
+
+- Added a self-contained readable-coverage chunk that asserts upvalue access, method-call setup, varargs, `LOADNIL` ranges, and the `LOADBOOL` skip. Full CTest: **9/9 PASS**.
+- Re-ran the readable route on three normalized MoonSec V3 trees. All complete in 17–23 ms; remaining non-reducible conditions are now counted and surfaced rather than omitted.
+
 ## Unreleased - Lua 5.1 conditional-CFG semantics
 
 ### Corrected

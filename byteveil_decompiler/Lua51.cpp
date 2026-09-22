@@ -333,23 +333,44 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 0:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"\n";break;
     case 1:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"\n";break;
     case 2:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(i.b?"true":"false")<<"\n";break;
-    case 3:o<<pad<<localReg(p,i.a,i.pc)<<" = nil\n";break;
+    case 3:for(int r=i.a;r<=i.b;r++)o<<pad<<localReg(p,r,i.pc)<<" = nil\n";break;
+    case 4:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<upvalue(p,i.b)<<"\n";break;
     case 5:o<<pad<<localReg(p,i.a,i.pc)<<" = _G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
     case 6:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"["<<value(p,i.c,i.pc)<<"]\n";break;
     case 7:o<<pad<<"_G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<localReg(p,i.a,i.pc)<<"\n";break;
+    case 8:o<<pad<<upvalue(p,i.b)<<" = "<<localReg(p,i.a,i.pc)<<"\n";break;
     case 9:o<<pad<<localReg(p,i.a,i.pc)<<"["<<value(p,i.b,i.pc)<<"] = "<<value(p,i.c,i.pc)<<"\n";break;
     case 10:o<<pad<<localReg(p,i.a,i.pc)<<" = {}\n";break;
+    case 11:o<<pad<<localReg(p,i.a+1,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"\n";
+            o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"["<<value(p,i.c,i.pc)<<"]\n";break;
     case 12: case 13: case 14: case 15: case 16: case 17:{const char* op=i.op==12?"+":i.op==13?"-":i.op==14?"*":i.op==15?"/":i.op==16?"%":"^";o<<pad<<localReg(p,i.a,i.pc)<<" = "<<value(p,i.b,i.pc)<<" "<<op<<" "<<value(p,i.c,i.pc)<<"\n";break;}
     case 18:o<<pad<<localReg(p,i.a,i.pc)<<" = -"<<localReg(p,i.b,i.pc)<<"\n";break;
     case 19:o<<pad<<localReg(p,i.a,i.pc)<<" = not "<<localReg(p,i.b,i.pc)<<"\n";break;
     case 20:o<<pad<<localReg(p,i.a,i.pc)<<" = #"<<localReg(p,i.b,i.pc)<<"\n";break;
     case 21:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<" .. "<<localReg(p,i.c,i.pc)<<"\n";break;
-    case 28:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
-    case 29:o<<pad<<"return "<<valueAt(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
-    case 30:{int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<valueAt(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
-    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}break;
-    case 36: if(size_t(i.bx)<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}break;
-    default: break;
+    case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<localReg(p,i.a,i.pc)<<" from "<<localReg(p,i.b,i.pc)<<" (C="<<i.c<<")\n";break;
+    case 28:{
+        if(i.b==0||i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open "<<(i.b==0?"arguments":"results")<<"\n";
+        if(i.c==1)o<<pad<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";
+        else {
+            int results=i.c==0?1:i.c-1;
+            o<<pad;
+            for(int r=0;r<results;r++){if(r)o<<", ";o<<localReg(p,i.a+r,i.pc);}
+            o<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";
+        }
+        break;
+    }
+    case 29:if(i.b==0)o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has open arguments\n";o<<pad<<"return "<<valueAt(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
+    case 30:{if(i.b==0)o<<pad<<"-- ByteVeil: RETURN at pc "<<i.pc<<" has an open result tail\n";int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<valueAt(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
+    case 31:o<<pad<<"-- ByteVeil: FORLOOP at pc "<<i.pc<<" was not paired with FORPREP\n";break;
+    case 32:o<<pad<<"-- ByteVeil: FORPREP at pc "<<i.pc<<" was not paired with FORLOOP\n";break;
+    case 33:o<<pad<<"-- ByteVeil: TFORLOOP at pc "<<i.pc<<" was not paired with its entry jump\n";break;
+    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}else o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
+    case 35:o<<pad<<"-- ByteVeil: CLOSE registers >= "<<i.a<<"; captured upvalues remain represented\n";break;
+    case 36: if(size_t(i.bx)<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";break;
+    case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n";o<<pad<<localReg(p,i.a,i.pc)<<" = nil\n";}else if(i.b==0)o<<pad<<localReg(p,i.a,i.pc)<<" = ... -- open vararg results\n";else{o<<pad<<localReg(p,i.a,i.pc);for(int k=1;k<i.b-1;k++)o<<", "<<localReg(p,i.a+k,i.pc);o<<" = ...\n";}break;
+    case -1:o<<pad<<"-- ByteVeil: SETLIST extra block word "<<i.setlistBlock<<" consumed at pc "<<i.pc<<"\n";break;
+    default:o<<pad<<"-- ByteVeil: unsupported opcode retained: "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" at pc "<<i.pc<<"\n";break;
     }
 }
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,bool allowInfiniteLoop){
@@ -454,7 +475,6 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"end\n"; pc=join; continue;
         }
         if(i.op==22){ pc=i.target>=0?i.target:pc+1; continue; }
-        if(i.op==35){ pc++; continue; }
         // FORPREP consumes the three setup registers; do not leak their
         // compiler temporaries into reconstructed source.
         bool loopSetup=false;
@@ -467,6 +487,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         }
         if(!loopSetup && !returnSetup) emitSimple(o,p,i,indent);
         if(i.op==29 || i.op==30) break;
+        if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;
     }
 }
