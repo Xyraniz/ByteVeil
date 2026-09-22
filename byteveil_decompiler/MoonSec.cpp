@@ -494,6 +494,321 @@ bool probe(const std::string& bytes, Payload& payload)
     return true;
 }
 
+struct VirtualConstant {
+    ConstantKind kind = ConstantKind::Unknown;
+    bool boolean = false;
+    std::string bytes;
+};
+
+struct VirtualInstruction {
+    std::size_t pc = 0;
+    uint8_t descriptor = 0;
+    bool discarded = false;
+    int opNum = 0;
+    int a = 0;
+    int64_t b = 0;
+    int c = 0;
+    bool isKA = false;
+    bool isKB = false;
+    bool isKC = false;
+};
+
+struct VirtualFunction {
+    int parameters = 0;
+    std::vector<VirtualConstant> constants;
+    std::vector<VirtualInstruction> instructions;
+    std::vector<VirtualFunction> children;
+};
+
+bool decodeLayout(const std::string& encoded, std::array<Step, 4>& layout)
+{
+    std::istringstream values(encoded);
+    std::string value;
+    std::size_t index = 0;
+    while (std::getline(values, value, ',')) {
+        if (index >= layout.size()) return false;
+        if (value == "constants") layout[index] = Step::Constants;
+        else if (value == "instructions") layout[index] = Step::Instructions;
+        else if (value == "functions") layout[index] = Step::Functions;
+        else if (value == "parameters") layout[index] = Step::Parameters;
+        else return false;
+        ++index;
+    }
+    return index == layout.size();
+}
+
+bool decodeTags(const std::string& encoded, std::array<ConstantKind, 4>& tags)
+{
+    tags.fill(ConstantKind::Unknown);
+    std::istringstream values(encoded);
+    std::string value;
+    while (std::getline(values, value, ',')) {
+        if (value.size() < 3 || value[1] != ':' || value[0] < '0' || value[0] > '3') return false;
+        const std::size_t index = static_cast<std::size_t>(value[0] - '0');
+        const std::string kind = value.substr(2);
+        if (kind == "nil") tags[index] = ConstantKind::Unknown;
+        else if (kind == "boolean") tags[index] = ConstantKind::Boolean;
+        else if (kind == "number") tags[index] = ConstantKind::Number;
+        else if (kind == "string") tags[index] = ConstantKind::String;
+        else return false;
+    }
+    return true;
+}
+
+class VirtualTreeReader {
+public:
+    VirtualTreeReader(std::string_view data, const std::array<Step, 4>& layout, const std::array<ConstantKind, 4>& tags)
+        : data(data), layout(layout), tags(tags) {}
+
+    bool parse(VirtualFunction& root)
+    {
+        position = 0;
+        functions = 0;
+        instructions = 0;
+        constants = 0;
+        return parseFunction(root, 0) && position == data.size();
+    }
+
+private:
+    bool need(std::size_t count) const { return count <= data.size() - position; }
+
+    bool readByte(uint8_t& value)
+    {
+        if (!need(1)) return false;
+        value = static_cast<uint8_t>(data[position++]);
+        return true;
+    }
+
+    bool readI16(int& value)
+    {
+        if (!need(2)) return false;
+        const uint16_t raw = static_cast<uint16_t>(static_cast<uint8_t>(data[position])) |
+                             static_cast<uint16_t>(static_cast<uint8_t>(data[position + 1]) << 8);
+        position += 2;
+        value = static_cast<int>(static_cast<int16_t>(raw));
+        return true;
+    }
+
+    bool readI32(int64_t& value)
+    {
+        if (!need(4)) return false;
+        const uint32_t raw = static_cast<uint32_t>(static_cast<uint8_t>(data[position])) |
+                             (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 1])) << 8) |
+                             (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 2])) << 16) |
+                             (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 3])) << 24);
+        position += 4;
+        value = static_cast<int64_t>(static_cast<int32_t>(raw));
+        return true;
+    }
+
+    bool readU32(uint32_t& value)
+    {
+        if (!need(4)) return false;
+        value = static_cast<uint32_t>(static_cast<uint8_t>(data[position])) |
+                (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 1])) << 8) |
+                (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 2])) << 16) |
+                (static_cast<uint32_t>(static_cast<uint8_t>(data[position + 3])) << 24);
+        position += 4;
+        return true;
+    }
+
+    bool readBytes(std::size_t count, std::string& value)
+    {
+        if (!need(count)) return false;
+        value.assign(data.data() + position, count);
+        position += count;
+        return true;
+    }
+
+    bool parseConstants(std::vector<VirtualConstant>& output)
+    {
+        uint32_t count = 0;
+        if (!readU32(count) || count > kMaxConstants - constants || count > data.size() - position) return false;
+        constants += count;
+        output.clear();
+        output.reserve(count);
+        for (uint32_t index = 0; index < count; ++index) {
+            uint8_t tag = 0;
+            if (!readByte(tag)) return false;
+            VirtualConstant constant;
+            constant.kind = tag < tags.size() ? tags[tag] : ConstantKind::Unknown;
+            switch (constant.kind) {
+            case ConstantKind::Unknown:
+                break;
+            case ConstantKind::Boolean: {
+                uint8_t value = 0;
+                if (!readByte(value)) return false;
+                constant.boolean = value != 0;
+                break;
+            }
+            case ConstantKind::Number:
+                if (!readBytes(8, constant.bytes)) return false;
+                break;
+            case ConstantKind::String: {
+                uint32_t length = 0;
+                if (!readU32(length) || length > data.size() - position || length > kMaxPayloadBytes) return false;
+                if (!readBytes(length, constant.bytes)) return false;
+                break;
+            }
+            }
+            output.push_back(std::move(constant));
+        }
+        return true;
+    }
+
+    bool parseInstructions(std::vector<VirtualInstruction>& output)
+    {
+        uint32_t count = 0;
+        if (!readU32(count) || count > kMaxInstructions - instructions || count > data.size() - position) return false;
+        output.clear();
+        output.reserve(count);
+        for (uint32_t pc = 0; pc < count; ++pc) {
+            VirtualInstruction instruction;
+            instruction.pc = pc;
+            if (!readByte(instruction.descriptor)) return false;
+            if ((instruction.descriptor & 1u) != 0) {
+                instruction.discarded = true;
+                output.push_back(instruction);
+                continue;
+            }
+            if (!readI16(instruction.opNum) || !readI16(instruction.a)) return false;
+            switch ((instruction.descriptor >> 1u) & 3u) {
+            case 0: {
+                int b = 0;
+                if (!readI16(b) || !readI16(instruction.c)) return false;
+                instruction.b = b;
+                break;
+            }
+            case 1:
+                if (!readI32(instruction.b)) return false;
+                break;
+            case 2:
+                if (!readI32(instruction.b)) return false;
+                instruction.b -= (1 << 16);
+                break;
+            case 3:
+                if (!readI32(instruction.b) || !readI16(instruction.c)) return false;
+                instruction.b -= (1 << 16);
+                break;
+            }
+            instruction.isKA = (instruction.descriptor & (1u << 3u)) != 0;
+            instruction.isKB = (instruction.descriptor & (1u << 4u)) != 0;
+            instruction.isKC = (instruction.descriptor & (1u << 5u)) != 0;
+            ++instructions;
+            output.push_back(instruction);
+        }
+        return true;
+    }
+
+    bool parseFunctions(std::vector<VirtualFunction>& output, std::size_t depth)
+    {
+        uint32_t count = 0;
+        if (!readU32(count) || count > kMaxFunctions - functions || count > data.size() / 5u) return false;
+        output.clear();
+        output.resize(count);
+        for (VirtualFunction& child : output)
+            if (!parseFunction(child, depth + 1)) return false;
+        return true;
+    }
+
+    bool parseFunction(VirtualFunction& output, std::size_t depth)
+    {
+        if (depth > kMaxPrototypeDepth || functions >= kMaxFunctions) return false;
+        ++functions;
+        for (Step step : layout) {
+            switch (step) {
+            case Step::Constants:
+                if (!parseConstants(output.constants)) return false;
+                break;
+            case Step::Instructions:
+                if (!parseInstructions(output.instructions)) return false;
+                break;
+            case Step::Functions:
+                if (!parseFunctions(output.children, depth)) return false;
+                break;
+            case Step::Parameters: {
+                uint8_t value = 0;
+                if (!readByte(value)) return false;
+                output.parameters = value;
+                break;
+            }
+            }
+        }
+        return true;
+    }
+
+    std::string_view data;
+    const std::array<Step, 4>& layout;
+    const std::array<ConstantKind, 4>& tags;
+    std::size_t position = 0;
+    std::size_t functions = 0;
+    std::size_t instructions = 0;
+    std::size_t constants = 0;
+};
+
+std::string bytesHex(const std::string& bytes)
+{
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (unsigned char byte : bytes) {
+        result.push_back(digits[byte >> 4u]);
+        result.push_back(digits[byte & 15u]);
+    }
+    return result;
+}
+
+const char* virtualConstantName(ConstantKind kind)
+{
+    switch (kind) {
+    case ConstantKind::Unknown: return "nil";
+    case ConstantKind::Boolean: return "boolean";
+    case ConstantKind::Number: return "number";
+    case ConstantKind::String: return "string";
+    }
+    return "unknown";
+}
+
+void emitVirtualFunction(std::ostringstream& output, const VirtualFunction& function)
+{
+    output << "{\"parameters\":" << function.parameters << ",\"constants\":[";
+    for (std::size_t index = 0; index < function.constants.size(); ++index) {
+        if (index) output << ',';
+        const VirtualConstant& constant = function.constants[index];
+        output << "{\"type\":\"" << virtualConstantName(constant.kind) << '\"';
+        if (constant.kind == ConstantKind::Boolean)
+            output << ",\"value\":" << (constant.boolean ? "true" : "false");
+        if (constant.kind == ConstantKind::Number || constant.kind == ConstantKind::String)
+            output << ",\"bytes_hex\":\"" << bytesHex(constant.bytes) << "\"";
+        if (constant.kind == ConstantKind::String && !constant.bytes.empty() && static_cast<unsigned char>(constant.bytes[0]) > 0x7f)
+            output << ",\"transport_encoded\":true";
+        output << '}';
+    }
+    output << "],\"instructions\":[";
+    for (std::size_t index = 0; index < function.instructions.size(); ++index) {
+        if (index) output << ',';
+        const VirtualInstruction& instruction = function.instructions[index];
+        output << "{\"pc\":" << instruction.pc << ",\"descriptor\":" << static_cast<unsigned int>(instruction.descriptor);
+        if (instruction.discarded) {
+            output << ",\"discarded\":true}";
+            continue;
+        }
+        output << ",\"op_num\":" << instruction.opNum
+               << ",\"a\":" << instruction.a
+               << ",\"b\":" << instruction.b
+               << ",\"c\":" << instruction.c
+               << ",\"is_k_a\":" << (instruction.isKA ? "true" : "false")
+               << ",\"is_k_b\":" << (instruction.isKB ? "true" : "false")
+               << ",\"is_k_c\":" << (instruction.isKC ? "true" : "false") << '}';
+    }
+    output << "],\"children\":[";
+    for (std::size_t index = 0; index < function.children.size(); ++index) {
+        if (index) output << ',';
+        emitVirtualFunction(output, function.children[index]);
+    }
+    output << "]}";
+}
+
 } // namespace
 
 bool extract(const std::string& source, Payload& payload, std::string& error)
@@ -560,6 +875,45 @@ std::string inspect(const std::string& source)
         result << ",\"reason\":\"" << jsonEscape(error) << "\"";
     }
     result << ",\"note\":\"The adapter lexes and validates data only; it never invokes Lua, loads a recovered chunk, or executes the protected payload. Opcode virtualization is reported as a separate stage.\"}\n";
+    return result.str();
+}
+
+std::string inspectVirtualIR(const std::string& source)
+{
+    Payload payload;
+    std::string error;
+    if (!extract(source, payload, error)) {
+        std::ostringstream result;
+        result << "{\"format\":\"moonsec-v3-virtual-ir\",\"executed\":false,\"recognized\":"
+               << (hasMoonSecMarker(source) ? "true" : "false")
+               << ",\"status\":\"serialized-bytecode-not-recovered\",\"reason\":\""
+               << jsonEscape(error) << "\"}\n";
+        return result.str();
+    }
+
+    std::array<Step, 4> layout{};
+    std::array<ConstantKind, 4> tags{};
+    VirtualFunction root;
+    if (!decodeLayout(payload.prototypeLayout, layout) || !decodeTags(payload.constantTags, tags) ||
+        !VirtualTreeReader(payload.bytes, layout, tags).parse(root)) {
+        // `extract` has already validated this exact layout.  Treat a failure
+        // here as a product error rather than attempting a different layout
+        // or silently emitting an incomplete tree.
+        return "{\"format\":\"moonsec-v3-virtual-ir\",\"executed\":false,\"recognized\":true,\"status\":\"internal-decode-error\",\"reason\":\"validated MoonSec payload could not be decoded into virtual IR\"}\n";
+    }
+
+    std::ostringstream result;
+    result << "{\"format\":\"moonsec-v3-virtual-ir\",\"executed\":false,\"recognized\":true,\"status\":\"virtual-ir-extracted\""
+           << ",\"virtual_opcode_mapping\":\"unresolved\""
+           << ",\"payload\":{\"bytes\":" << payload.bytes.size()
+           << ",\"source_offset\":" << payload.sourceOffset
+           << ",\"decoder_key\":" << payload.key
+           << ",\"prototype_layout\":\"" << jsonEscape(payload.prototypeLayout)
+           << "\",\"constant_tags\":\"" << jsonEscape(payload.constantTags)
+           << "\",\"checksum\":\"" << payload.checksum << "\"}"
+           << ",\"root_function\":";
+    emitVirtualFunction(result, root);
+    result << ",\"note\":\"op_num is the protected sample's virtual opcode number, not a Lua 5.1 opcode. Constants retain exact serialized bytes so encrypted transport strings are not misrepresented as plaintext.\"}\n";
     return result.str();
 }
 

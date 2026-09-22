@@ -110,7 +110,7 @@ Important options are:
 
 ```
 -o, --output FILE       Write output to FILE
-  --format lua|luau|json|ir|structured|protectors|unpack|moonsec|moonsec-bytecode
+  --format lua|luau|json|ir|structured|protectors|unpack|moonsec|moonsec-ir|moonsec-bytecode
 --disassemble           Print deterministic low-level disassembly
 --dump-constants        Print constant table summary
 --dump-prototypes       Print prototype summary
@@ -214,6 +214,14 @@ For a visible MoonSec V3 marker, use the dedicated inspection route:
 ```
 
 The adapter lexes Lua strings, tries the family’s 16-symbol alphabet/nibble decoder, and accepts a result only after a bounded recursive parser validates a complete serialized prototype tree. It reports the decoder key and the exact prototype/constant layouts used by that sample. It does **not** execute Lua, load the reconstructed bytecode, call an external decompiler, or treat a merely printable decoded string as a result.
+
+For a complete machine-readable dump of that tree, use `moonsec-ir`:
+
+```bash
+./build/byteveil --format moonsec-ir protected.lua -o protected.moonsec.json
+```
+
+The IR includes each child function, typed constants with exact serialized hexadecimal bytes, original program-counter slots, instruction descriptors, virtual `op_num` values, operand values, and RK flags. It makes the recovered bytecode inspectable before opcode devirtualization, while deliberately labeling the mapping as `unresolved` rather than inventing Lua 5.1 opcodes.
 
 For low-level research, the validated pre-devirtualization serialized tree can be saved as binary:
 

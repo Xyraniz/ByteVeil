@@ -10,13 +10,15 @@ trap 'rm -rf "$TMP"' EXIT
 
 "$BIN" --format moonsec "$FIXTURE" >"$TMP/moonsec.json"
 "$BIN" --format unpack "$FIXTURE" >"$TMP/unpack.json"
+"$BIN" --format moonsec-ir "$FIXTURE" >"$TMP/moonsec-ir.json"
 "$BIN" --format moonsec-bytecode "$FIXTURE" -o "$TMP/serialized.bin" -q
-"$BYTEVEIL_PYTHON" - "$TMP/moonsec.json" "$TMP/unpack.json" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/moonsec.json" "$TMP/unpack.json" "$TMP/moonsec-ir.json" <<'PY'
 import json
 import sys
 
 moonsec = json.load(open(sys.argv[1], encoding='utf-8'))
 unpack = json.load(open(sys.argv[2], encoding='utf-8'))
+ir = json.load(open(sys.argv[3], encoding='utf-8'))
 
 for report in (moonsec, unpack):
     assert report['executed'] is False
@@ -32,6 +34,23 @@ for report in (moonsec, unpack):
     assert payload['instructions'] == 1
     assert payload['constants'] == 3
     assert payload['checksum'].startswith('fnv1a64:')
+
+assert ir['executed'] is False
+assert ir['recognized'] is True
+assert ir['status'] == 'virtual-ir-extracted'
+assert ir['virtual_opcode_mapping'] == 'unresolved'
+root = ir['root_function']
+assert root['parameters'] == 0
+assert root['constants'] == [
+    {'type': 'boolean', 'value': True},
+    {'type': 'number', 'bytes_hex': '000000000000f03f'},
+    {'type': 'string', 'bytes_hex': '6f6b'},
+]
+assert root['instructions'] == [{
+    'pc': 0, 'descriptor': 0, 'op_num': 30, 'a': 0, 'b': 1, 'c': 0,
+    'is_k_a': False, 'is_k_b': False, 'is_k_c': False,
+}]
+assert root['children'] == []
 PY
 "$BYTEVEIL_PYTHON" - "$TMP/serialized.bin" <<'PY'
 import sys

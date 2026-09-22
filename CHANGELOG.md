@@ -6,6 +6,7 @@
 
 - Added a native MoonSec V3 adapter that lexes quoted Lua strings without evaluating the input, decodes the family’s 16-symbol alphabet/nibble transport, and validates the entire serialized prototype tree recursively.
 - The `moonsec` format reports the recovered decoder key, source offset, prototype layout, constant-tag mapping, function/instruction/constant counts, and a deterministic FNV-1a checksum. `unpack` automatically returns this richer result when extraction succeeds.
+- `moonsec-ir` exposes the complete recovered tree: exact serialized constant bytes, discarded transport slots, virtual opcode numbers, operands, RK flags, child functions, and parameter counts. It explicitly labels the opcode mapping as unresolved.
 - `moonsec-bytecode -o FILE` writes the validated pre-devirtualization serialized tree for low-level analysis without invoking LuaDec, UnLuaC, Java, Node.js, or a Lua runtime.
 - Added an isolated regression fixture and a CTest suite that verifies successful extraction and the visible failure result for a malformed candidate.
 

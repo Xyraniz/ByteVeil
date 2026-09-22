@@ -30,4 +30,10 @@ bool extract(const std::string& source, Payload& payload, std::string& error);
 // JSON report used by the CLI's explicit MoonSec inspection route.
 std::string inspect(const std::string& source);
 
+// Emits the decoded serialized prototype tree, preserving each sample's
+// virtual opcode number and operands.  This is intentionally distinct from a
+// Lua 5.1 decompilation: an unresolved virtual opcode is never presented as a
+// standard Lua opcode.
+std::string inspectVirtualIR(const std::string& source);
+
 } // namespace ByteVeil::MoonSec
