@@ -5,6 +5,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -37,7 +38,20 @@ struct Reader {
 };
 
 struct LocalInfo { std::string name; int start=0; int end=0; };
-struct Instr { uint32_t raw=0; int pc=0, op=0, a=0,b=0,c=0,bx=0,sbx=0; int target=-1; int openProducer=-1; int setlistBlock=-1; bool extraWord=false; };
+struct CaptureInfo { int bindingPc=-1; int sourceIndex=-1; bool fromUpvalue=false; };
+struct Instr {
+    uint32_t raw=0;
+    int pc=0, op=0, a=0,b=0,c=0,bx=0,sbx=0;
+    int target=-1;
+    int openProducer=-1;
+    int setlistBlock=-1;
+    // Lua 5.1 stores CLOSURE upvalue bindings as the following N instructions.
+    // They are operands of CLOSURE, not independently executed operations.
+    int closureBindingFor=-1;
+    int captureSlot=-1;
+    bool extraWord=false;
+    std::vector<CaptureInfo> captures;
+};
 struct ConstantInfo { std::string type; std::string lua; std::string value; std::string stringBytesHex; };
 struct Proto { int id=0,parent=-1,linedefined=0,lastline=0,nups=0,params=0,vararg=0,maxstack=0; std::string source; std::vector<int> lines; std::vector<LocalInfo> locals; std::vector<std::string> upvalues; std::vector<Instr> code; std::vector<std::string> constants; std::vector<ConstantInfo> constantTable; std::vector<Proto> children; };
 
@@ -115,6 +129,33 @@ static void advanced(std::ostringstream& o,const Proto& p){
     o<<"\"analysis\":{\"alias_hazards\":"<<alias<<",\"scope_overlaps\":"<<scope<<",\"dynamic_metamethod_sites\":"<<metamethod<<",\"irreducible_or_loop_sccs\":"<<scc<<"},";
 }
 
+static void associateClosureCaptures(Proto& p){
+    for(int pc=0;pc<int(p.code.size());++pc){
+        Instr& closure=p.code[pc];
+        if(closure.op!=36) continue;
+        // The child index itself is checked by validateProtoData.  Deferring
+        // that error keeps all malformed-operand diagnostics in one place.
+        if(closure.bx<0||closure.bx>=int(p.children.size())) continue;
+        const int expected=p.children[closure.bx].nups;
+        if(expected>int(p.code.size())-pc-1)
+            throw std::runtime_error("Lua function "+std::to_string(p.id)+" pc "+std::to_string(closure.pc)+": CLOSURE capture bindings truncated");
+        closure.captures.clear();
+        closure.captures.reserve(size_t(expected));
+        for(int slot=0;slot<expected;++slot){
+            Instr& binding=p.code[pc+slot+1];
+            if(binding.extraWord || (binding.op!=0 && binding.op!=4))
+                throw std::runtime_error("Lua function "+std::to_string(p.id)+" pc "+std::to_string(binding.pc)+": CLOSURE capture binding must be MOVE or GETUPVAL");
+            binding.closureBindingFor=closure.pc;
+            binding.captureSlot=slot;
+            closure.captures.push_back({binding.pc,binding.b,binding.op==4});
+        }
+        // A valid binding cannot itself be CLOSURE, so no later closure is
+        // skipped.  Advancing avoids treating the pseudo-instructions as
+        // regular bytecode during this association pass.
+        pc+=expected;
+    }
+}
+
 static void validateProtoData(const Proto& p){
     auto failure=[&](const Instr& i,const std::string& message){throw std::runtime_error("Lua function "+std::to_string(p.id)+" pc "+std::to_string(i.pc)+": "+message);};
     auto checkReg=[&](const Instr& i,int reg,const char* field){if(reg<0||reg>=p.maxstack)failure(i,std::string("register ")+field+" out of range");};
@@ -122,11 +163,23 @@ static void validateProtoData(const Proto& p){
     auto checkRK=[&](const Instr& i,int operand,const char* field){if(operand&256){if((operand&255)>=int(p.constants.size()))failure(i,std::string("constant ")+field+" out of range");}else checkReg(i,operand,field);};
     auto checkConstant=[&](const Instr& i,int index){if(index<0||index>=int(p.constants.size()))failure(i,"constant index out of range");};
     auto checkUpvalue=[&](const Instr& i,int index){if(index<0||index>=p.nups)failure(i,"upvalue index out of range");};
-    auto checkTarget=[&](const Instr& i){if(i.target<0||i.target>=int(p.code.size())||p.code[i.target].extraWord)failure(i,"jump target is not an instruction boundary");};
+    auto checkTarget=[&](const Instr& i){
+        if(i.target<0||i.target>=int(p.code.size())||p.code[i.target].extraWord||p.code[i.target].closureBindingFor>=0)
+            failure(i,"jump target is not an instruction boundary");
+    };
 
     for(const Instr& i:p.code){
         if(i.extraWord)continue;
         if(i.op<0||i.op>=38)failure(i,"unknown opcode "+std::to_string(i.op));
+        // CLOSURE consumes its following MOVE/GETUPVAL records.  Lua's VM
+        // reads only B from those records; validating A as a normal MOVE or
+        // GETUPVAL operand would incorrectly reject a semantically valid
+        // closure binding and would model it as a separate operation.
+        if(i.closureBindingFor>=0){
+            if(i.op==0) checkReg(i,i.b,"CLOSURE local capture B");
+            else checkUpvalue(i,i.b);
+            continue;
+        }
         switch(i.op){
         case 0:checkReg(i,i.a,"A");checkReg(i,i.b,"B");break;
         case 1:checkReg(i,i.a,"A");checkConstant(i,i.bx);break;
@@ -153,7 +206,12 @@ static void validateProtoData(const Proto& p){
         case 33:if(i.c==0)failure(i,"TFORLOOP result count is zero");checkRange(i,i.a,3+i.c,"generic for");checkTarget(i);break;
         case 34:checkReg(i,i.a,"A");if(i.b>0)checkRange(i,i.a+1,i.b,"SETLIST values");if(i.setlistBlock<=0)failure(i,"SETLIST block index is zero");break;
         case 35:if(i.a<0||i.a>p.maxstack)failure(i,"CLOSE register out of range");break;
-        case 36:checkReg(i,i.a,"A");if(i.bx<0||i.bx>=int(p.children.size()))failure(i,"child prototype index out of range");break;
+        case 36:
+            checkReg(i,i.a,"A");
+            if(i.bx<0||i.bx>=int(p.children.size()))failure(i,"child prototype index out of range");
+            if(i.bx>=0&&i.bx<int(p.children.size())&&int(i.captures.size())!=p.children[i.bx].nups)
+                failure(i,"CLOSURE capture binding count does not match child upvalues");
+            break;
         case 37:checkReg(i,i.a,"A");if(i.b>1)checkRange(i,i.a,i.b-1,"vararg results");break;
         }
     }
@@ -189,6 +247,7 @@ static void parseProto(Reader& r, Proto& p, int& next, int parent, int depth) {
     uint32_t lines=r.u32(); if(lines>1000000-r.totalDebugEntries)throw std::runtime_error("Lua lineinfo limit exceeded"); r.totalDebugEntries+=lines; p.lines.reserve(lines); for(uint32_t i=0;i<lines;i++)p.lines.push_back(r.i32());
     uint32_t locals=r.u32(); if(locals>1000000-r.totalDebugEntries)throw std::runtime_error("Lua local debug limit exceeded"); r.totalDebugEntries+=locals; p.locals.reserve(locals); for(uint32_t i=0;i<locals;i++){LocalInfo x; x.name=r.luaString(); x.start=int(r.u32()); x.end=int(r.u32()); p.locals.push_back(std::move(x));}
     uint32_t ups=r.u32(); if(ups>1000000-r.totalDebugEntries)throw std::runtime_error("Lua upvalue debug limit exceeded"); r.totalDebugEntries+=ups; p.upvalues.reserve(ups); for(uint32_t i=0;i<ups;i++)p.upvalues.push_back(r.luaString());
+    associateClosureCaptures(p);
     validateProtoData(p);
 }
 static Proto parse(const std::string& d) { Reader r(d); header(r); Proto p; int next=0; parseProto(r,p,next,-1,0); if(r.pos!=d.size()) throw std::runtime_error("trailing bytes after Lua chunk"); return p; }
@@ -225,11 +284,39 @@ static void jsonProto(std::ostringstream& o,const Proto& p){
          <<",\"opcode_name\":\""<<opName(i.op)<<"\",\"a\":"<<i.a<<",\"b\":"<<i.b<<",\"c\":"<<i.c
          <<",\"bx\":"<<i.bx<<",\"sbx\":"<<i.sbx<<",\"jump_target\":"<<i.target
          <<",\"extra_word\":"<<(i.extraWord?"true":"false")<<",\"setlist_block\":"<<i.setlistBlock
-         <<",\"open_tail\":"<<(i.op==34&&i.b==0?"true":"false")<<",\"open_producer_pc\":"<<i.openProducer<<"}";
+         <<",\"open_tail\":"<<(i.op==34&&i.b==0?"true":"false")<<",\"open_producer_pc\":"<<i.openProducer
+         <<",\"closure_binding_for_pc\":"<<i.closureBindingFor<<",\"capture_slot\":"<<i.captureSlot<<",\"captures\":[";
+        for(size_t capture=0;capture<i.captures.size();++capture){
+            if(capture)o<<',';
+            const CaptureInfo& info=i.captures[capture];
+            o<<"{\"slot\":"<<capture<<",\"binding_pc\":"<<info.bindingPc
+             <<",\"kind\":\""<<(info.fromUpvalue?"upvalue":"local")<<"\",\"source_index\":"<<info.sourceIndex<<"}";
+        }
+        o<<"]}";
     }
     o<<"],\"children\":[";for(size_t i=0;i<p.children.size();i++){if(i)o<<',';jsonProto(o,p.children[i]);}o<<"]}";
 }
-static void disProto(std::ostringstream& o,const Proto& p){ o<<"function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" constants="<<p.constants.size()<<"\n"; for(const auto&i:p.code){ o<<"  @"<<i.pc<<" "<<opName(i.op); if(i.extraWord)o<<" raw="<<i.raw;else{o<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" Bx="<<i.bx<<" sBx="<<i.sbx;if(i.op==34)o<<" block="<<i.setlistBlock;} if(i.target>=0)o<<" -> "<<i.target; if(i.op==34&&i.b==0)o<<" OPEN_TAIL producer="<<i.openProducer; o<<"\n"; } for(const auto&c:p.children)disProto(o,c); }
+static void disProto(std::ostringstream& o,const Proto& p){
+    o<<"function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" constants="<<p.constants.size()<<"\n";
+    for(const auto&i:p.code){
+        o<<"  @"<<i.pc<<" "<<opName(i.op);
+        if(i.extraWord)o<<" raw="<<i.raw;
+        else { o<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" Bx="<<i.bx<<" sBx="<<i.sbx; if(i.op==34)o<<" block="<<i.setlistBlock; }
+        if(i.target>=0)o<<" -> "<<i.target;
+        if(i.op==34&&i.b==0)o<<" OPEN_TAIL producer="<<i.openProducer;
+        if(i.closureBindingFor>=0)
+            o<<" CLOSURE_BINDING owner="<<i.closureBindingFor<<" slot="<<i.captureSlot;
+        if(i.op==36){
+            o<<" CAPTURES="<<i.captures.size();
+            for(size_t slot=0;slot<i.captures.size();++slot){
+                const CaptureInfo& capture=i.captures[slot];
+                o<<" ["<<slot<<":"<<(capture.fromUpvalue?"upvalue":"local")<<" "<<capture.sourceIndex<<" at "<<capture.bindingPc<<"]";
+            }
+        }
+        o<<"\n";
+    }
+    for(const auto&c:p.children)disProto(o,c);
+}
 static void cfgProto(std::ostringstream& o,const Proto& p){ o<<"digraph lua51_cfg_"<<p.id<<" {\n"; std::vector<int> starts{0}; for(const auto&i:p.code)if(i.target>=0){starts.push_back(i.target);if(i.pc+1<int(p.code.size()))starts.push_back(i.pc+1);} std::sort(starts.begin(),starts.end());starts.erase(std::unique(starts.begin(),starts.end()),starts.end()); for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;o<<"  b"<<i<<" [label=\""<<starts[i]<<".."<<end<<"\"];\n";} for(size_t i=0;i<starts.size();i++){int end=i+1<starts.size()?starts[i+1]-1:int(p.code.size())-1;const Instr* last=nullptr;for(const auto&ins:p.code)if(ins.pc>=starts[i]&&ins.pc<=end)last=&ins;if(last&&last->target>=0){auto it=std::find(starts.begin(),starts.end(),last->target);if(it!=starts.end())o<<"  b"<<i<<" -> b"<<(it-starts.begin())<<";\n";} if(last&& (last->op==23||last->op==24||last->op==25||last->op==26||last->op==27||last->op==33) && i+1<starts.size())o<<"  b"<<i<<" -> b"<<i+1<<";\n";}o<<"}\n"; }
 static void luaProto(std::ostringstream& o,const Proto& p){ o<<"-- ByteVeil Lua 5.1 diagnostic decompilation\n-- function "<<p.id<<" parent="<<p.parent<<" params="<<p.params<<" registers="<<p.maxstack<<" instructions="<<p.code.size()<<"\n";for(const auto&i:p.code)o<<"-- ["<<i.pc<<"] "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<"\n";for(const auto&c:p.children)luaProto(o,c);if(p.id==0)o<<"return nil\n";}
 static std::string reg(int a){return "r"+std::to_string(a);}
@@ -281,6 +368,66 @@ static std::string valueAt(const Proto& p,int regIndex,int pc){
     return localReg(p,regIndex,pc);
 }
 static std::string args(const Proto& p,int a,int b,int pc=0){std::ostringstream s;int n=b-1;for(int k=1;k<=n;k++){if(k>1)s<<", ";s<<valueAt(p,a+k,pc);}return s.str();}
+
+struct RenderContext {
+    // Entries point at lexical variables in the enclosing emitted function.
+    // They are created from the CLOSURE pseudo-instructions, never guessed.
+    std::vector<std::string> capturedUpvalues;
+};
+
+static std::string renderedLocal(const Proto& p,int registerIndex,int pc,const RenderContext& context){
+    (void)context;
+    // Root names remain compact for readable diagnostics.  Nested prototypes
+    // need their own register namespace so an inner r0 cannot shadow an outer
+    // r0 captured by a closure.
+    if(p.id==0) return localReg(p,registerIndex,pc);
+    return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
+}
+
+static std::string renderedUpvalue(const Proto& p,int index,const RenderContext& context){
+    if(index>=0&&index<int(context.capturedUpvalues.size())&&!context.capturedUpvalues[index].empty())
+        return context.capturedUpvalues[index];
+    return upvalue(p,index);
+}
+
+static std::string renderedValue(const Proto& p,int x,int pc,const RenderContext& context){
+    if(x&256){ int index=x&255; return index<int(p.constants.size())?p.constants[index]:"nil"; }
+    return renderedLocal(p,x,pc,context);
+}
+
+static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const RenderContext& context){
+    for(int n=pc-1;n>=0;--n){
+        const Instr& definition=p.code[n];
+        if(definition.closureBindingFor>=0 || definition.a!=registerIndex) continue;
+        if(definition.op==1) return definition.bx<int(p.constants.size())?p.constants[definition.bx]:"nil";
+        if(definition.op==0) return renderedValueAt(p,definition.b,n,context);
+        if(definition.op==3) return "nil";
+        break;
+    }
+    return renderedLocal(p,registerIndex,pc,context);
+}
+
+static std::string renderedArgs(const Proto& p,int a,int b,int pc,const RenderContext& context){
+    std::ostringstream result;
+    for(int k=1;k<b;k++){ if(k>1) result<<", "; result<<renderedValueAt(p,a+k,pc,context); }
+    return result.str();
+}
+
+static void emitRegisterDeclarations(std::ostringstream& o,const Proto& p,const RenderContext& context,int indent,int firstRegister){
+    std::set<std::string> names;
+    for(int regIndex=firstRegister;regIndex<p.maxstack;++regIndex){
+        if(p.id==0){
+            names.insert(renderedLocal(p,regIndex,0,context));
+            for(const Instr& instruction:p.code)
+                names.insert(renderedLocal(p,regIndex,instruction.pc,context));
+        }else names.insert(renderedLocal(p,regIndex,0,context));
+    }
+    if(names.empty()) return;
+    o<<std::string(size_t(indent),' ')<<"local ";
+    bool first=true;
+    for(const std::string& name:names){ if(!first)o<<", "; o<<name; first=false; }
+    o<<"\n";
+}
 static void liftFunctionBody(std::ostringstream& o,const Proto& p){
     for(const auto&i:p.code){
         o<<"-- pc "<<i.pc<<" "<<opName(i.op)<<"\n";
@@ -316,64 +463,93 @@ static void liftFunctionBody(std::ostringstream& o,const Proto& p){
 }
 
 static bool isCondition(int op){ return op==23 || op==24 || op==25 || op==26; }
-static std::string conditionExpr(const Proto& p,const Instr& i){
+static std::string conditionExpr(const Proto& p,const Instr& i,const RenderContext& context){
     if(i.op==26){
-        std::string test=localReg(p,i.a,i.pc);
+        std::string test=renderedLocal(p,i.a,i.pc,context);
         return i.c ? "not ("+test+")" : test;
     }
-    std::string lhs=value(p,i.b,i.pc), rhs=value(p,i.c,i.pc);
+    std::string lhs=renderedValue(p,i.b,i.pc,context), rhs=renderedValue(p,i.c,i.pc,context);
     const char* op=i.op==23 ? " == " : i.op==24 ? " < " : " <= ";
     std::string comparison="("+lhs+op+rhs+")";
     return i.a ? comparison : "not "+comparison;
 }
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,bool allowInfiniteLoop=true);
-static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent){
+static RenderContext closureContext(const Proto& p,const Instr& closure,const RenderContext& parent){
+    RenderContext result;
+    result.capturedUpvalues.reserve(closure.captures.size());
+    for(const CaptureInfo& capture:closure.captures){
+        result.capturedUpvalues.push_back(capture.fromUpvalue
+            ? renderedUpvalue(p,capture.sourceIndex,parent)
+            : renderedLocal(p,capture.sourceIndex,capture.bindingPc,parent));
+    }
+    return result;
+}
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true);
+static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context){
     std::string pad(indent,' ');
+    if(i.closureBindingFor>=0) return;
     switch(i.op){
-    case 0:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"\n";break;
-    case 1:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"\n";break;
-    case 2:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<(i.b?"true":"false")<<"\n";break;
-    case 3:for(int r=i.a;r<=i.b;r++)o<<pad<<localReg(p,r,i.pc)<<" = nil\n";break;
-    case 4:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<upvalue(p,i.b)<<"\n";break;
-    case 5:o<<pad<<localReg(p,i.a,i.pc)<<" = _G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
-    case 6:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"["<<value(p,i.c,i.pc)<<"]\n";break;
-    case 7:o<<pad<<"_G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<localReg(p,i.a,i.pc)<<"\n";break;
-    case 8:o<<pad<<upvalue(p,i.b)<<" = "<<localReg(p,i.a,i.pc)<<"\n";break;
-    case 9:o<<pad<<localReg(p,i.a,i.pc)<<"["<<value(p,i.b,i.pc)<<"] = "<<value(p,i.c,i.pc)<<"\n";break;
-    case 10:o<<pad<<localReg(p,i.a,i.pc)<<" = {}\n";break;
-    case 11:o<<pad<<localReg(p,i.a+1,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"\n";
-            o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<"["<<value(p,i.c,i.pc)<<"]\n";break;
-    case 12: case 13: case 14: case 15: case 16: case 17:{const char* op=i.op==12?"+":i.op==13?"-":i.op==14?"*":i.op==15?"/":i.op==16?"%":"^";o<<pad<<localReg(p,i.a,i.pc)<<" = "<<value(p,i.b,i.pc)<<" "<<op<<" "<<value(p,i.c,i.pc)<<"\n";break;}
-    case 18:o<<pad<<localReg(p,i.a,i.pc)<<" = -"<<localReg(p,i.b,i.pc)<<"\n";break;
-    case 19:o<<pad<<localReg(p,i.a,i.pc)<<" = not "<<localReg(p,i.b,i.pc)<<"\n";break;
-    case 20:o<<pad<<localReg(p,i.a,i.pc)<<" = #"<<localReg(p,i.b,i.pc)<<"\n";break;
-    case 21:o<<pad<<localReg(p,i.a,i.pc)<<" = "<<localReg(p,i.b,i.pc)<<" .. "<<localReg(p,i.c,i.pc)<<"\n";break;
-    case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<localReg(p,i.a,i.pc)<<" from "<<localReg(p,i.b,i.pc)<<" (C="<<i.c<<")\n";break;
+    case 0:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"\n";break;
+    case 1:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"\n";break;
+    case 2:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<(i.b?"true":"false")<<"\n";break;
+    case 3:for(int r=i.a;r<=i.b;r++)o<<pad<<renderedLocal(p,r,i.pc,context)<<" = nil\n";break;
+    case 4:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedUpvalue(p,i.b,context)<<"\n";break;
+    case 5:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = _G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
+    case 6:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"["<<renderedValue(p,i.c,i.pc,context)<<"]\n";break;
+    case 7:o<<pad<<"_G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
+    case 8:o<<pad<<renderedUpvalue(p,i.b,context)<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
+    case 9:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<renderedValue(p,i.b,i.pc,context)<<"] = "<<renderedValue(p,i.c,i.pc,context)<<"\n";break;
+    case 10:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = {}\n";break;
+    case 11:o<<pad<<renderedLocal(p,i.a+1,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"\n";
+            o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"["<<renderedValue(p,i.c,i.pc,context)<<"]\n";break;
+    case 12: case 13: case 14: case 15: case 16: case 17:{const char* op=i.op==12?"+":i.op==13?"-":i.op==14?"*":i.op==15?"/":i.op==16?"%":"^";o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedValue(p,i.b,i.pc,context)<<" "<<op<<" "<<renderedValue(p,i.c,i.pc,context)<<"\n";break;}
+    case 18:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = -"<<renderedLocal(p,i.b,i.pc,context)<<"\n";break;
+    case 19:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = not "<<renderedLocal(p,i.b,i.pc,context)<<"\n";break;
+    case 20:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = #"<<renderedLocal(p,i.b,i.pc,context)<<"\n";break;
+    case 21:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<" .. "<<renderedLocal(p,i.c,i.pc,context)<<"\n";break;
+    case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<renderedLocal(p,i.a,i.pc,context)<<" from "<<renderedLocal(p,i.b,i.pc,context)<<" (C="<<i.c<<")\n";break;
     case 28:{
         if(i.b==0||i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open "<<(i.b==0?"arguments":"results")<<"\n";
-        if(i.c==1)o<<pad<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";
+        if(i.c==1)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";
         else {
             int results=i.c==0?1:i.c-1;
             o<<pad;
-            for(int r=0;r<results;r++){if(r)o<<", ";o<<localReg(p,i.a+r,i.pc);}
-            o<<" = "<<localReg(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";
+            for(int r=0;r<results;r++){if(r)o<<", ";o<<renderedLocal(p,i.a+r,i.pc,context);}
+            o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";
         }
         break;
     }
-    case 29:if(i.b==0)o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has open arguments\n";o<<pad<<"return "<<valueAt(p,i.a,i.pc)<<"("<<args(p,i.a,i.b,i.pc)<<")\n";break;
-    case 30:{if(i.b==0)o<<pad<<"-- ByteVeil: RETURN at pc "<<i.pc<<" has an open result tail\n";int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<valueAt(p,i.a+k,i.pc);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
+    case 29:if(i.b==0)o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has open arguments\n";o<<pad<<"return "<<renderedValueAt(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";break;
+    case 30:{if(i.b==0)o<<pad<<"-- ByteVeil: RETURN at pc "<<i.pc<<" has an open result tail\n";int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<renderedValueAt(p,i.a+k,i.pc,context);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
     case 31:o<<pad<<"-- ByteVeil: FORLOOP at pc "<<i.pc<<" was not paired with FORPREP\n";break;
     case 32:o<<pad<<"-- ByteVeil: FORPREP at pc "<<i.pc<<" was not paired with FORLOOP\n";break;
     case 33:o<<pad<<"-- ByteVeil: TFORLOOP at pc "<<i.pc<<" was not paired with its entry jump\n";break;
-    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<localReg(p,i.a,i.pc)<<"["<<base+k<<"] = "<<localReg(p,i.a+k,i.pc)<<"\n";}else o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
+    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<base+k<<"] = "<<renderedLocal(p,i.a+k,i.pc,context)<<"\n";}else o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
     case 35:o<<pad<<"-- ByteVeil: CLOSE registers >= "<<i.a<<"; captured upvalues remain represented\n";break;
-    case 36: if(size_t(i.bx)<p.children.size()){const Proto& c=p.children[i.bx];o<<pad<<localReg(p,i.a,i.pc)<<" = function(";for(int k=0;k<c.params;k++){if(k)o<<", ";o<<localReg(c,k,0);}if(c.vararg&2){if(c.params)o<<", ";o<<"...";}o<<")\n";emitRange(o,c,0,int(c.code.size()),indent+4);o<<pad<<"end\n";}else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";break;
-    case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n";o<<pad<<localReg(p,i.a,i.pc)<<" = nil\n";}else if(i.b==0)o<<pad<<localReg(p,i.a,i.pc)<<" = ... -- open vararg results\n";else{o<<pad<<localReg(p,i.a,i.pc);for(int k=1;k<i.b-1;k++)o<<", "<<localReg(p,i.a+k,i.pc);o<<" = ...\n";}break;
+    case 36:
+        if(size_t(i.bx)<p.children.size()){
+            const Proto& child=p.children[i.bx];
+            const RenderContext childContext=closureContext(p,i,context);
+            for(size_t slot=0;slot<i.captures.size();++slot){
+                const CaptureInfo& capture=i.captures[slot];
+                o<<pad<<"-- ByteVeil: CLOSURE pc "<<i.pc<<" captures upvalue "<<slot<<" from "
+                 <<(capture.fromUpvalue?"parent upvalue ":"local register ")<<childContext.capturedUpvalues[slot]
+                 <<" (binding pc "<<capture.bindingPc<<")\n";
+            }
+            o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = function(";
+            for(int k=0;k<child.params;k++){if(k)o<<", ";o<<renderedLocal(child,k,0,childContext);}
+            if(child.vararg&2){if(child.params)o<<", ";o<<"...";}
+            o<<")\n";
+            emitRegisterDeclarations(o,child,childContext,indent+4,child.params);
+            emitRange(o,child,0,int(child.code.size()),indent+4,childContext);
+            o<<pad<<"end\n";
+        }else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";
+        break;
+    case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n";o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = nil\n";}else if(i.b==0)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = ... -- open vararg results\n";else{o<<pad<<renderedLocal(p,i.a,i.pc,context);for(int k=1;k<i.b-1;k++)o<<", "<<renderedLocal(p,i.a+k,i.pc,context);o<<" = ...\n";}break;
     case -1:o<<pad<<"-- ByteVeil: SETLIST extra block word "<<i.setlistBlock<<" consumed at pc "<<i.pc<<"\n";break;
     default:o<<pad<<"-- ByteVeil: unsupported opcode retained: "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" at pc "<<i.pc<<"\n";break;
     }
 }
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,bool allowInfiniteLoop){
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop){
     const std::string pad(indent,' ');
     // A readable reconstruction must never follow an unstructured back-edge
     // forever.  Structured loops below consume their back-edge; anything that
@@ -389,6 +565,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             return;
         }
         const Instr& i=p.code[pc];
+        // These records are consumed by the preceding CLOSURE.  Re-emitting
+        // them as ordinary MOVE/GETUPVAL instructions would fabricate writes
+        // that the Lua 5.1 VM never performs.
+        if(i.closureBindingFor>=0){ ++pc; continue; }
         // A closed, entry-anchored back-edge with no jump out of its body is
         // an unconditional source loop.  Treat it structurally; cycles that
         // have an exit or competing latch are deliberately left visible.
@@ -410,7 +590,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             }
             if(latch>=0&&closed){
                 o<<pad<<"while true do\n";
-                emitRange(o,p,begin,latch,indent+4,false);
+                emitRange(o,p,begin,latch,indent+4,context,false);
                 o<<pad<<"end\n";
                 pc=latch+1;
                 continue;
@@ -425,16 +605,16 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             const Instr& call=p.code[pc+2];
             std::string fn=i.bx<int(p.constants.size())?p.constants[i.bx]:"_G[\"unknown\"]";
             if(fn.size()>=2 && fn.front()=='"' && fn.back()=='"') fn=fn.substr(1,fn.size()-2);
-            std::string arg=valueAt(p,p.code[pc+1].b,pc+1);
+            std::string arg=renderedValueAt(p,p.code[pc+1].b,pc+1,context);
             o<<pad<<(call.op==29?"return ":"")<<fn<<"("<<arg<<")\n";
             pc+=3; if(call.op==29) break; continue;
         }
         // Numeric for: FORPREP jumps over the body to FORLOOP; the loop variable is A+3.
         if(i.op==32 && i.target>pc && i.target<end && i.target<int(p.code.size()) && p.code[i.target].op==31){
             int bodyBegin=pc+1, bodyEnd=i.target;
-            std::string var=localReg(p,i.a+3,bodyBegin);
-            o<<pad<<"for "<<var<<" = "<<valueAt(p,i.a,pc)<<", "<<valueAt(p,i.a+1,pc)<<", "<<valueAt(p,i.a+2,pc)<<" do\n";
-            emitRange(o,p,bodyBegin,bodyEnd,indent+4); o<<pad<<"end\n"; pc=i.target+1; continue;
+            std::string var=renderedLocal(p,i.a+3,bodyBegin,context);
+            o<<pad<<"for "<<var<<" = "<<renderedValueAt(p,i.a,pc,context)<<", "<<renderedValueAt(p,i.a+1,pc,context)<<", "<<renderedValueAt(p,i.a+2,pc,context)<<" do\n";
+            emitRange(o,p,bodyBegin,bodyEnd,indent+4,context); o<<pad<<"end\n"; pc=i.target+1; continue;
         }
         // Generic for: the initial JMP lands on TFORLOOP.  TFORLOOP skips the
         // following backward JMP on exhaustion; otherwise that JMP enters the
@@ -446,23 +626,23 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"for ";
             for(int n=0;n<loop.c;n++){
                 if(n)o<<", ";
-                o<<localReg(p,loop.a+3+n,pc+1);
+                o<<renderedLocal(p,loop.a+3+n,pc+1,context);
             }
-            o<<" in "<<localReg(p,loop.a,pc)<<", "<<localReg(p,loop.a+1,pc)<<", "<<localReg(p,loop.a+2,pc)<<" do\n";
-            emitRange(o,p,pc+1,i.target,indent+4);
+            o<<" in "<<renderedLocal(p,loop.a,pc,context)<<", "<<renderedLocal(p,loop.a+1,pc,context)<<", "<<renderedLocal(p,loop.a+2,pc,context)<<" do\n";
+            emitRange(o,p,pc+1,i.target,indent+4,context);
             o<<pad<<"end\n";
             pc=i.target+2;
             continue;
         }
         // Repeat/until: a conditional immediately followed by a backward jump.
         if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>=begin && p.code[pc+1].target<pc){
-            o<<pad<<"repeat\n"; emitRange(o,p,p.code[pc+1].target,pc,indent+4); o<<pad<<"until "<<conditionExpr(p,i)<<"\n"; pc+=2; continue;
+            o<<pad<<"repeat\n"; emitRange(o,p,p.code[pc+1].target,pc,indent+4,context); o<<pad<<"until "<<conditionExpr(p,i,context)<<"\n"; pc+=2; continue;
         }
         // While: condition, forward exit jump, body, backward jump to condition.
         if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
             int bodyBegin=pc+2, exit=p.code[pc+1].target;
             if(exit<=end && exit>bodyBegin && p.code[exit-1].op==22 && p.code[exit-1].target==pc){
-                o<<pad<<"while "<<conditionExpr(p,i)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4); o<<pad<<"end\n"; pc=exit; continue;
+                o<<pad<<"while "<<conditionExpr(p,i,context)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4,context); o<<pad<<"end\n"; pc=exit; continue;
             }
         }
         // If/elseif/else: conditional, jump over true branch, optional join jump.
@@ -470,8 +650,8 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             int trueBegin=pc+2, falseBegin=p.code[pc+1].target;
             int join=falseBegin;
             if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22 && p.code[falseBegin-1].target>falseBegin){ join=p.code[falseBegin-1].target; }
-            o<<pad<<"if "<<conditionExpr(p,i)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4);
-            if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4); }
+            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4,context);
+            if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4,context); }
             o<<pad<<"end\n"; pc=join; continue;
         }
         if(i.op==22){ pc=i.target>=0?i.target:pc+1; continue; }
@@ -485,7 +665,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             for(int f=pc+1;f<end && f<=pc+4;f++)
                 if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
         }
-        if(!loopSetup && !returnSetup) emitSimple(o,p,i,indent);
+        if(!loopSetup && !returnSetup) emitSimple(o,p,i,indent,context);
         if(i.op==29 || i.op==30) break;
         if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;
@@ -493,8 +673,9 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
 }
 static void readableProto(std::ostringstream& o,const Proto& p){
     o<<"-- ByteVeil Lua 5.1 lifted (reconstructed) function "<<p.id<<" (CFG/SSA conservative)\n";
-    for(int i=0;i<p.params;i++) o<<"local "<<localReg(p,i,0)<<"\n";
-    emitRange(o,p,0,int(p.code.size()),0);
+    const RenderContext rootContext;
+    emitRegisterDeclarations(o,p,rootContext,0,0);
+    emitRange(o,p,0,int(p.code.size()),0,rootContext);
     if(p.id==0 && (p.code.empty()||p.code.back().op!=30)) o<<"return nil\n";
 }
 

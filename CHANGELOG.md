@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - Lua 5.1 CLOSURE capture integrity
+
+### Corrected
+
+- Lua 5.1 `CLOSURE` now consumes its immediately following pseudo-instructions as capture bindings, rather than allowing their `MOVE` or `GETUPVAL` records to appear as independently executed assignments.
+- The reader verifies the exact binding count against the child prototype's upvalue count, accepts only `MOVE` (enclosing local) or `GETUPVAL` (enclosing upvalue), checks the captured source index, and rejects jumps into a consumed binding record. Truncated, wrong-kind, out-of-range, and non-boundary cases fail with a function/PC diagnostic.
+- Readable nested functions use a separate register namespace and resolve `GETUPVAL`/`SETUPVAL` through the statically proven lexical capture source. Capture provenance remains visible adjacent to the closure definition.
+
+### Added
+
+- Lua 5.1 JSON exposes the capture list on each `CLOSURE` plus owner-PC and slot metadata on its consumed binding records. The disassembler labels the same relationship.
+
+### Validation
+
+- Added self-contained Lua 5.1 binary regressions for a local capture with an intentionally ignored binding `A` field, a nested inherited-upvalue capture, and malformed truncated, wrong-opcode, and out-of-range capture records.
+
 ## Unreleased - Lua 5.1 readable-operation coverage
 
 ### Corrected

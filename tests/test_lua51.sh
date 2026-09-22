@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -31,10 +31,11 @@ def u32(value):
 def lua_string(value):
     return u32(len(value) + 1) + value + b"\0"
 
-def build(code, constants, *, source=b"@synthetic", maxstack=2, nups=0, locals=(), upvalues=()):
-    chunk = bytearray(b"\x1bLua\x51\x00\x01\x04\x04\x04\x08\x00")
+def proto(code, constants, *, source=b"@synthetic", maxstack=2, nups=0, params=0, vararg=2,
+          locals=(), upvalues=(), children=()):
+    chunk = bytearray()
     chunk += lua_string(source)
-    chunk += struct.pack("<iiBBBB", 0, 0, nups, 0, 2, maxstack)
+    chunk += struct.pack("<iiBBBB", 0, 0, nups, params, vararg, maxstack)
     chunk += u32(len(code)) + b"".join(u32(word) for word in code)
     chunk += u32(len(constants))
     for tag, value in constants:
@@ -45,13 +46,18 @@ def build(code, constants, *, source=b"@synthetic", maxstack=2, nups=0, locals=(
             chunk += struct.pack("<d", value)
         elif tag == 4:
             chunk += lua_string(value)
-    chunk += u32(0)  # child prototypes
+    chunk += u32(len(children))
+    for child in children:
+        chunk += proto(**child)
     chunk += u32(len(code)) + b"".join(u32(1) for _ in code)
     chunk += u32(len(locals))
     for name, start, end in locals:
         chunk += lua_string(name) + u32(start) + u32(end)
     chunk += u32(len(upvalues)) + b"".join(lua_string(name) for name in upvalues)
     return chunk
+
+def build(code, constants, **kwargs):
+    return bytearray(b"\x1bLua\x51\x00\x01\x04\x04\x04\x08\x00") + proto(code, constants, **kwargs)
 
 source = b"@synthetic\x1f\xff"
 literal = b'quote:" newline:\n nul:\0 ctrl:\x1f utf8:\xc3\xa9 raw:\xff'
@@ -118,6 +124,43 @@ loadnil_skipped_r2 = 3 | (2 << 6) | (2 << 23)
 open(sys.argv[11], "wb").write(build(
     [getupval, setupval, self_op, vararg_one, loadnil_r1, loadbool_skip,
      loadnil_skipped_r2, return_empty], [], maxstack=3, nups=1))
+
+# Lua 5.1 CLOSURE consumes exactly child.nups pseudo-instructions.  The
+# capture binding's A field is deliberately invalid here: the VM reads B only,
+# so accepting this valid local capture proves ByteVeil does not mis-validate
+# it as an independently executed MOVE A = B.
+closure_r1_child0 = 36 | (1 << 6)
+binding_move_r255_from_r0 = 0 | (255 << 6)
+getupval_r0 = 4
+open(sys.argv[12], "wb").write(build(
+    [loadk, closure_r1_child0, binding_move_r255_from_r0, ret], [(4, b"outer")], maxstack=2,
+    children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
+
+# A nested closure inherits an upvalue through GETUPVAL.  The second binding
+# is also pseudo-bytecode and must not appear as a standalone assignment.
+closure_r0_child0 = 36
+binding_getupval_r254_from_u0 = 4 | (254 << 6)
+open(sys.argv[13], "wb").write(build(
+    [loadk, closure_r1_child0, binding_move_r255_from_r0, ret], [(4, b"root")], maxstack=2,
+    children=[dict(code=[closure_r0_child0, binding_getupval_r254_from_u0, ret], constants=[], maxstack=1, nups=1,
+                   children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)])]))
+
+# Malformed closures fail visibly instead of treating arbitrary following
+# bytecode as a capture operation.
+open(sys.argv[14], "wb").write(build(
+    [closure_r1_child0], [], maxstack=2,
+    children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
+open(sys.argv[15], "wb").write(build(
+    [closure_r1_child0, loadk, ret], [(4, b"not a capture")], maxstack=2,
+    children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
+binding_move_from_bad_register = 0 | (7 << 23)
+open(sys.argv[16], "wb").write(build(
+    [closure_r1_child0, binding_move_from_bad_register, ret], [], maxstack=2,
+    children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
+jump_to_closure_binding = 22 | ((131071 + 1) << 14)  # pc 0 -> pc 2
+open(sys.argv[17], "wb").write(build(
+    [jump_to_closure_binding, closure_r1_child0, binding_move_r255_from_r0, ret], [], maxstack=2,
+    children=[dict(code=[getupval_r0, ret], constants=[], maxstack=1, nups=1)]))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -176,6 +219,35 @@ if grep -q '^r2 = nil$' "$TMP/readable-coverage.lua"; then
     echo "LOADBOOL C=1 did not skip the following instruction" >&2
     exit 1
 fi
+"$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
+"$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"
+"$BIN" --bytecode "$TMP/closure-local.luac" --format lua >"$TMP/closure-local.lua"
+"$BIN" --bytecode "$TMP/closure-nested.luac" --format lua >"$TMP/closure-nested.lua"
+"$BYTEVEIL_PYTHON" - "$TMP/closure-local.json" <<'PY'
+import json, sys
+root = json.load(open(sys.argv[1]))["root_function"]
+closure, binding = root["instructions"][1:3]
+assert closure["opcode_name"] == "CLOSURE"
+assert closure["captures"] == [{
+    "slot": 0, "binding_pc": 2, "kind": "local", "source_index": 0
+}]
+assert binding["closure_binding_for_pc"] == 1
+assert binding["capture_slot"] == 0
+PY
+grep -q 'CLOSURE.*CAPTURES=1.*\[0:local 0 at 2\]' "$TMP/closure-local.dis"
+grep -q 'CLOSURE_BINDING owner=1 slot=0' "$TMP/closure-local.dis"
+grep -q '^-- ByteVeil: CLOSURE pc 1 captures upvalue 0 from local register r0 (binding pc 2)$' "$TMP/closure-local.lua"
+grep -q '^    __byteveil_f1_r0 = r0$' "$TMP/closure-local.lua"
+if grep -q '^r255 = r0$' "$TMP/closure-local.lua"; then
+    echo "CLOSURE local capture was emitted as a standalone MOVE" >&2
+    exit 1
+fi
+grep -q '^    -- ByteVeil: CLOSURE pc 0 captures upvalue 0 from parent upvalue r0 (binding pc 1)$' "$TMP/closure-nested.lua"
+grep -q '^        __byteveil_f2_r0 = r0$' "$TMP/closure-nested.lua"
+if grep -q '__byteveil_f1_r254 = r0' "$TMP/closure-nested.lua"; then
+    echo "CLOSURE upvalue capture was emitted as a standalone GETUPVAL" >&2
+    exit 1
+fi
 "$BYTEVEIL_PYTHON" - "$TMP/setlist-extra.json" <<'PY'
 import json, sys
 instructions = json.load(open(sys.argv[1]))["root_function"]["instructions"]
@@ -183,7 +255,7 @@ assert instructions[2]["setlist_block"] == 2
 assert instructions[3]["opcode_name"] == "EXTRAARG"
 assert instructions[3]["extra_word"] is True
 PY
-for case in bad-jump bad-constant bad-register missing-extra; do
+for case in bad-jump bad-constant bad-register missing-extra closure-truncated closure-invalid-kind closure-invalid-source closure-jump-into-binding; do
     if "$BIN" --bytecode "$TMP/$case.luac" --format json >"$TMP/$case.out" 2>"$TMP/$case.err"; then
         echo "malformed Lua 5.1 case $case was accepted" >&2
         exit 1
@@ -193,4 +265,8 @@ grep -q 'jump target is not an instruction boundary' "$TMP/bad-jump.err"
 grep -q 'constant index out of range' "$TMP/bad-constant.err"
 grep -q 'register B out of range' "$TMP/bad-register.err"
 grep -q 'SETLIST is missing its extra block word' "$TMP/missing-extra.err"
+grep -q 'CLOSURE capture bindings truncated' "$TMP/closure-truncated.err"
+grep -q 'CLOSURE capture binding must be MOVE or GETUPVAL' "$TMP/closure-invalid-kind.err"
+grep -q 'CLOSURE local capture B out of range' "$TMP/closure-invalid-source.err"
+grep -q 'jump target is not an instruction boundary' "$TMP/closure-jump-into-binding.err"
 printf 'Lua 5.1 reader tests: PASS\n'
