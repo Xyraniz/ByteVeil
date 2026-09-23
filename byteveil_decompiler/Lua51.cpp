@@ -1732,17 +1732,18 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 if(tailJump.target>falseBegin){
                     join=tailJump.target;
                     trueEnd=predicateOwnsTailJump?join:falseBegin-1;
-                    bool hasNestedSharedExit=false, exitsOnlyAtJoin=true;
+                    bool hasNestedSharedBranch=false, exitsOnlyAtJoin=true;
                     for(int branch=trueBegin;branch<falseBegin;++branch){
                         const Instr& nested=p.code[branch];
                         if(nested.op==22&&nested.target>falseBegin&&nested.target!=join)
                             exitsOnlyAtJoin=false;
                         if(branch+1<falseBegin&&
                            (isCondition(nested.op)||nested.op==27)&&
-                           p.code[branch+1].op==22&&p.code[branch+1].target==join)
-                            hasNestedSharedExit=true;
+                           p.code[branch+1].op==22&&
+                           (p.code[branch+1].target==join||p.code[branch+1].target==falseBegin))
+                            hasNestedSharedBranch=true;
                     }
-                    if(hasNestedSharedExit&&exitsOnlyAtJoin) trueEnd=join;
+                    if(hasNestedSharedBranch&&exitsOnlyAtJoin) trueEnd=join;
                 }else if(tailJump.target==falseBegin&&!repeatLatch){
                     trueEnd=predicateOwnsTailJump?falseBegin:falseBegin-1;
                 }
