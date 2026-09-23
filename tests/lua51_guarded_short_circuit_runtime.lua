@@ -1,5 +1,3 @@
-local path = assert(arg[1], "expected reconstructed guarded-chain path")
-
 local cases = {
     {
         values = {gate1 = true, candidate1 = "first", gate2 = true,
@@ -22,12 +20,13 @@ local cases = {
     },
 }
 
-for index, case in ipairs(cases) do
-    local trace = {}
-    local observed
-    local environment = {}
-    environment._G = environment
-    setmetatable(environment, {
+local function run(path, scenarios)
+    for index, case in ipairs(scenarios) do
+        local trace = {}
+        local observed
+        local environment = {}
+        environment._G = environment
+        setmetatable(environment, {
             __index = function(_, key)
                 trace[#trace + 1] = key
                 if key == "observe" then
@@ -44,16 +43,34 @@ for index, case in ipairs(cases) do
                     })
                 end
                 return case.values[key]
-        end,
+            end,
+        })
+
+        local chunk = assert(loadfile(path))
+        setfenv(chunk, environment)
+        chunk()
+
+        assert(observed == case.expected,
+            "guarded short-circuit chain selected the wrong value in scenario " .. index)
+        assert(table.concat(trace, ",") == table.concat(case.trace, ","),
+            "guarded short-circuit chain changed lazy lookup order in scenario " .. index ..
+            ": " .. table.concat(trace, ","))
+    end
+end
+
+run(assert(arg[1], "expected reconstructed guarded-chain path"), cases)
+
+if arg[2] then
+    run(arg[2], {
+        {
+            values = {gate1 = true, candidate1 = "single", fallback = "fallback"},
+            expected = "single",
+            trace = {"gate1", "candidate1", "candidate1:available", "observe"},
+        },
+        {
+            values = {gate1 = false, candidate1 = "unused", fallback = "fallback"},
+            expected = "fallback",
+            trace = {"gate1", "fallback", "observe"},
+        },
     })
-
-    local chunk = assert(loadfile(path))
-    setfenv(chunk, environment)
-    chunk()
-
-    assert(observed == case.expected,
-        "guarded short-circuit chain selected the wrong value in scenario " .. index)
-    assert(table.concat(trace, ",") == table.concat(case.trace, ","),
-        "guarded short-circuit chain changed lazy lookup order in scenario " .. index ..
-        ": " .. table.concat(trace, ","))
 end

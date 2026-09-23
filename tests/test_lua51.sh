@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -432,6 +432,20 @@ open(sys.argv[44], "wb").write(build(
      (4, b"candidate2"), (4, b"fallback"), (4, b"observe"),
      (4, b"available")],
     maxstack=5))
+
+guarded_single_short_circuit_code = [
+    getglobal(0, 0), test_c0_r0, jmp(2, 8),
+    getglobal(1, 1), loadk(2, 6), gettable_r1_r1_r2,
+    test_c1_r1, jmp(7, 9),
+    getglobal(1, 4), getglobal(3, 5), 0 | (4 << 6) | (1 << 23),
+    call(3, 2, 1), ret(0, 1),
+]
+open(sys.argv[45], "wb").write(build(
+    guarded_single_short_circuit_code,
+    [(4, b"gate1"), (4, b"candidate1"), (4, b"gate2"),
+     (4, b"candidate2"), (4, b"fallback"), (4, b"observe"),
+     (4, b"available")],
+    maxstack=5))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -510,12 +524,23 @@ fi
 if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
     "$BYTEVEIL_LUAC51" -p "$TMP/guarded-short-circuit.lua"
 fi
+"$BIN" --bytecode "$TMP/guarded-single-short-circuit.luac" --format lua >"$TMP/guarded-single-short-circuit.lua"
+grep -q 'local __byteveil_condition_f0_pc1 = false' "$TMP/guarded-single-short-circuit.lua"
+if grep -q 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/guarded-single-short-circuit.lua"; then
+    echo "single guarded short-circuit chain still requires a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/guarded-single-short-circuit.lua"
+fi
 if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
     GUARDED_SHORT_CIRCUIT_PATH="$TMP/guarded-short-circuit.lua"
+    GUARDED_SINGLE_SHORT_CIRCUIT_PATH="$TMP/guarded-single-short-circuit.lua"
     if command -v cygpath >/dev/null 2>&1; then
         GUARDED_SHORT_CIRCUIT_PATH="$(cygpath -m "$GUARDED_SHORT_CIRCUIT_PATH")"
+        GUARDED_SINGLE_SHORT_CIRCUIT_PATH="$(cygpath -m "$GUARDED_SINGLE_SHORT_CIRCUIT_PATH")"
     fi
-    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_guarded_short_circuit_runtime.lua" "$GUARDED_SHORT_CIRCUIT_PATH"
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_guarded_short_circuit_runtime.lua" "$GUARDED_SHORT_CIRCUIT_PATH" "$GUARDED_SINGLE_SHORT_CIRCUIT_PATH"
 fi
 "$BIN" --bytecode "$TMP/multi-latch-loop.luac" --format lua >"$TMP/multi-latch-loop.lua"
 grep -q '^while true do$' "$TMP/multi-latch-loop.lua"

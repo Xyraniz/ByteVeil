@@ -1253,7 +1253,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     break;
                 }
-                if(guarded.size()<2||join<0||fallbackBegin<0) validGuardedChain=false;
+                if(guarded.empty()||join<0||fallbackBegin<0) validGuardedChain=false;
                 if(validGuardedChain){
                     std::set<int> allowedConditions;
                     std::map<int,int> allowedJumps;
