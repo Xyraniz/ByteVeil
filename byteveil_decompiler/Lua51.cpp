@@ -675,6 +675,27 @@ static std::string negateConditionExpr(const std::string& condition){
         return condition.substr(5,condition.size()-6);
     return "not ("+condition+")";
 }
+static bool straightLineConditionGap(const Instr& instruction){
+    if(instruction.op>=0&&instruction.op<=21) return true;
+    if(instruction.op==28) return instruction.b>0&&instruction.c>0;
+    if(instruction.op==34) return instruction.b>0;
+    if(instruction.op==35||instruction.op==36) return true;
+    if(instruction.op==37) return instruction.b>0;
+    return false;
+}
+static std::string conditionChainFlagName(const Proto& p,int pc,const RenderContext& context){
+    std::set<std::string> names;
+    for(const LocalInfo& local:p.locals) if(validIdentifier(local.name)) names.insert(local.name);
+    for(const std::string& name:p.upvalues) if(validIdentifier(name)) names.insert(name);
+    for(int registerIndex=0;registerIndex<p.maxstack;++registerIndex){
+        names.insert(renderedLocal(p,registerIndex,0,context));
+        for(const Instr& instruction:p.code)
+            names.insert(renderedLocal(p,registerIndex,instruction.pc,context));
+    }
+    std::string name="__byteveil_condition_f"+std::to_string(p.id)+"_pc"+std::to_string(pc);
+    while(names.count(name)) name.push_back('_');
+    return name;
+}
 static std::string closureCaptureCellSource(const Proto& p,const CaptureInfo& capture,const RenderContext& parent){
     if(capture.fromUpvalue){
         if(capture.sourceIndex>=0&&capture.sourceIndex<int(parent.capturedUpvalueCells.size()))
@@ -727,6 +748,7 @@ static RenderContext closureContext(const Proto& p,const Instr& closure,const Re
 }
 static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister);
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true,int loopBreakTarget=-1);
+static int followingControlTarget(const Proto& p,const Instr& i);
 static bool emitOpenSetList(std::ostringstream& o,const Proto& p,const Instr& setlist,int indent,const RenderContext& context){
     const int producerPc=openProducerFor(p,setlist);
     if(producerPc<0) return false;
@@ -1027,7 +1049,11 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // a branch escaping its parent range.
         if(isCondition(i.op)){
             struct ConditionJump { int pc; int target; std::string fallthrough; };
+            struct ConditionGap { int begin; int end; };
             std::vector<ConditionJump> chain;
+            std::vector<ConditionGap> gaps;
+            std::vector<ConditionJump> separatedChain;
+            std::vector<ConditionGap> separatedGaps;
             int cursor=pc;
             while(cursor+1<end && isCondition(p.code[cursor].op) && p.code[cursor+1].op==22){
                 const Instr& predicate=p.code[cursor];
@@ -1036,6 +1062,115 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 cursor+=2;
             }
             bool emittedChain=false;
+            // Some compilers leave short-circuit operand setup between each
+            // TEST/JMP pair (for example SELF, LOADK, CALL). Keep those
+            // instructions in the false path so calls remain lazy and ordered.
+            const int firstTarget=pc+1<end&&p.code[pc+1].op==22?p.code[pc+1].target:-1;
+            separatedChain.push_back({pc,firstTarget,conditionExpr(p,p.code[pc],context)});
+            cursor=pc+2;
+            bool sawGap=false;
+            while(firstTarget>=0&&cursor<end&&separatedChain.size()<9){
+                const int gapBegin=cursor;
+                while(cursor<end&&cursor-gapBegin<16&&straightLineConditionGap(p.code[cursor])) ++cursor;
+                if((cursor==gapBegin&&!sawGap)||cursor+1>=end||!isCondition(p.code[cursor].op)||p.code[cursor+1].op!=22) break;
+                sawGap=sawGap||cursor>gapBegin;
+                separatedGaps.push_back({gapBegin,cursor});
+                separatedChain.push_back({cursor,p.code[cursor+1].target,conditionExpr(p,p.code[cursor],context)});
+                cursor+=2;
+            }
+            if(sawGap&&separatedChain.size()>=2){
+                const int bodyBegin=separatedChain.back().pc+2;
+                const int join=separatedChain.back().target;
+                bool commonTrueBody=join>bodyBegin&&join<=end;
+                bool commonOrPrefix=commonTrueBody;
+                bool commonOrAnd=commonTrueBody&&separatedChain.front().target==bodyBegin;
+                for(size_t test=0;test+1<separatedChain.size();++test)
+                    commonOrPrefix=commonOrPrefix&&separatedChain[test].target==bodyBegin;
+                for(size_t test=1;test<separatedChain.size();++test)
+                    commonOrAnd=commonOrAnd&&separatedChain[test].target==join;
+                int resume=join;
+                bool hasElse=false;
+                bool bodyEndsInReturn=false;
+                if((commonOrPrefix||commonOrAnd)&&join>bodyBegin&&p.code[join-1].op==22&&p.code[join-1].target>join){
+                    resume=p.code[join-1].target;
+                    hasElse=resume<=end;
+                }
+                if((commonOrPrefix||commonOrAnd)&&join>bodyBegin&&!hasElse&&
+                   (p.code[join-1].op==29||p.code[join-1].op==30)){
+                    bool jumpsToJoin=false;
+                    for(int bodyPc=bodyBegin;bodyPc<join-1;++bodyPc)
+                        if(p.code[bodyPc].op==22&&p.code[bodyPc].target==join) jumpsToJoin=true;
+                    if(!jumpsToJoin){resume=end;hasElse=true;bodyEndsInReturn=true;}
+                }
+                commonTrueBody=commonOrPrefix||commonOrAnd;
+                if(commonTrueBody){
+                    // A branch from outside this expression into one of its
+                    // gaps or arms would bypass the generated flag protocol.
+                    for(const Instr& edge:p.code){
+                        if(edge.pc>=pc&&edge.pc<resume) continue;
+                        int target=-1;
+                        if(edge.op==22||edge.op==31||edge.op==32) target=edge.target;
+                        else if(isCondition(edge.op)||edge.op==27||edge.op==33)
+                            target=followingControlTarget(p,edge);
+                        if(target>pc&&target<resume) commonTrueBody=false;
+                    }
+                }
+                if(commonTrueBody){
+                    const std::string flag=conditionChainFlagName(p,pc,context);
+                    const std::string scopePad(size_t(indent+4),' ');
+                    o<<pad<<"do\n"<<scopePad<<"local "<<flag<<" = false\n";
+                    if(commonOrAnd){
+                        const int outerIndent=indent+4;
+                        o<<std::string(size_t(outerIndent),' ')<<"if "<<negateConditionExpr(separatedChain.front().fallthrough)<<" then\n"
+                         <<std::string(size_t(outerIndent+4),' ')<<flag<<" = true\n"
+                         <<std::string(size_t(outerIndent),' ')<<"else\n";
+                        const ConditionGap& firstGap=separatedGaps.front();
+                        emitRange(o,p,firstGap.begin,firstGap.end,outerIndent+4,context,true,loopBreakTarget);
+                        int nestedIndent=outerIndent+4;
+                        for(size_t test=1;test<separatedChain.size();++test){
+                            o<<std::string(size_t(nestedIndent),' ')<<"if "<<separatedChain[test].fallthrough<<" then\n";
+                            if(test+1==separatedChain.size()){
+                                o<<std::string(size_t(nestedIndent+4),' ')<<flag<<" = true\n";
+                            }else{
+                                const ConditionGap& gap=separatedGaps[test];
+                                emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget);
+                                nestedIndent+=4;
+                            }
+                        }
+                        for(size_t test=1;test<separatedChain.size();++test){
+                            nestedIndent-=4;
+                            o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                        }
+                        o<<std::string(size_t(outerIndent),' ')<<"end\n";
+                    }else{
+                        int nestedIndent=indent+4;
+                        for(size_t test=0;test+1<separatedChain.size();++test){
+                            const std::string nestedPad(size_t(nestedIndent),' ');
+                            o<<nestedPad<<"if "<<negateConditionExpr(separatedChain[test].fallthrough)<<" then\n"
+                             <<std::string(size_t(nestedIndent+4),' ')<<flag<<" = true\n"
+                             <<nestedPad<<"else\n";
+                            const ConditionGap& gap=separatedGaps[test];
+                            emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget);
+                            nestedIndent+=4;
+                        }
+                        o<<std::string(size_t(nestedIndent),' ')<<flag<<" = "<<separatedChain.back().fallthrough<<"\n";
+                        for(size_t test=0;test+1<separatedChain.size();++test){
+                            nestedIndent-=4;
+                            o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                        }
+                    }
+                    o<<scopePad<<"if "<<flag<<" then\n";
+                    const int bodyEnd=hasElse&&!bodyEndsInReturn?join-1:join;
+                    if(bodyBegin<bodyEnd) emitRange(o,p,bodyBegin,bodyEnd,indent+8,context,true,loopBreakTarget);
+                    if(hasElse){
+                        o<<scopePad<<"else\n";
+                        if(join<resume) emitRange(o,p,join,resume,indent+8,context,true,loopBreakTarget);
+                    }
+                    o<<scopePad<<"end\n"<<pad<<"end\n";
+                    pc=resume;
+                    emittedChain=true;
+                }
+            }
             // Lua lowers `a and b and ...` to consecutive conditions whose
             // failed branches all jump to one shared join. When every test
             // falls through, the source body begins after the final pair.

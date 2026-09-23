@@ -189,7 +189,22 @@ local function count(flag, n)
     end
     return n
 end
-return check, bounded, count
+local function choose(probe)
+    local result
+    if probe(1) or probe(2) or probe(3) or probe(4) then
+        result = "yes"
+    else
+        result = "no"
+    end
+    return result
+end
+local function chooseMixed(probe)
+    if probe(1) or (probe(2) and probe(3)) then
+        return "yes"
+    end
+    return "no"
+end
+return check, bounded, count, choose, chooseMixed
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/and-chain.luac" "$TMP/and-chain.lua"
 "$BIN" --bytecode "$TMP/and-chain.luac" --format lua > "$TMP/and-chain.reconstructed.lua"
