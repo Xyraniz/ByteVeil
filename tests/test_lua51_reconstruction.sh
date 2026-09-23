@@ -145,7 +145,15 @@ end
 local function incrementOrFallback(value, fallback)
     return value and (value + 1) or fallback
 end
-return classify, choose, compareWithCalls, callChainElse, mixedValue, captureBoundary, incrementOrFallback
+local function nestedSharedJoin(enabled, probe, action, fallback)
+    if enabled then
+        local value = probe()
+        if not value then action(value) end
+    else
+        fallback()
+    end
+end
+return classify, choose, compareWithCalls, callChainElse, mixedValue, captureBoundary, incrementOrFallback, nestedSharedJoin
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"

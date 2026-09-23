@@ -264,6 +264,7 @@ open(sys.argv[29], "wb").write(build(
     [(4, b"consume"), (4, b"object"), (4, b"ping")], maxstack=3))
 
 # The inner TEST branch exits its enclosing then-range to the shared return.
+# ByteVeil can preserve this shared join with nested structured conditionals.
 test = lambda a, c: 26 | (a << 6) | (c << 14)
 open(sys.argv[30], "wb").write(build(
     [loadk(1, 0), getglobal(0, 1), test(0, 0), jmp(3, 9), getglobal(2, 2),
@@ -695,9 +696,14 @@ if grep -Fq 'r1 = r2["ping"]' "$TMP/colon-open-call.lua" || grep -Fq 'open resul
     exit 1
 fi
 "$BIN" --bytecode "$TMP/nested-branch-exit.luac" --format lua >"$TMP/nested-branch-exit.lua"
-grep -q 'PC dispatcher preserves Lua 5.1 control flow in function 0' "$TMP/nested-branch-exit.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/nested-branch-exit.lua"; then
+    echo "nested conditional with a shared return was not reconstructed structurally" >&2
+    exit 1
+fi
+grep -Fq 'if r0 then' "$TMP/nested-branch-exit.lua"
+grep -Fq 'if r2 then' "$TMP/nested-branch-exit.lua"
 if grep -Fq 'branch at pc ' "$TMP/nested-branch-exit.lua"; then
-    echo "non-reducible nested branch was left as a diagnostic" >&2
+    echo "structured shared-join branch was left as a diagnostic" >&2
     exit 1
 fi
 if grep -Fq 'RETURN at pc 13 has an unresolved open result tail' "$TMP/nested-branch-exit.lua"; then

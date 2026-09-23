@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue, originalCaptureBoundary, originalIncrementOrFallback = assert(loadfile(originalPath))()
-local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue, reconstructedCaptureBoundary, reconstructedIncrementOrFallback = assert(loadfile(reconstructedPath))()
+local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue, originalCaptureBoundary, originalIncrementOrFallback, originalNestedSharedJoin = assert(loadfile(originalPath))()
+local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue, reconstructedCaptureBoundary, reconstructedIncrementOrFallback, reconstructedNestedSharedJoin = assert(loadfile(reconstructedPath))()
 
 for _, value in ipairs({"alpha", "beta", "gamma", "delta", "", 0}) do
     assert(reconstructedClassify(value) == originalClassify(value),
@@ -141,4 +141,34 @@ for index, case in ipairs(incrementCases) do
     assert(originalResult == case[3], "source nested-test case " .. index .. " differs")
     assert(reconstructedResult == originalResult,
         "reconstructed nested-test branch differs in case " .. index)
+end
+
+local sharedJoinCases = {
+    {enabled = false, value = true, expected = {"fallback"}},
+    {enabled = true, value = true, expected = {"probe"}},
+    {enabled = true, value = false, expected = {"probe", "action:false"}},
+    {enabled = true, value = nil, expected = {"probe", "action:nil"}},
+}
+for index, case in ipairs(sharedJoinCases) do
+    local function run(nestedSharedJoin)
+        local trace = {}
+        local function probe()
+            trace[#trace + 1] = "probe"
+            return case.value
+        end
+        local function action(value)
+            trace[#trace + 1] = "action:" .. tostring(value)
+        end
+        local function fallback()
+            trace[#trace + 1] = "fallback"
+        end
+        nestedSharedJoin(case.enabled, probe, action, fallback)
+        return trace
+    end
+    local originalTrace = run(originalNestedSharedJoin)
+    local reconstructedTrace = run(reconstructedNestedSharedJoin)
+    assert(table.concat(originalTrace, ",") == table.concat(case.expected, ","),
+        "source shared-join case " .. index .. " differs")
+    assert(table.concat(reconstructedTrace, ",") == table.concat(originalTrace, ","),
+        "reconstructed shared-join branches differ in case " .. index)
 end
