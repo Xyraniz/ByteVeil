@@ -987,17 +987,22 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 return -1;
             };
             int backEdges=0;
+            bool singleUnconditionalBackEdge=false;
             int lastBackEdge=pc;
             bool closed=true;
             for(int scan=pc;scan<end;++scan){
                 if(p.code[scan].op==22&&scan>pc&&
                    (isCondition(p.code[scan-1].op)||p.code[scan-1].op==27||p.code[scan-1].op==33)) continue;
                 const int target=branchTarget(p.code[scan]);
-                if(target==pc&&scan>pc){++backEdges;lastBackEdge=std::max(lastBackEdge,scan+(p.code[scan].op==22?0:1));}
+                if(target==pc&&scan>pc){
+                    ++backEdges;
+                    lastBackEdge=std::max(lastBackEdge,scan+(p.code[scan].op==22?0:1));
+                    singleUnconditionalBackEdge=p.code[scan].op==22;
+                }
                 else if(target>=0&&target<scan) closed=false;
             }
             int loopEnd=end;
-            if((backEdges>=2||(backEdges==1&&pc==begin))&&closed){
+            if((backEdges>=2||(backEdges==1&&(pc==begin||singleUnconditionalBackEdge)))&&closed){
                 for(int scan=pc;scan<end;++scan){
                     const int target=branchTarget(p.code[scan]);
                     if(target>lastBackEdge) loopEnd=std::min(loopEnd,target);

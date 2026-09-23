@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -399,6 +399,16 @@ open(sys.argv[42], "wb").write(build(
     generic_for_nested_if_code,
     [(4, b"enabled"), (4, b"iterator"), (4, b"seenValue")],
     maxstack=7))
+
+# A single unconditional latch after a prologue is a closed while loop when
+# its only forward exit is the matching break edge.
+add_r0_one = 12 | (257 << 14)
+eq_r0_three = 23 | (1 << 6) | (258 << 14)
+single_latch_loop_code = [
+    loadk(0, 0), add_r0_one, eq_r0_three, jmp(3, 5), jmp(4, 1), ret(0, 2),
+]
+open(sys.argv[43], "wb").write(build(
+    single_latch_loop_code, [(3, 0), (3, 1), (3, 3)], maxstack=1))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -449,6 +459,24 @@ grep -q '^while true do$' "$TMP/infinite-loop.lua"
 if grep -q 'stopped at repeated control-flow' "$TMP/infinite-loop.lua"; then
     echo "closed unconditional loop was not structurally reconstructed" >&2
     exit 1
+fi
+"$BIN" --bytecode "$TMP/single-latch-loop.luac" --format lua >"$TMP/single-latch-loop.lua"
+grep -q '^r0 = 0$' "$TMP/single-latch-loop.lua"
+grep -q '^while true do$' "$TMP/single-latch-loop.lua"
+grep -Fq 'if r0 == 3 then' "$TMP/single-latch-loop.lua"
+if grep -q 'PC dispatcher\|stopped at repeated control-flow' "$TMP/single-latch-loop.lua"; then
+    echo "single-latch loop after a prologue did not reconstruct structurally" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/single-latch-loop.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    SINGLE_LATCH_PATH="$TMP/single-latch-loop.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        SINGLE_LATCH_PATH="$(cygpath -m "$SINGLE_LATCH_PATH")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_single_latch_runtime.lua" "$SINGLE_LATCH_PATH"
 fi
 "$BIN" --bytecode "$TMP/multi-latch-loop.luac" --format lua >"$TMP/multi-latch-loop.lua"
 grep -q '^while true do$' "$TMP/multi-latch-loop.lua"
