@@ -37,6 +37,12 @@
 - Added Lua 5.1 runtime regressions for explicit `CLOSE`, unconditional
   `JMP A` closes, and conditional jump-close behavior on both branch outcomes.
   The fixtures verify that earlier and later closures retain separate values.
+- Runtime-test discovery now accepts Lua 5.1 `lua`/`lua.exe` and
+  `luac`/`luac.exe` names and verifies their version before running. This keeps
+  Windows installs from silently skipping runtime coverage due to alias names.
+- Added source-to-bytecode differential checks for closures over numeric and
+  generic `for` variables; each reconstructed closure returns the same
+  per-iteration values as the Lua 5.1 original.
 - All 21 MoonSec V3 sample outputs parse and compile with Lua 5.1 `luac -p`;
   this corpus run left **0** explicit-close diagnostics and produced
   **9,604,763** bytes of source. The samples were compiled only, never run.
