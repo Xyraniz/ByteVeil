@@ -108,4 +108,45 @@ if command -v cygpath >/dev/null 2>&1; then
     CONDITION_RECONSTRUCTED_PATH="$(cygpath -m "$CONDITION_RECONSTRUCTED_PATH")"
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_condition_chain_runtime.lua" "$CONDITION_ORIGINAL_PATH" "$CONDITION_RECONSTRUCTED_PATH"
+cat >"$TMP/loop-breaks.lua" <<'LUA'
+local function tally(n)
+    local total = 0
+    for i = 1, n do
+        if i == 3 then break end
+        total = total + i
+    end
+    local keys = 0
+    for key, value in ipairs({"a", "b", "c"}) do
+        if key == 2 then break end
+        keys = keys + key
+    end
+    local countdown = 0
+    while n > 0 do
+        if n == 1 then break end
+        countdown = countdown + 1
+        n = n - 1
+    end
+    local repeated = 0
+    repeat
+        repeated = repeated + 1
+        if repeated == 2 then break end
+    until repeated > 10
+    return total, keys, countdown, n, repeated
+end
+return tally
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/loop-breaks.luac" "$TMP/loop-breaks.lua"
+"$BIN" --bytecode "$TMP/loop-breaks.luac" --format lua > "$TMP/loop-breaks.reconstructed.lua"
+if grep -q 'PC dispatcher' "$TMP/loop-breaks.reconstructed.lua"; then
+    echo "structured loops containing break still use a PC dispatcher" >&2
+    exit 1
+fi
+"$BYTEVEIL_LUAC51" -p "$TMP/loop-breaks.reconstructed.lua"
+LOOP_BREAKS_ORIGINAL_PATH="$TMP/loop-breaks.lua"
+LOOP_BREAKS_RECONSTRUCTED_PATH="$TMP/loop-breaks.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    LOOP_BREAKS_ORIGINAL_PATH="$(cygpath -m "$LOOP_BREAKS_ORIGINAL_PATH")"
+    LOOP_BREAKS_RECONSTRUCTED_PATH="$(cygpath -m "$LOOP_BREAKS_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_break_runtime.lua" "$LOOP_BREAKS_ORIGINAL_PATH" "$LOOP_BREAKS_RECONSTRUCTED_PATH"
 printf 'Lua 5.1 reconstruction tests: PASS\n'

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Reconstruct loop exits and repeat bodies
+
+### Corrected
+
+- Numeric `for`, generic `for`, `while`, and `repeat` bodies now reconstruct
+  their `break` jumps as Lua `break` statements. The renderer tracks each
+  enclosing loop's exit PC through nested branches, and finds a `repeat`
+  latch even when one-time setup instructions precede the loop body.
+
+### Validation
+
+- Added Lua 5.1 runtime differential coverage for all four loop forms,
+  including `break` inside a conditional. The reconstructed function matches
+  all five return values for inputs from 0 through 6 and uses no PC dispatcher.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  and compiles with Lua 5.1; PC dispatcher comments fell from 183 to **181**
+  and aggregate output from 8,516,868 to **8,398,694** bytes. The obfuscated
+  samples were not executed, so corpus parsing and compilation do not establish
+  behavioral equivalence.
+
 ## Unreleased - Reconstruct short-circuit Lua 5.1 condition chains
 
 ### Changed
