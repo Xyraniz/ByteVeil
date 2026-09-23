@@ -1297,7 +1297,8 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                             edgeTarget=p.code[size_t(instruction.pc+1)].target;
                         else if(instruction.op==2&&instruction.c) edgeTarget=instruction.target;
                         if(edgeTarget==target&&
-                           (instruction.pc<bodyBegin||instruction.pc>=join)) return true;
+                           !(instruction.pc<begin||
+                             (instruction.pc>=bodyBegin&&instruction.pc<join))) return true;
                     }
                     return false;
                 };
@@ -1341,6 +1342,96 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // splitting the ranges, which otherwise mistakes the shared body for
         // a branch escaping its parent range.
         if(isCondition(i.op)){
+            // Lua 5.1 commonly materializes a comparison result with two
+            // LOADBOOLs: the fallthrough arm sets one value and skips the
+            // other, while the following JMP selects the opposite value.
+            // Fold that tail to a boolean expression so both values survive
+            // when the surrounding guard chain is reconstructed.
+            if(pc+4<=end&&pc+4<int(p.code.size())&&p.code[size_t(pc+1)].op==22&&
+               p.code[size_t(pc+1)].target==pc+3&&p.code[size_t(pc+2)].op==2&&
+               p.code[size_t(pc+2)].c==1&&p.code[size_t(pc+3)].op==2&&
+               p.code[size_t(pc+3)].c==0&&p.code[size_t(pc+2)].a==p.code[size_t(pc+3)].a&&
+               p.code[size_t(pc+2)].b!=p.code[size_t(pc+3)].b){
+                const int joinPc=pc+4;
+                int returnPc=-1;
+                if(p.code[size_t(joinPc)].op==30) returnPc=joinPc;
+                else if(p.code[size_t(joinPc)].op==22&&p.code[size_t(joinPc)].target>joinPc&&
+                        p.code[size_t(joinPc)].target<end&&
+                        p.code[size_t(p.code[size_t(joinPc)].target)].op==30)
+                    returnPc=p.code[size_t(joinPc)].target;
+                const Instr& fallthroughValue=p.code[size_t(pc+2)];
+                const Instr& jumpValue=p.code[size_t(pc+3)];
+                if(returnPc>=0&&p.code[size_t(returnPc)].a==fallthroughValue.a&&
+                   p.code[size_t(returnPc)].b==2){
+                    const std::string condition=conditionExpr(p,i,context);
+                    const bool fallthroughIsTrue=fallthroughValue.b!=0;
+                    const std::string value=fallthroughIsTrue?condition:"not ("+condition+")";
+                    o<<pad<<renderedLocal(p,fallthroughValue.a,pc,context)<<" = "<<value<<"\n";
+                    pc=joinPc;
+                    continue;
+                }
+            }
+            // A type/predicate guard can return one boolean directly, while
+            // its fallthrough path contains several early-return checks and
+            // computes the final boolean before the shared RETURN. Isolate
+            // that return arm first so its jump into the boolean tail does
+            // not look like an unrelated entry into the guarded body.
+            if(pc+1<end&&p.code[size_t(pc+1)].op==22){
+                const int falseBegin=p.code[size_t(pc+1)].target;
+                const int join=falseBegin+2;
+                const int trueBegin=pc+2;
+                bool booleanReturnTail=falseBegin>=trueBegin&&join+1==end&&
+                    join<int(p.code.size())&&p.code[size_t(falseBegin)].op==2&&
+                    p.code[size_t(falseBegin)].c==1&&
+                    p.code[size_t(falseBegin+1)].op==2&&
+                    p.code[size_t(falseBegin+1)].a==p.code[size_t(falseBegin)].a&&
+                    p.code[size_t(falseBegin+1)].c==0&&
+                    p.code[size_t(falseBegin+1)].b!=p.code[size_t(falseBegin)].b&&
+                    p.code[size_t(join)].op==30&&
+                    p.code[size_t(join)].a==p.code[size_t(falseBegin)].a&&
+                    p.code[size_t(join)].b==2;
+                int sharedReturnGuards=0;
+                for(int scan=trueBegin;scan+1<falseBegin;++scan)
+                    if(isCondition(p.code[size_t(scan)].op)&&p.code[size_t(scan+1)].op==22&&
+                       p.code[size_t(scan+1)].target==join) ++sharedReturnGuards;
+                booleanReturnTail=booleanReturnTail&&sharedReturnGuards>=2;
+                for(int scan=trueBegin;scan<join&&booleanReturnTail;++scan){
+                    const Instr& instruction=p.code[size_t(scan)];
+                    if(instruction.op==22){
+                        if(instruction.target<=scan||instruction.target>join) booleanReturnTail=false;
+                    }else if(isCondition(instruction.op)||instruction.op==27){
+                        if(scan+1>=join||p.code[size_t(scan+1)].op!=22||
+                           p.code[size_t(scan+1)].target<=scan+1||
+                           p.code[size_t(scan+1)].target>join) booleanReturnTail=false;
+                    }else if((instruction.op>=31&&instruction.op<=36)||
+                             (instruction.op==2&&instruction.c&&instruction.target>join))
+                        booleanReturnTail=false;
+                }
+                if(booleanReturnTail){
+                    for(const Instr& edge:p.code){
+                        int target=-1;
+                        if(edge.op==22||edge.op==31||edge.op==32||edge.op==33) target=edge.target;
+                        else if((isCondition(edge.op)||edge.op==27)&&edge.pc+1<int(p.code.size())&&
+                                p.code[size_t(edge.pc+1)].op==22)
+                            target=p.code[size_t(edge.pc+1)].target;
+                        else if(edge.op==2&&edge.c) target=edge.target;
+                        if(target>=trueBegin&&target<join&&
+                           (edge.pc<pc||edge.pc>=join)&&
+                           !(edge.pc==pc+1&&target==falseBegin)) booleanReturnTail=false;
+                    }
+                }
+                if(booleanReturnTail){
+                    o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n";
+                    emitRange(o,p,trueBegin,join+1,indent+4,context,allowInfiniteLoop,
+                              loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    o<<pad<<"else\n";
+                    o<<std::string(size_t(indent+4),' ')<<"return "
+                     <<(p.code[size_t(falseBegin)].b?"true":"false")<<"\n";
+                    o<<pad<<"end\n";
+                    pc=join+1;
+                    continue;
+                }
+            }
             struct ConditionJump { int pc; int target; std::string fallthrough; };
             struct ConditionGap { int begin; int end; };
             std::vector<ConditionJump> chain;
