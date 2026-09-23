@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -473,6 +473,23 @@ open(sys.argv[47], "wb").write(build(
     nested_loop_code,
     [(4, b"outerGate"), (4, b"innerGate"), (4, b"innerBody"), (4, b"outerBody")],
     maxstack=3))
+
+# A guard chain shares one short failure return, while the last comparison
+# jumps around it on success. Keep each check lazy, including setup between
+# tests, and preserve the final return value.
+shared_return_guards = [
+    getglobal(0, 0), 26, jmp(2, 10),
+    getglobal(1, 1), 26 | (1 << 6), jmp(5, 10),
+    getglobal(3, 2), 6 | (2 << 6) | (3 << 23) | ((256 + 3) << 14),
+    23 | (1 << 6) | (2 << 23) | ((256 + 4) << 14), jmp(9, 15),
+    getglobal(4, 5), loadk(5, 6), call(4, 2, 1), loadk(4, 9), ret(4, 2),
+    getglobal(4, 7), loadk(5, 8), call(4, 2, 2), ret(4, 2),
+]
+open(sys.argv[48], "wb").write(build(
+    shared_return_guards,
+    [(4, b"guard1"), (4, b"guard2"), (4, b"status"), (4, b"StatusCode"),
+     (3, 200), (4, b"warn"), (4, b"rejected"), (4, b"observe"), (4, b"decoded"), (3, 1000)],
+    maxstack=6))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -768,6 +785,24 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
         NESTED_LOOPS_LUA="$(cygpath -m "$NESTED_LOOPS_LUA")"
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_nested_loops_runtime.lua" "$NESTED_LOOPS_BYTECODE" "$NESTED_LOOPS_LUA"
+fi
+"$BIN" --bytecode "$TMP/shared-return-guards.luac" --format lua >"$TMP/shared-return-guards.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/shared-return-guards.lua"; then
+    echo "shared early-return guard chain still requires a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/shared-return-guards.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    SHARED_RETURN_GUARDS_BYTECODE="$TMP/shared-return-guards.luac"
+    SHARED_RETURN_GUARDS_LUA="$TMP/shared-return-guards.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        SHARED_RETURN_GUARDS_BYTECODE="$(cygpath -m "$SHARED_RETURN_GUARDS_BYTECODE")"
+        SHARED_RETURN_GUARDS_LUA="$(cygpath -m "$SHARED_RETURN_GUARDS_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_return_guard_runtime.lua" \
+        "$SHARED_RETURN_GUARDS_BYTECODE" "$SHARED_RETURN_GUARDS_LUA"
 fi
 "$BIN" --bytecode "$TMP/colon-flow-entry.luac" --format lua >"$TMP/colon-flow-entry.lua"
 if grep -Fq ':ping(' "$TMP/colon-flow-entry.lua"; then

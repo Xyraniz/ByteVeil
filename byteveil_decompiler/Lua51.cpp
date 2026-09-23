@@ -1159,6 +1159,92 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"end\n";
             return;
         }
+        // Some Lua 5.1 guard chains branch to one shared return block when
+        // any check fails, while the final comparison jumps over that block
+        // on success. Keep the checks lazy and in bytecode order; duplicate
+        // the short return block only across mutually exclusive else arms.
+        if(isCondition(i.op)&&pc+1<end&&p.code[pc+1].op==22&&end==int(p.code.size())){
+            struct SharedReturnGuard { int pc; int target; int gapBegin; int gapEnd; };
+            std::vector<SharedReturnGuard> guards;
+            int cursor=pc;
+            for(size_t count=0;count<8&&cursor+1<end&&isCondition(p.code[size_t(cursor)].op)&&
+                p.code[size_t(cursor+1)].op==22;++count){
+                guards.push_back({cursor,p.code[size_t(cursor+1)].target,cursor+2,cursor+2});
+                int next=cursor+2;
+                while(next<end&&next-(cursor+2)<16&&straightLineConditionGap(p.code[size_t(next)])&&
+                      !(p.code[size_t(next)].op==2&&p.code[size_t(next)].c!=0)) ++next;
+                if(next+1<end&&isCondition(p.code[size_t(next)].op)&&p.code[size_t(next+1)].op==22){
+                    guards.back().gapEnd=next;
+                    cursor=next;
+                }else break;
+            }
+            if(guards.size()>=2){
+                const int failureBegin=guards.front().target;
+                const int successBegin=guards.back().target;
+                bool valid=failureBegin>guards.back().pc+1&&successBegin>failureBegin&&successBegin<end&&
+                    guards.back().pc+2==failureBegin;
+                for(size_t index=0;index+1<guards.size();++index)
+                    if(guards[index].target!=failureBegin) valid=false;
+                // The shared failure arm must be a small, straight-line
+                // return. This keeps duplication from changing loop,
+                // closure, or branch behavior.
+                if(valid){
+                    valid=p.code[size_t(successBegin-1)].op==30&&successBegin-failureBegin<=32;
+                    for(int scan=failureBegin;scan<successBegin-1&&valid;++scan){
+                        const Instr& instruction=p.code[size_t(scan)];
+                        if(instruction.op==22||(instruction.op>=23&&instruction.op<=27)||
+                           (instruction.op>=29&&instruction.op<=33)||instruction.op==35||
+                           instruction.op==36||(instruction.op==2&&instruction.c!=0)) valid=false;
+                    }
+                }
+                // Reject shared entries into either arm from the already
+                // emitted prefix. The success arm must keep its branches
+                // inside the function tail.
+                if(valid){
+                    for(const Instr& edge:p.code){
+                        int target=-1;
+                        if(edge.op==22||edge.op==31||edge.op==32||edge.op==33) target=edge.target;
+                        else if(edge.op>=23&&edge.op<=27&&edge.pc+1<int(p.code.size())&&
+                                p.code[size_t(edge.pc+1)].op==22) target=p.code[size_t(edge.pc+1)].target;
+                        else if(edge.op==2&&edge.c) target=edge.target;
+                        if(edge.pc<pc&&target>=failureBegin&&target<end) valid=false;
+                        if(edge.pc>=successBegin&&target>=0&&(target<successBegin||target>end)) valid=false;
+                    }
+                }
+                if(valid){
+                    int nestedIndent=indent;
+                    for(size_t index=0;index+1<guards.size();++index){
+                        o<<std::string(size_t(nestedIndent),' ')<<"if "
+                         <<conditionExpr(p,p.code[size_t(guards[index].pc)],context)<<" then\n";
+                        if(guards[index].gapBegin<guards[index].gapEnd)
+                            emitRange(o,p,guards[index].gapBegin,guards[index].gapEnd,nestedIndent+4,context,
+                                      allowInfiniteLoop,loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        nestedIndent+=4;
+                    }
+                    const SharedReturnGuard& finalGuard=guards.back();
+                    if(finalGuard.gapBegin<finalGuard.gapEnd)
+                        emitRange(o,p,finalGuard.gapBegin,finalGuard.gapEnd,nestedIndent,context,
+                                  allowInfiniteLoop,loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    o<<std::string(size_t(nestedIndent),' ')<<"if "
+                     <<conditionExpr(p,p.code[size_t(finalGuard.pc)],context)<<" then\n";
+                    emitRange(o,p,failureBegin,successBegin,nestedIndent+4,context,false,
+                              loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    o<<std::string(size_t(nestedIndent),' ')<<"else\n";
+                    emitRange(o,p,successBegin,end,nestedIndent+4,context,allowInfiniteLoop,
+                              loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                    for(size_t index=guards.size()-1;index>0;--index){
+                        nestedIndent-=4;
+                        o<<std::string(size_t(nestedIndent),' ')<<"else\n";
+                        emitRange(o,p,failureBegin,successBegin,nestedIndent+4,context,false,
+                                  loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                    }
+                    pc=end;
+                    continue;
+                }
+            }
+        }
         // Lua 5.1 lowers `a or b or ...` conditions to comparison/test and
         // JMP pairs. Earlier pairs jump to the shared true body; the final
         // pair jumps past it when false. Fold that shape before recursively
