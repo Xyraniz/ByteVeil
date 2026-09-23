@@ -983,7 +983,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // A loop can have several explicit edges back to its header. Accept
         // only regions whose edges stay inside the loop or share one exit,
         // then render the back-edges as natural flow in `while true`.
-        if(allowInfiniteLoop){
+        if(allowInfiniteLoop&&loopContinueTarget!=pc){
             auto branchTarget=[&](const Instr& edge){
                 if(edge.op==22||edge.op==31||edge.op==32) return edge.target;
                 if((isCondition(edge.op)||edge.op==27)&&edge.pc+1<int(p.code.size())&&p.code[edge.pc+1].op==22)
@@ -1004,7 +1004,6 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     lastBackEdge=std::max(lastBackEdge,scan+(p.code[scan].op==22?0:1));
                     singleUnconditionalBackEdge=p.code[scan].op==22;
                 }
-                else if(target>=0&&target<scan) closed=false;
             }
             int loopEnd=end;
             if((backEdges>=2||(backEdges==1&&(pc==begin||singleUnconditionalBackEdge)))&&closed){
@@ -1026,7 +1025,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     if(closed){
                         o<<pad<<"while true do\n";
-                        emitRange(o,p,pc,loopEnd,indent+4,context,false,loopEnd,pc);
+                        emitRange(o,p,pc,loopEnd,indent+4,context,true,loopEnd,pc);
                         o<<pad<<"end\n";
                         pc=loopEnd;
                         continue;
