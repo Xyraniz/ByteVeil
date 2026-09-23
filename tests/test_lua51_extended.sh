@@ -22,7 +22,13 @@ LUA
 luac5.1 -o "$TMP/flow.luac" "$TMP/flow.lua"
 "$BIN" --bytecode "$TMP/flow.luac" --format lua >"$TMP/lifted.lua"
 "$BIN" --bytecode "$TMP/flow.luac" --format structured >"$TMP/structured.lua"
-lua5.1 -e "assert(loadfile('$TMP/lifted.lua')); assert(loadfile('$TMP/structured.lua'))"
+LIFTED_PATH="$TMP/lifted.lua"
+STRUCTURED_PATH="$TMP/structured.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    LIFTED_PATH="$(cygpath -m "$LIFTED_PATH")"
+    STRUCTURED_PATH="$(cygpath -m "$STRUCTURED_PATH")"
+fi
+lua5.1 -e "assert(loadfile('$LIFTED_PATH')); assert(loadfile('$STRUCTURED_PATH'))"
 grep -q 'LOADBOOL\|FORPREP\|FORLOOP\|JMP' "$TMP/structured.lua"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format json >"$TMP/sample.json"
 "$BYTEVEIL_PYTHON" - "$TMP/sample.json" <<'PY'

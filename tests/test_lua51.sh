@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -180,10 +180,35 @@ open(sys.argv[19], "wb").write(build(
 getglobal_object = 5
 move_r1_from_r0 = 0 | (1 << 6)
 getglobal_callback = 5 | (2 << 14)
-call_r0_with_one_arg = 28 | (2 << 23) | (1 << 14)  # CALL A=0 B=2 C=1
+call_r0_with_one_arg = 28 | (2 << 23) | (2 << 14)  # CALL A=0 B=2 C=2
 open(sys.argv[20], "wb").write(build(
     [getglobal_object, move_r1_from_r0, getglobal_callback, call_r0_with_one_arg, ret],
     [(4, b"object"), (4, b"unused"), (4, b"callback")], maxstack=2))
+
+# EQ A=1 jumps when the operands match; EQ A=0 jumps when they differ.  The
+# structured body after the comparison therefore uses the opposite polarity.
+def jmp(pc, target):
+    return 22 | ((131071 + target - pc - 1) << 14)
+
+def comparison_with_polarity(polarity):
+    return 23 | (polarity << 6) | (1 << 14)  # EQ A=polarity B=R0 C=R1
+
+loadk_then_r2 = 1 | (2 << 6)
+loadk_else_r2 = 1 | (2 << 6) | (1 << 14)
+return_r2 = 30 | (2 << 6) | (2 << 23)
+for path_index, polarity in ((21, 1), (22, 0)):
+    open(sys.argv[path_index], "wb").write(build(
+        [comparison_with_polarity(polarity), jmp(1, 4), loadk_then_r2,
+         jmp(3, 5), loadk_else_r2, return_r2],
+        [(4, b"then"), (4, b"else")], maxstack=3))
+
+# A nested conditional jump leaves the current then-range and reaches the
+# shared tail.  The renderer must leave that edge visible instead of expanding
+# the shared tail inside the nested branch and then printing it a second time.
+open(sys.argv[23], "wb").write(build(
+    [comparison_with_polarity(0), jmp(1, 5), comparison_with_polarity(0),
+     jmp(3, 7), loadk_then_r2, loadk_else_r2, return_r2, return_r2],
+    [(4, b"inside-range"), (4, b"range-tail")], maxstack=3))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -261,6 +286,24 @@ grep -Fq 'r0(r1)' "$TMP/move-overwritten-source.lua"
 if grep -Fq 'r0(r0)' "$TMP/move-overwritten-source.lua"; then
     echo "MOVE copy was rewritten after its source register changed" >&2
     exit 1
+fi
+"$BIN" --bytecode "$TMP/eq-a1.luac" --format lua >"$TMP/eq-a1.lua"
+"$BIN" --bytecode "$TMP/eq-a0.luac" --format lua >"$TMP/eq-a0.lua"
+grep -Fq 'if not (r0 == r1) then' "$TMP/eq-a1.lua"
+grep -Fq 'if (r0 == r1) then' "$TMP/eq-a0.lua"
+"$BIN" --bytecode "$TMP/branch-range-escape.luac" --format lua >"$TMP/branch-range-escape.lua"
+grep -Fq 'branch at pc 2 exits current structured range to pc 7' "$TMP/branch-range-escape.lua"
+test "$(grep -Fc '"range-tail"' "$TMP/branch-range-escape.lua")" -eq 1
+if command -v lua5.1 >/dev/null 2>&1; then
+    MOVE_COPY_PATH="$TMP/move-overwritten-source.lua"
+    EQ_A1_PATH="$TMP/eq-a1.lua"
+    EQ_A0_PATH="$TMP/eq-a0.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        MOVE_COPY_PATH="$(cygpath -m "$MOVE_COPY_PATH")"
+        EQ_A1_PATH="$(cygpath -m "$EQ_A1_PATH")"
+        EQ_A0_PATH="$(cygpath -m "$EQ_A0_PATH")"
+    fi
+    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then')"
 fi
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"

@@ -435,7 +435,7 @@ static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const
         // turn a path-dependent TESTSET/branch result into a false constant.
         // Keep the register reference until CFG-aware SSA reaches this path.
         for(const Instr& edge:p.code)
-            if(edge.pc<n && edge.target>=pc && edge.target>n)
+            if(edge.pc<n && edge.target>n && edge.target<=pc)
                 return renderedLocal(p,registerIndex,pc,context);
         if(definition.op==1) return definition.bx<int(p.constants.size())?p.constants[definition.bx]:"nil";
         if(definition.op==0){
@@ -518,7 +518,10 @@ static std::string conditionExpr(const Proto& p,const Instr& i,const RenderConte
     std::string lhs=renderedValue(p,i.b,i.pc,context), rhs=renderedValue(p,i.c,i.pc,context);
     const char* op=i.op==23 ? " == " : i.op==24 ? " < " : " <= ";
     std::string comparison="("+lhs+op+rhs+")";
-    return i.a ? comparison : "not "+comparison;
+    // The structured body is the fallthrough after the comparison skips its
+    // following JMP. Lua 5.1 skips that JMP when the comparison differs from
+    // A, so A=1 requires the negated expression here.
+    return i.a ? "not "+comparison : comparison;
 }
 static RenderContext closureContext(const Proto& p,const Instr& closure,const RenderContext& parent){
     RenderContext result;
@@ -680,6 +683,33 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"end\n";
             pc=i.target+2;
             continue;
+        }
+        // A branch target outside this recursive range is a shared CFG edge,
+        // not the end of a larger nested source block. Expanding it here
+        // duplicates the same suffix in every enclosing branch (some MoonSec
+        // samples grow to tens of megabytes). Emit the in-range path once and
+        // retain the escaping edge as an explicit boundary diagnostic.
+        if(pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>end &&
+           (i.op==27 || isCondition(i.op))){
+            const int target=p.code[pc+1].target;
+            const int fallthrough=pc+2;
+            if(i.op==27){
+                const std::string tested=renderedLocal(p,i.b,i.pc,context);
+                const std::string condition=i.c ? tested : "not ("+tested+")";
+                o<<pad<<"if "<<condition<<" then\n";
+                o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<tested<<"\n";
+                o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
+                o<<pad<<"else\n";
+                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false);
+                o<<pad<<"end\n";
+            }else{
+                o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n";
+                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false);
+                o<<pad<<"else\n";
+                o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
+                o<<pad<<"end\n";
+            }
+            return;
         }
         // TESTSET consumes the following JMP.  Lua 5.1 copies B into A only
         // when truth(B) equals C, then takes that JMP; otherwise it skips the

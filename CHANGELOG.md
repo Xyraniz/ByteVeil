@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased - Lua 5.1 conditional and shared-range recovery
+
+### Corrected
+
+- Readable `EQ`, `LT`, and `LE` branches now use operand `A` to choose the
+  fallthrough condition that enters the structured body.
+- Register value propagation now preserves constants when a forward jump lands
+  after their use, while still refusing to fold a value when an edge can skip
+  its definition and reach that use.
+- A nested conditional that leaves its current reconstruction range no longer
+  expands the shared tail inside every enclosing branch. ByteVeil emits the
+  in-range path once and marks the escaping edge in the output.
+
+### Validation
+
+- Added binary regressions for both `EQ` polarities and a nested edge to a
+  shared tail. The Lua 5.1.5 interpreter compares original and lifted results
+  for `-1`, `0`, `1`, and `3`; full CTest: **9/9 PASS**.
+- The public MoonSec V3 corpus remains **21/21 parseable**. On
+  `23948930.lua`, output fell from **54,156,235** bytes to **124,291** bytes;
+  unresolved-opcode markers fell from **20,362** to **38**.
+
 ## Unreleased - Lua 5.1 MOVE value snapshots
 
 ### Corrected

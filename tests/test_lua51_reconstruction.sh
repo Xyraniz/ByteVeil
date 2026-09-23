@@ -23,7 +23,13 @@ return classify(total)
 LUA
 luac5.1 -o "$TMP/control.luac" "$TMP/control.lua"
 "$BIN" --bytecode "$TMP/control.luac" --format lua > "$TMP/reconstructed.lua"
-lua5.1 -e "assert(loadfile('$TMP/reconstructed.lua'))"
+ORIGINAL_PATH="$TMP/control.lua"
+RECONSTRUCTED_PATH="$TMP/reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    ORIGINAL_PATH="$(cygpath -m "$ORIGINAL_PATH")"
+    RECONSTRUCTED_PATH="$(cygpath -m "$RECONSTRUCTED_PATH")"
+fi
+lua5.1 -e "local original=assert(loadfile('$ORIGINAL_PATH')); local reconstructed=assert(loadfile('$RECONSTRUCTED_PATH')); for _, value in ipairs({-1, 0, 1, 3}) do assert(original(value) == reconstructed(value), 'behavior differs for ' .. tostring(value)) end"
 grep -q '^for ' "$TMP/reconstructed.lua"
 grep -q '^while ' "$TMP/reconstructed.lua"
 grep -q '^repeat$' "$TMP/reconstructed.lua"
