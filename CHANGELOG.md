@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased - Correct Lua 5.1 JMP field handling
+
+### Corrected
+
+- Removed the incorrect assumption that a nonzero `JMP` A field closes
+  upvalues. Lua 5.1.5 ignores that field; only the explicit `CLOSE` opcode
+  detaches captured locals. This corrects the earlier claim in this changelog
+  that `JMP A>0` performs a close.
+- The renderer no longer splits captured cells or forces a dispatcher because
+  of the unused field. Control-flow jumps and conditional edges still retain
+  their normal Lua 5.1 branch behavior.
+
+### Validation
+
+- Added Lua 5.1 VM differential regressions for explicit `CLOSE`, the unused
+  nonzero `JMP A=1` field, and a conditional jump whose two outcomes reach
+  different instructions. Each reconstructed closure sequence is compared to
+  the same synthetic bytecode executed by Lua 5.1.5, including `SETUPVAL`
+  writes. The reader rejects an out-of-range `JMP A` register while accepting
+  valid nonzero values.
+
 ## Unreleased - Compact Lua 5.1 dispatcher registers
 
 ### Changed
@@ -42,17 +63,14 @@
   `CLOSE A` detaches captured cells at or above `A`, so closures created before
   register reuse keep their original value while later closures capture the new
   cell. Captures that cannot be closed keep direct lexical references.
-- `JMP A>0` now closes cells at or above `A-1`. The Lua 5.1 PC dispatcher
-  applies this only on the edge that takes the jump, including conditional and
-  generic-for control flow.
 - Nested closures pass managed cells through their capture wrappers, keeping
   inherited upvalue reads and writes attached to the same cell.
 
 ### Validation
 
-- Added Lua 5.1 runtime regressions for explicit `CLOSE`, unconditional
-  `JMP A` closes, and conditional jump-close behavior on both branch outcomes.
-  The fixtures verify that earlier and later closures retain separate values.
+- Added Lua 5.1 runtime regressions for explicit `CLOSE`; closures mutate
+  captured upvalues with `SETUPVAL` to verify that cell separation persists
+  after the outer function returns.
 - Runtime-test discovery now accepts Lua 5.1 `lua`/`lua.exe` and
   `luac`/`luac.exe` names and verifies their version before running. This keeps
   Windows installs from silently skipping runtime coverage due to alias names.

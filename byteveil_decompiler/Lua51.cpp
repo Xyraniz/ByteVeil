@@ -159,8 +159,7 @@ static void associateClosureCaptures(Proto& p){
     }
     p.managedCapturedRegisters.assign(size_t(p.maxstack),0);
     for(const Instr& instruction:p.code){
-        const int firstClosed=instruction.op==35?instruction.a:
-            instruction.op==22&&instruction.a>0?instruction.a-1:-1;
+        const int firstClosed=instruction.op==35?instruction.a:-1;
         if(firstClosed<0) continue;
         for(int registerIndex=firstClosed;registerIndex<p.maxstack;++registerIndex)
             if(p.capturedRegisters[size_t(registerIndex)])
@@ -208,7 +207,7 @@ static void validateProtoData(const Proto& p){
         case 12:case 13:case 14:case 15:case 16:case 17:checkReg(i,i.a,"A");checkRK(i,i.b,"B");checkRK(i,i.c,"C");break;
         case 18:case 19:case 20:checkReg(i,i.a,"A");checkReg(i,i.b,"B");break;
         case 21:checkReg(i,i.a,"A");checkReg(i,i.b,"B");checkReg(i,i.c,"C");if(i.b>i.c)failure(i,"CONCAT range is reversed");break;
-        case 22:if(i.a>p.maxstack)failure(i,"JMP close register out of range");checkTarget(i);break;
+        case 22:checkReg(i,i.a,"A");checkTarget(i);break;
         case 23:case 24:case 25:if(i.a>1)failure(i,"comparison inversion flag out of range");checkRK(i,i.b,"B");checkRK(i,i.c,"C");checkTarget(i);break;
         case 26:checkReg(i,i.a,"A");if(i.c>1)failure(i,"TEST boolean operand out of range");checkTarget(i);break;
         case 27:checkReg(i,i.a,"A");checkReg(i,i.b,"B");if(i.c>1)failure(i,"TESTSET boolean operand out of range");checkTarget(i);break;
@@ -1041,14 +1040,6 @@ static bool needsPcDispatcher(const std::string& source){
     for(const char* marker:markers) if(source.find(marker)!=std::string::npos) return true;
     return false;
 }
-static bool hasJumpClose(const Proto& p){
-    for(const Instr& instruction:p.code){
-        if(instruction.op!=22||instruction.a<=0) continue;
-        for(int registerIndex=instruction.a-1;registerIndex<p.maxstack;++registerIndex)
-            if(managedCapturedLocal(p,registerIndex)) return true;
-    }
-    return false;
-}
 static bool hasCapturedLoopVariables(const Proto& p){
     for(const Instr& instruction:p.code){
         if(instruction.op==31||instruction.op==32){
@@ -1084,32 +1075,20 @@ static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& bloc
         const Instr& i=p.code[size_t(pc)];
         if(i.closureBindingFor>=0||i.extraWord){++pc;continue;}
         if(i.op==22){
-            if(i.a>0) emitCapturedCellClose(o,p,i.a-1,indent,context);
             o<<pad<<pcName<<" = "<<i.target<<"\n";
             return;
         }
         if(isCondition(i.op)||i.op==27){
             const int target=followingControlTarget(p,i);
-            const Instr* closeJump=i.pc+1<int(p.code.size())&&p.code[size_t(i.pc+1)].op==22
-                ? &p.code[size_t(i.pc+1)] : nullptr;
-            const bool closesJump=closeJump&&closeJump->a>0;
             if(i.op==23||i.op==24||i.op==25){
                 const std::string lhs=renderedValue(p,i.b,i.pc,context),rhs=renderedValue(p,i.c,i.pc,context);
                 const char* op=i.op==23?" == ":i.op==24?" < ":" <= ";
-                if(closesJump){
-                    o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then\n";
-                    emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
-                    o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<target<<"\n"
-                     <<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
-                }else{
-                    o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then "<<pcName<<" = "<<target
-                     <<" else "<<pcName<<" = "<<i.pc+2<<" end\n";
-                }
+                o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then "<<pcName<<" = "<<target
+                 <<" else "<<pcName<<" = "<<i.pc+2<<" end\n";
             }else{
                 const int testRegister=i.op==27?i.b:i.a;
                 o<<pad<<"if (not "<<renderedLocal(p,testRegister,i.pc,context)<<") ~= "<<(i.c?"true":"false")<<" then\n";
                 if(i.op==27)o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"\n";
-                if(closesJump) emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
                 o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<target<<"\n";
                 o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
             }
@@ -1133,15 +1112,11 @@ static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& bloc
             return;
         }
         if(i.op==33){
-            const Instr* closeJump=i.pc+1<int(p.code.size())&&p.code[size_t(i.pc+1)].op==22
-                ? &p.code[size_t(i.pc+1)] : nullptr;
             o<<pad;
             for(int result=0;result<i.c;result++){if(result)o<<", ";o<<renderedLocal(p,i.a+3+result,i.pc,context);}
             o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedLocal(p,i.a+1,i.pc,context)<<", "<<renderedLocal(p,i.a+2,i.pc,context)<<")\n";
             o<<pad<<"if "<<renderedLocal(p,i.a+3,i.pc,context)<<" ~= nil then\n";
             o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a+2,i.pc,context)<<" = "<<renderedLocal(p,i.a+3,i.pc,context)<<"\n";
-            if(closeJump&&closeJump->a>0)
-                emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
             o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<followingControlTarget(p,i)<<"\n";
             o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
             return;
@@ -1186,9 +1161,7 @@ static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,con
     std::vector<int> starts(leaders.begin(),leaders.end());
     std::vector<PcBlock> blocks;
     for(size_t n=0;n<starts.size();n++) blocks.push_back({starts[n],n+1<starts.size()?starts[n+1]:int(p.code.size())});
-    o<<pad<<"-- ByteVeil: PC dispatcher preserves "
-     <<(hasJumpClose(p)?"Lua 5.1 jump-close semantics and control flow in function ":"non-reducible control flow in function ")
-     <<p.id<<"\n";
+    o<<pad<<"-- ByteVeil: PC dispatcher preserves Lua 5.1 control flow in function "<<p.id<<"\n";
     o<<pad<<"local "<<pcName<<" = 0\n";
     o<<pad<<"while "<<pcName<<" >= 0 and "<<pcName<<" < "<<p.code.size()<<" do\n";
     std::function<void(size_t,size_t,int)> dispatch=[&](size_t first,size_t last,int level){
@@ -1215,7 +1188,7 @@ static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext&
     }
     std::ostringstream structured;
     emitRange(structured,p,0,int(p.code.size()),indent,context);
-    if(hasJumpClose(p)||hasCapturedLoopVariables(p)||needsPcDispatcher(structured.str())){
+    if(hasCapturedLoopVariables(p)||needsPcDispatcher(structured.str())){
         context.stateMachine=true;
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
         emitPcDispatcher(o,p,indent,context);
