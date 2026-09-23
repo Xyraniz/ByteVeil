@@ -168,4 +168,33 @@ if command -v cygpath >/dev/null 2>&1; then
     LOOP_RETURN_RECONSTRUCTED_PATH="$(cygpath -m "$LOOP_RETURN_RECONSTRUCTED_PATH")"
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_return_runtime.lua" "$LOOP_RETURN_ORIGINAL_PATH" "$LOOP_RETURN_RECONSTRUCTED_PATH"
+cat >"$TMP/and-chain.lua" <<'LUA'
+local function check(a, b, c)
+    if a and b and c then return "yes" end
+    return "no"
+end
+local function bounded(n)
+    local i, total = 0, 0
+    while i < n and i < 3 do
+        i = i + 1
+        total = total + i
+    end
+    return total
+end
+return check, bounded
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/and-chain.luac" "$TMP/and-chain.lua"
+"$BIN" --bytecode "$TMP/and-chain.luac" --format lua > "$TMP/and-chain.reconstructed.lua"
+if grep -q 'PC dispatcher' "$TMP/and-chain.reconstructed.lua"; then
+    echo "a shared-exit and-chain still uses a PC dispatcher" >&2
+    exit 1
+fi
+"$BYTEVEIL_LUAC51" -p "$TMP/and-chain.reconstructed.lua"
+AND_CHAIN_ORIGINAL_PATH="$TMP/and-chain.lua"
+AND_CHAIN_RECONSTRUCTED_PATH="$TMP/and-chain.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    AND_CHAIN_ORIGINAL_PATH="$(cygpath -m "$AND_CHAIN_ORIGINAL_PATH")"
+    AND_CHAIN_RECONSTRUCTED_PATH="$(cygpath -m "$AND_CHAIN_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_and_chain_runtime.lua" "$AND_CHAIN_ORIGINAL_PATH" "$AND_CHAIN_RECONSTRUCTED_PATH"
 printf 'Lua 5.1 reconstruction tests: PASS\n'

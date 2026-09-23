@@ -673,8 +673,6 @@ static std::string conditionExpr(const Proto& p,const Instr& i,const RenderConte
 static std::string negateConditionExpr(const std::string& condition){
     if(condition.rfind("not (",0)==0&&condition.size()>6&&condition.back()==')')
         return condition.substr(5,condition.size()-6);
-    if(condition.size()>1&&condition.front()=='('&&condition.back()==')')
-        return condition.substr(1,condition.size()-2);
     return "not ("+condition+")";
 }
 static std::string closureCaptureCellSource(const Proto& p,const CaptureInfo& capture,const RenderContext& parent){
@@ -1017,6 +1015,30 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 cursor+=2;
             }
             bool emittedChain=false;
+            // Lua lowers `a and b and ...` to consecutive conditions whose
+            // failed branches all jump to one shared join. When every test
+            // falls through, the source body begins after the final pair.
+            if(chain.size()>=2){
+                const int bodyBegin=chain.back().pc+2;
+                const int join=chain.front().target;
+                const bool loopLatch=join>0 && join<=end && p.code[join-1].op==22 &&
+                    p.code[join-1].target==pc;
+                const bool commonFalseExit=!loopLatch && join>bodyBegin && join<=end &&
+                    std::all_of(chain.begin(),chain.end(),[&](const ConditionJump& test){return test.target==join;});
+                if(commonFalseExit){
+                    o<<pad<<"if ";
+                    for(size_t n=0;n<chain.size();++n){
+                        if(n)o<<" and ";
+                        o<<chain[n].fallthrough;
+                    }
+                    o<<" then\n";
+                    emitRange(o,p,bodyBegin,join,indent+4,context,true,loopBreakTarget);
+                    o<<pad<<"end\n";
+                    pc=join;
+                    emittedChain=true;
+                }
+            }
+            if(emittedChain)continue;
             for(size_t final=1;final<chain.size();++final){
                 const int bodyBegin=chain[final].pc+2;
                 const int join=chain[final].target;

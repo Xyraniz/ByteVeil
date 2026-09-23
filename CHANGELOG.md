@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased - Reconstruct shared-exit Lua 5.1 condition chains
+
+### Changed
+
+- Consecutive Lua 5.1 tests whose false branches share an exit now reconstruct
+  as a short-circuit `and` condition when the body has a proven join. Loop
+  headers are recognized first so a loop latch is not mistaken for an ordinary
+  condition chain.
+- Corrected condition negation for already-parenthesized comparisons. The
+  previous helper removed their parentheses without inverting the boolean,
+  which could reverse a loop exit or `break` condition.
+
+### Validation
+
+- Added Lua 5.1 runtime differential coverage for falsy and truthy `and` chains
+  and a `while` loop with a chained condition over inputs 0 through 6. The
+  reconstructed code agrees with the original and uses no PC dispatcher.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  and compiles with Lua 5.1; PC dispatcher comments fell from 181 to **178**
+  and aggregate output from 8,408,589 to **8,390,193** bytes. The obfuscated
+  samples were not executed, so parsing and compilation do not establish their
+  behavioral equivalence.
+
 ## Unreleased - Preserve Lua 5.1 calls with multiple results
 
 ### Corrected
