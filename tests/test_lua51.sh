@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -347,6 +347,44 @@ open(sys.argv[39], "wb").write(build(
     multi_latch_code,
     [(3, 0), (3, 1), (4, b"continueA"), (4, b"continueB"), (4, b"stop")],
     maxstack=3))
+
+# A continue jumps to TFORLOOP, while a separate edge exits the actual for.
+# The lifter must keep these meanings distinct inside its synthetic wrapper.
+loadnil_r1_r2 = 3 | (1 << 6) | (2 << 23)
+move_r5_r3 = 0 | (5 << 6) | (3 << 23)
+eq_r3_k0 = 23 | (1 << 6) | (3 << 23) | (256 << 14)
+eq_r3_k1 = 23 | (1 << 6) | (3 << 23) | (257 << 14)
+tforloop_a0_c1 = 33 | (1 << 14)
+generic_for_continue_code = [
+    getglobal(0, 2), loadnil_r1_r2, jmp(2, 14),
+    getglobal(4, 3), move_r5_r3, call(4, 2, 1),
+    eq_r3_k0, jmp(7, 14), eq_r3_k1, jmp(9, 16),
+    getglobal(4, 4), move_r5_r3, call(4, 2, 1), jmp(13, 14),
+    tforloop_a0_c1, jmp(15, 3), ret(0, 1),
+]
+open(sys.argv[40], "wb").write(build(
+    generic_for_continue_code,
+    [(3, 2), (3, 3), (4, b"iterator"), (4, b"seenValue"), (4, b"processValue")],
+    maxstack=6))
+
+# The numeric-for latch needs the same continue translation and outer-break
+# preservation as the generic-for latch.
+def loop_edge(op, a, pc, target):
+    return op | (a << 6) | ((131071 + target - pc - 1) << 14)
+
+eq_r3_k3 = 23 | (1 << 6) | (3 << 23) | ((256 + 3) << 14)
+eq_r3_k4 = 23 | (1 << 6) | (3 << 23) | ((256 + 4) << 14)
+numeric_for_continue_code = [
+    loadk(0, 0), loadk(1, 1), loadk(2, 2), loop_edge(32, 0, 3, 15),
+    getglobal(4, 5), move_r5_r3, call(4, 2, 1),
+    eq_r3_k3, jmp(8, 15), eq_r3_k4, jmp(10, 16),
+    getglobal(4, 6), move_r5_r3, call(4, 2, 1), jmp(14, 15),
+    loop_edge(31, 0, 15, 4), ret(0, 1),
+]
+open(sys.argv[41], "wb").write(build(
+    numeric_for_continue_code,
+    [(3, 1), (3, 4), (3, 1), (3, 2), (3, 3), (4, b"seenValue"), (4, b"processValue")],
+    maxstack=6))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -406,6 +444,40 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
         MULTI_LATCH_PATH="$(cygpath -m "$MULTI_LATCH_PATH")"
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_multi_latch_runtime.lua" "$MULTI_LATCH_PATH"
+fi
+"$BIN" --bytecode "$TMP/generic-for-continue.luac" --format lua >"$TMP/generic-for-continue.lua"
+grep -q '^for r3 in r0, r1, r2 do$' "$TMP/generic-for-continue.lua"
+grep -q 'repeat' "$TMP/generic-for-continue.lua"
+if grep -q 'PC dispatcher\|stopped at repeated control-flow' "$TMP/generic-for-continue.lua"; then
+    echo "generic-for continue and break edges were not reconstructed structurally" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/generic-for-continue.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    GENERIC_FOR_CONTINUE_PATH="$TMP/generic-for-continue.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        GENERIC_FOR_CONTINUE_PATH="$(cygpath -m "$GENERIC_FOR_CONTINUE_PATH")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_generic_for_continue_runtime.lua" "$GENERIC_FOR_CONTINUE_PATH"
+fi
+"$BIN" --bytecode "$TMP/numeric-for-continue.luac" --format lua >"$TMP/numeric-for-continue.lua"
+grep -q '^for r3 = 1, 4, 1 do$' "$TMP/numeric-for-continue.lua"
+grep -q 'repeat' "$TMP/numeric-for-continue.lua"
+if grep -q 'PC dispatcher\|stopped at repeated control-flow' "$TMP/numeric-for-continue.lua"; then
+    echo "numeric-for continue and break edges were not reconstructed structurally" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/numeric-for-continue.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    NUMERIC_FOR_CONTINUE_PATH="$TMP/numeric-for-continue.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        NUMERIC_FOR_CONTINUE_PATH="$(cygpath -m "$NUMERIC_FOR_CONTINUE_PATH")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_generic_for_continue_runtime.lua" "$NUMERIC_FOR_CONTINUE_PATH"
 fi
 "$BIN" --bytecode "$TMP/test-repeat.luac" --format lua >"$TMP/test-repeat.lua"
 grep -q '^repeat$' "$TMP/test-repeat.lua"
