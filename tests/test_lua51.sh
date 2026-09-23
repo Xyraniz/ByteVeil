@@ -537,13 +537,12 @@ assert binding["capture_slot"] == 0
 PY
 grep -q 'CLOSURE.*CAPTURES=1.*\[0:local 0 at 2\]' "$TMP/closure-local.dis"
 grep -q 'CLOSURE_BINDING owner=1 slot=0' "$TMP/closure-local.dis"
-grep -q '^-- ByteVeil: CLOSURE pc 1 captures upvalue 0 from local register r0 (binding pc 2)$' "$TMP/closure-local.lua"
+grep -q '^r1 = function(...)$' "$TMP/closure-local.lua"
 grep -q '^    __byteveil_f1_r0 = r0$' "$TMP/closure-local.lua"
 if grep -q '^r255 = r0$' "$TMP/closure-local.lua"; then
     echo "CLOSURE local capture was emitted as a standalone MOVE" >&2
     exit 1
 fi
-grep -Fq 'ByteVeil: CLOSURE pc 0 captures upvalue 0 from parent upvalue __upvalue_0 (binding pc 1)' "$TMP/closure-nested.lua"
 grep -q '^        __byteveil_f2_r0 = r0$' "$TMP/closure-nested.lua"
 if grep -q '__byteveil_f1_r254 = r0' "$TMP/closure-nested.lua"; then
     echo "CLOSURE upvalue capture was emitted as a standalone GETUPVAL" >&2

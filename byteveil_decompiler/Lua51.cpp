@@ -814,13 +814,6 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
             RenderContext childContext=closureContext(p,i,context,captureCellParameters);
             std::ostringstream childBody;
             emitReadableBody(childBody,child,childContext,indent+(wrapCaptures?8:4),child.params);
-            for(size_t slot=0;slot<i.captures.size();++slot){
-                const CaptureInfo& capture=i.captures[slot];
-                o<<pad<<"-- ByteVeil: CLOSURE pc "<<i.pc<<" captures upvalue "<<slot<<" from "
-                 <<(capture.fromUpvalue?"parent upvalue "+upvalue(p,capture.sourceIndex):
-                    "local register "+renderedRegisterName(p,capture.sourceIndex,capture.bindingPc,context))
-                 <<" (binding pc "<<capture.bindingPc<<")\n";
-            }
             o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = ";
             if(wrapCaptures){
                 o<<"(function(";

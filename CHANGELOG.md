@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased - Cleaner Lua 5.1 closure output
+
+### Changed
+
+- Removed per-capture provenance comments from generated Lua. Capture ownership
+  and binding PCs remain available in JSON and disassembly, while source output
+  keeps only diagnostics that affect reconstruction.
+
+### Validation
+
+- Re-ran the 21 MoonSec V3 corpus samples through Lua 5.1 parsing and
+  compilation after the output change: **21/21 PASS**. A local snapshot of the
+  current Synergy output for the same files passed both checks on **15/21**.
+- Removed 2,746 generated capture-comment lines and reduced aggregate output
+  from 9,604,763 to **9,250,060** bytes. These parser and compiler checks do not
+  establish behavioral equivalence for the obfuscated samples.
+
+
 ## Unreleased - Lua 5.1 captured upvalue lifetimes
 
 ### Corrected
@@ -184,7 +202,7 @@
 
 - Lua 5.1 `CLOSURE` now consumes its immediately following pseudo-instructions as capture bindings, rather than allowing their `MOVE` or `GETUPVAL` records to appear as independently executed assignments.
 - The reader verifies the exact binding count against the child prototype's upvalue count, accepts only `MOVE` (enclosing local) or `GETUPVAL` (enclosing upvalue), checks the captured source index, and rejects jumps into a consumed binding record. Truncated, wrong-kind, out-of-range, and non-boundary cases fail with a function/PC diagnostic.
-- Readable nested functions use a separate register namespace and resolve `GETUPVAL`/`SETUPVAL` through the statically proven lexical capture source. Capture provenance remains visible adjacent to the closure definition.
+- Readable nested functions use a separate register namespace and resolve `GETUPVAL`/`SETUPVAL` through the statically proven lexical capture source. Capture provenance remains available in JSON and disassembly metadata.
 
 ### Added
 
