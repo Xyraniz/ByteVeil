@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue = assert(loadfile(originalPath))()
-local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue = assert(loadfile(reconstructedPath))()
+local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue, originalCaptureBoundary = assert(loadfile(originalPath))()
+local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue, reconstructedCaptureBoundary = assert(loadfile(reconstructedPath))()
 
 for _, value in ipairs({"alpha", "beta", "gamma", "delta", "", 0}) do
     assert(reconstructedClassify(value) == originalClassify(value),
@@ -103,4 +103,27 @@ for index, case in ipairs(mixedValueCases) do
         "reconstructed mixed-value result differs in case " .. index)
     assert(originalTrace == "get,map" and reconstructedTrace == originalTrace,
         "mixed-value expression changed call order in case " .. index)
+end
+
+local captureBoundaryCases = {
+    {tag = "go", value = "replacement", expected = "replacement", calls = 1},
+    {tag = "go", value = false, expected = "go", calls = 1},
+    {tag = "other", value = "unused", expected = "other", calls = 0},
+}
+for index, case in ipairs(captureBoundaryCases) do
+    local function run(capture)
+        local calls = 0
+        local function maybeGetter()
+            calls = calls + 1
+            return case.value
+        end
+        local captured = capture(case.tag, maybeGetter)
+        return captured(), calls
+    end
+    local originalResult, originalCalls = run(originalCaptureBoundary)
+    local reconstructedResult, reconstructedCalls = run(reconstructedCaptureBoundary)
+    assert(originalResult == case.expected and originalCalls == case.calls,
+        "source TESTSET boundary case " .. index .. " differs")
+    assert(reconstructedResult == originalResult and reconstructedCalls == originalCalls,
+        "reconstructed TESTSET boundary result differs in case " .. index)
 end

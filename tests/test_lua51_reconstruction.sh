@@ -136,7 +136,13 @@ local function mixedValue(getValue, mapValue, fallback)
     local value = getValue()
     return mapValue(value) and value or fallback
 end
-return classify, choose, compareWithCalls, callChainElse, mixedValue
+local function captureBoundary(tag, maybeGetter)
+    if tag == "go" then
+        tag = maybeGetter() or tag
+    end
+    return function() return tag end
+end
+return classify, choose, compareWithCalls, callChainElse, mixedValue, captureBoundary
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"
