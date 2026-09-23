@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased - Lua 5.1 non-reducible branch recovery
+
+### Added
+
+- When a Lua 5.1 function cannot be reconstructed as structured `if` and loop
+  regions, the readable output now uses a stable-register program-counter
+  dispatcher over basic blocks. Comparison polarity, tests, conditional
+  assignments, jumps, loop transitions, and block fallthroughs remain explicit
+  in executable Lua instead of ending at a lost-edge comment.
+- Direct method-call syntax is disabled when another control-flow edge can
+  enter the `CALL` while skipping its adjacent `SELF`. This keeps that path's
+  function and argument registers intact.
+
+### Explicit limit
+
+- The dispatcher is intentionally register-oriented and less idiomatic than
+  structured Lua. Open `SETLIST` tails and unresolved open-result flows remain
+  visible diagnostics; this change does not claim complete semantic recovery.
+
+### Validation
+
+- Added Lua 5.1.5 execution coverage for nested shared-tail branches and a
+  branch that enters `CALL` without running `SELF`. Full CTest: **9/9 PASS**.
+- All **21/21** normalized public MoonSec V3 samples still parse as Lua 5.1.
+  The pass removed **270** lost-branch markers and **212** unsupported
+  comparison/test markers. Aggregate output is **9,330,518** bytes; the first
+  per-instruction dispatcher was **28,244,981** bytes on the same corpus.
+- Open-tail diagnostics remain explicit: **10** `CALL` sites, **4** `VARARG`
+  sites, **7** `RETURN` tails, and **10** `SETLIST` tails. These counts can
+  overlap when one producer feeds another operation.
+
 ## Unreleased - Lua 5.1 method-call recovery
 
 ### Added

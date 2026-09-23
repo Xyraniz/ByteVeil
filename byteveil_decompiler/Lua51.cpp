@@ -377,10 +377,12 @@ struct RenderContext {
     // Entries point at lexical variables in the enclosing emitted function.
     // They are created from the CLOSURE pseudo-instructions, never guessed.
     std::vector<std::string> capturedUpvalues;
+    bool stateMachine=false;
 };
 
 static std::string renderedLocal(const Proto& p,int registerIndex,int pc,const RenderContext& context){
     (void)context;
+    if(context.stateMachine) return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
     // Root names remain compact for readable diagnostics.  Nested prototypes
     // need their own register namespace so an inner r0 cannot shadow an outer
     // r0 captured by a closure.
@@ -431,6 +433,7 @@ static bool writesRegister(const Instr& instruction,int registerIndex,int maxsta
 }
 
 static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const RenderContext& context){
+    if(context.stateMachine) return renderedLocal(p,registerIndex,pc,context);
     for(int n=pc-1;n>=0;--n){
         const Instr& definition=p.code[n];
         if(definition.closureBindingFor>=0 || definition.a!=registerIndex) continue;
@@ -490,13 +493,15 @@ static std::string renderedOpenArgs(const Proto& p,const Instr& consumer,const R
     return result.str();
 }
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc);
+static bool hasControlEntryAt(const Proto& p,int targetPc);
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context);
 static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
     if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return {};
     const Instr& producer=p.code[size_t(producerPc)];
     if(producer.op==37&&producer.b==0) return "...";
     if(producer.op!=28||producer.c!=0) return {};
-    const bool colonCall=producerPc>0&&colonMethodCall(p,producerPc-1,producerPc);
+    const bool colonCall=producerPc>0&&colonMethodCall(p,producerPc-1,producerPc)&&
+        !hasControlEntryAt(p,producerPc);
     const std::string fn=colonCall?colonMethodTarget(p,producer,context):renderedValueAt(p,producer.a,producer.pc,context);
     const std::string callArgs=colonCall?std::string():producer.b==0
         ?renderedOpenArgs(p,producer,context,depth+1)
@@ -520,6 +525,19 @@ static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
     const int keyIndex=self.c&255;
     return keyIndex<int(p.constantTable.size())&&p.constantTable[size_t(keyIndex)].type=="string"&&
            validIdentifier(p.constantTable[size_t(keyIndex)].value);
+}
+static bool hasControlEntryAt(const Proto& p,int targetPc){
+    for(const Instr& instruction:p.code){
+        if((instruction.op==22||instruction.op==31||instruction.op==32)&&instruction.target==targetPc)
+            return true;
+        if((instruction.op>=23&&instruction.op<=27)||instruction.op==33){
+            const int jumpPc=instruction.pc+1;
+            if(jumpPc>=0&&jumpPc<int(p.code.size())&&p.code[size_t(jumpPc)].op==22&&
+               p.code[size_t(jumpPc)].target==targetPc) return true;
+        }
+        if(instruction.op==2&&instruction.c&&instruction.target==targetPc) return true;
+    }
+    return false;
 }
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context){
     const Instr& self=p.code[size_t(call.pc-1)];
@@ -614,6 +632,7 @@ static RenderContext closureContext(const Proto& p,const Instr& closure,const Re
     }
     return result;
 }
+static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister);
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true);
 static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false){
     std::string pad(indent,' ');
@@ -674,7 +693,9 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 36:
         if(size_t(i.bx)<p.children.size()){
             const Proto& child=p.children[i.bx];
-            const RenderContext childContext=closureContext(p,i,context);
+            RenderContext childContext=closureContext(p,i,context);
+            std::ostringstream childBody;
+            emitReadableBody(childBody,child,childContext,indent+4,child.params);
             for(size_t slot=0;slot<i.captures.size();++slot){
                 const CaptureInfo& capture=i.captures[slot];
                 o<<pad<<"-- ByteVeil: CLOSURE pc "<<i.pc<<" captures upvalue "<<slot<<" from "
@@ -685,8 +706,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
             for(int k=0;k<child.params;k++){if(k)o<<", ";o<<renderedLocal(child,k,0,childContext);}
             if(child.vararg&2){if(child.params)o<<", ";o<<"...";}
             o<<")\n";
-            emitRegisterDeclarations(o,child,childContext,indent+4,child.params);
-            emitRange(o,child,0,int(child.code.size()),indent+4,childContext);
+            o<<childBody.str();
             o<<pad<<"end\n";
         }else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";
         break;
@@ -860,8 +880,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
         }
         const bool inlineOpenResults=openProducerConsumedInRange(p,pc,end);
-        const bool inlineSelf=pc+1<end&&colonMethodCall(p,pc,pc+1);
-        const bool colonCall=pc>begin&&colonMethodCall(p,pc-1,pc);
+        const bool inlineSelf=pc+1<end&&colonMethodCall(p,pc,pc+1)&&
+            !hasControlEntryAt(p,pc+1);
+        const bool colonCall=pc>begin&&colonMethodCall(p,pc-1,pc)&&
+            !hasControlEntryAt(p,pc);
         if(!loopSetup && !returnSetup && !inlineOpenResults && !inlineSelf)
             emitSimple(o,p,i,indent,context,colonCall);
         if(i.op==29 || i.op==30) break;
@@ -869,11 +891,170 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         pc++;
     }
 }
+static bool needsPcDispatcher(const std::string& source){
+    static const char* markers[]={
+        "-- ByteVeil: branch at pc ",
+        "-- ByteVeil: unsupported opcode retained: EQ ",
+        "-- ByteVeil: unsupported opcode retained: LT ",
+        "-- ByteVeil: unsupported opcode retained: LE ",
+        "-- ByteVeil: unsupported opcode retained: TEST ",
+        "-- ByteVeil: TESTSET at pc ",
+        "stopped at repeated control-flow pc ",
+        "left reconstructed range at pc ",
+        "FORLOOP at pc ",
+        "FORPREP at pc ",
+        "TFORLOOP at pc "
+    };
+    for(const char* marker:markers) if(source.find(marker)!=std::string::npos) return true;
+    return false;
+}
+static std::string dispatcherPcName(const Proto& p,const RenderContext& context){
+    std::set<std::string> names;
+    for(const LocalInfo& local:p.locals) if(validIdentifier(local.name)) names.insert(local.name);
+    for(int regIndex=0;regIndex<p.maxstack;regIndex++){
+        names.insert(renderedLocal(p,regIndex,0,context));
+        for(const Instr& instruction:p.code)
+            names.insert(renderedLocal(p,regIndex,instruction.pc,context));
+    }
+    std::string name="__byteveil_pc_f"+std::to_string(p.id);
+    while(names.count(name)) name.push_back('_');
+    return name;
+}
+static int followingControlTarget(const Proto& p,const Instr& i){
+    const int following=i.pc+1;
+    if(following<0||following>=int(p.code.size())) return i.pc+2;
+    return p.code[size_t(following)].pc+p.code[size_t(following)].sbx+1;
+}
+struct PcBlock { int start=0,end=0; };
+static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& block,int indent,const RenderContext& context,const std::string& pcName){
+    const std::string pad(size_t(indent),' ');
+    for(int pc=block.start;pc<block.end;){
+        const Instr& i=p.code[size_t(pc)];
+        if(i.closureBindingFor>=0||i.extraWord){++pc;continue;}
+        if(i.op==22){o<<pad<<pcName<<" = "<<i.target<<"\n";return;}
+        if(isCondition(i.op)||i.op==27){
+            const int target=followingControlTarget(p,i);
+            if(i.op==23||i.op==24||i.op==25){
+                const std::string lhs=renderedValue(p,i.b,i.pc,context),rhs=renderedValue(p,i.c,i.pc,context);
+                const char* op=i.op==23?" == ":i.op==24?" < ":" <= ";
+                o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then "<<pcName<<" = "<<target
+                 <<" else "<<pcName<<" = "<<i.pc+2<<" end\n";
+            }else{
+                const int testRegister=i.op==27?i.b:i.a;
+                o<<pad<<"if (not "<<renderedLocal(p,testRegister,i.pc,context)<<") ~= "<<(i.c?"true":"false")<<" then\n";
+                if(i.op==27)o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"\n";
+                o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<target<<"\n";
+                o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
+            }
+            return;
+        }
+        if(i.op==31){
+            const std::string index=renderedLocal(p,i.a,i.pc,context);
+            const std::string step=renderedLocal(p,i.a+2,i.pc,context);
+            o<<pad<<index<<" = "<<index<<" + "<<step<<"\n";
+            o<<pad<<"if (("<<step<<" > 0 and "<<index<<" <= "<<renderedLocal(p,i.a+1,i.pc,context)<<") or ("<<step<<" <= 0 and "<<index<<" >= "<<renderedLocal(p,i.a+1,i.pc,context)<<")) then\n";
+            o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a+3,i.pc,context)<<" = "<<index<<"\n";
+            o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<i.target<<"\n";
+            o<<pad<<"else "<<pcName<<" = "<<i.pc+1<<" end\n";
+            return;
+        }
+        if(i.op==32){
+            for(int offset=0;offset<3;offset++)
+                o<<pad<<renderedLocal(p,i.a+offset,i.pc,context)<<" = tonumber("<<renderedLocal(p,i.a+offset,i.pc,context)<<")\n";
+            o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.a,i.pc,context)<<" - "<<renderedLocal(p,i.a+2,i.pc,context)<<"\n";
+            o<<pad<<pcName<<" = "<<i.target<<"\n";
+            return;
+        }
+        if(i.op==33){
+            o<<pad;
+            for(int result=0;result<i.c;result++){if(result)o<<", ";o<<renderedLocal(p,i.a+3+result,i.pc,context);}
+            o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedLocal(p,i.a+1,i.pc,context)<<", "<<renderedLocal(p,i.a+2,i.pc,context)<<")\n";
+            o<<pad<<"if "<<renderedLocal(p,i.a+3,i.pc,context)<<" ~= nil then\n";
+            o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a+2,i.pc,context)<<" = "<<renderedLocal(p,i.a+3,i.pc,context)<<"\n";
+            o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<followingControlTarget(p,i)<<"\n";
+            o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
+            return;
+        }
+        const bool inlineOpenResults=openProducerConsumedInRange(p,i.pc,block.end);
+        const bool inlineSelf=i.pc+1<block.end&&colonMethodCall(p,i.pc,i.pc+1)&&
+            !hasControlEntryAt(p,i.pc+1);
+        const bool colonCall=i.pc>block.start&&colonMethodCall(p,i.pc-1,i.pc)&&
+            !hasControlEntryAt(p,i.pc);
+        if(!inlineOpenResults&&!inlineSelf){
+            Instr blockInstruction=i;
+            if(openProducerFor(p,i)>=0&&openProducerFor(p,i)<block.start) blockInstruction.openProducer=-1;
+            emitSimple(o,p,blockInstruction,indent,context,colonCall);
+        }
+        if(i.op==29||i.op==30) return;
+        if(i.op==2&&i.c){o<<pad<<pcName<<" = "<<i.pc+2<<"\n";return;}
+        if(i.op==34&&i.c==0){pc+=2;continue;}
+        if(i.op==36){pc+=1+int(i.captures.size());continue;}
+        ++pc;
+    }
+    o<<pad<<pcName<<" = "<<block.end<<"\n";
+}
+static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,const RenderContext& context){
+    if(p.code.empty()) return;
+    const std::string pad(size_t(indent),' '),pcName=dispatcherPcName(p,context);
+    std::set<int> leaders{0};
+    auto addLeader=[&](int pc){
+        if(pc>=0&&pc<int(p.code.size())&&!p.code[size_t(pc)].extraWord&&p.code[size_t(pc)].closureBindingFor<0) leaders.insert(pc);
+    };
+    for(const Instr& i:p.code){
+        if(i.closureBindingFor>=0||i.extraWord) continue;
+        if(i.op==22){addLeader(i.pc+1);addLeader(i.target);}
+        else if(isCondition(i.op)||i.op==27){addLeader(i.pc+1);addLeader(i.pc+2);addLeader(followingControlTarget(p,i));}
+        else if(i.op==31){addLeader(i.pc+1);addLeader(i.target);}
+        else if(i.op==32){addLeader(i.pc+1);addLeader(i.target);}
+        else if(i.op==33){addLeader(i.pc+1);addLeader(i.pc+2);addLeader(followingControlTarget(p,i));}
+        else if(i.op==2&&i.c){addLeader(i.pc+1);addLeader(i.pc+2);}
+        else if(i.op==29||i.op==30){addLeader(i.pc+1);}
+        else if(i.op==34&&i.c==0){addLeader(i.pc+2);}
+        else if(i.op==36){addLeader(i.pc+1+int(i.captures.size()));}
+    }
+    std::vector<int> starts(leaders.begin(),leaders.end());
+    std::vector<PcBlock> blocks;
+    for(size_t n=0;n<starts.size();n++) blocks.push_back({starts[n],n+1<starts.size()?starts[n+1]:int(p.code.size())});
+    o<<pad<<"-- ByteVeil: PC dispatcher preserves non-reducible control flow in function "<<p.id<<"\n";
+    o<<pad<<"local "<<pcName<<" = 0\n";
+    o<<pad<<"while "<<pcName<<" >= 0 and "<<pcName<<" < "<<p.code.size()<<" do\n";
+    std::function<void(size_t,size_t,int)> dispatch=[&](size_t first,size_t last,int level){
+        const std::string branchPad(size_t(level),' ');
+        if(last-first==1){
+            emitPcBlock(o,p,blocks[first],level,context,pcName);
+            return;
+        }
+        const size_t middle=first+(last-first)/2;
+        o<<branchPad<<"if "<<pcName<<" < "<<blocks[middle].start<<" then\n";
+        dispatch(first,middle,level+4);
+        o<<branchPad<<"else\n";
+        dispatch(middle,last,level+4);
+        o<<branchPad<<"end\n";
+    };
+    dispatch(0,blocks.size(),indent+4);
+    o<<pad<<"end\n";
+}
+static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister){
+    if(context.stateMachine){
+        emitRegisterDeclarations(o,p,context,indent,firstRegister);
+        emitPcDispatcher(o,p,indent,context);
+        return;
+    }
+    std::ostringstream structured;
+    emitRange(structured,p,0,int(p.code.size()),indent,context);
+    if(needsPcDispatcher(structured.str())){
+        context.stateMachine=true;
+        emitRegisterDeclarations(o,p,context,indent,firstRegister);
+        emitPcDispatcher(o,p,indent,context);
+    }else{
+        emitRegisterDeclarations(o,p,context,indent,firstRegister);
+        o<<structured.str();
+    }
+}
 static void readableProto(std::ostringstream& o,const Proto& p){
     o<<"-- ByteVeil Lua 5.1 lifted (reconstructed) function "<<p.id<<" (CFG/SSA conservative)\n";
-    const RenderContext rootContext;
-    emitRegisterDeclarations(o,p,rootContext,0,0);
-    emitRange(o,p,0,int(p.code.size()),0,rootContext);
+    RenderContext rootContext;
+    emitReadableBody(o,p,rootContext,0,0);
     if(p.id==0 && (p.code.empty()||(p.code.back().op!=29&&p.code.back().op!=30))) o<<"return nil\n";
 }
 
