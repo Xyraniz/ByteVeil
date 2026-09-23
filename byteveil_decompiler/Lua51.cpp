@@ -670,6 +670,13 @@ static std::string conditionExpr(const Proto& p,const Instr& i,const RenderConte
     // A, so A=1 requires the negated expression here.
     return i.a ? "not "+comparison : comparison;
 }
+static std::string negateConditionExpr(const std::string& condition){
+    if(condition.rfind("not (",0)==0&&condition.size()>6&&condition.back()==')')
+        return condition.substr(5,condition.size()-6);
+    if(condition.size()>1&&condition.front()=='('&&condition.back()==')')
+        return condition.substr(1,condition.size()-2);
+    return "not ("+condition+")";
+}
 static std::string closureCaptureCellSource(const Proto& p,const CaptureInfo& capture,const RenderContext& parent){
     if(capture.fromUpvalue){
         if(capture.sourceIndex>=0&&capture.sourceIndex<int(parent.capturedUpvalueCells.size()))
@@ -945,6 +952,44 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"end\n";
             pc=i.target+2;
             continue;
+        }
+        // Lua 5.1 lowers `a or b or ...` conditions to comparison/test and
+        // JMP pairs. Earlier pairs jump to the shared true body; the final
+        // pair jumps past it when false. Fold that shape before recursively
+        // splitting the ranges, which otherwise mistakes the shared body for
+        // a branch escaping its parent range.
+        if(isCondition(i.op)){
+            struct ConditionJump { int pc; int target; std::string fallthrough; };
+            std::vector<ConditionJump> chain;
+            int cursor=pc;
+            while(cursor+1<end && isCondition(p.code[cursor].op) && p.code[cursor+1].op==22){
+                const Instr& predicate=p.code[cursor];
+                const Instr& jump=p.code[cursor+1];
+                chain.push_back({cursor,jump.target,conditionExpr(p,predicate,context)});
+                cursor+=2;
+            }
+            bool emittedChain=false;
+            for(size_t final=1;final<chain.size();++final){
+                const int bodyBegin=chain[final].pc+2;
+                const int join=chain[final].target;
+                const bool commonTrueBody=join>bodyBegin && join<=end &&
+                    std::all_of(chain.begin(),chain.begin()+final,[&](const ConditionJump& prefix){return prefix.target==bodyBegin;});
+                if(commonTrueBody){
+                    o<<pad<<"if ";
+                    for(size_t n=0;n<=final;++n){
+                        if(n)o<<" or ";
+                        if(n<final)o<<negateConditionExpr(chain[n].fallthrough);
+                        else o<<chain[n].fallthrough;
+                    }
+                    o<<" then\n";
+                    emitRange(o,p,bodyBegin,join,indent+4,context);
+                    o<<pad<<"end\n";
+                    pc=join;
+                    emittedChain=true;
+                    break;
+                }
+            }
+            if(emittedChain)continue;
         }
         // A branch target outside this recursive range is a shared CFG edge,
         // not the end of a larger nested source block. Expanding it here

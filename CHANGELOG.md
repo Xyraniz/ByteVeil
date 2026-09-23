@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Reconstruct short-circuit Lua 5.1 condition chains
+
+### Changed
+
+- Reconstructs adjacent comparison and truth-test plus jump pairs as one
+  structured `or` condition when each successful branch shares the same body
+  and the final false branch reaches the join. This covers Lua 5.1 bytecode
+  emitted for conditions such as `a == x or a == y` without a PC dispatcher.
+
+### Validation
+
+- Added Lua 5.1 runtime differential coverage for comparison chains and
+  truthiness chains. The test checks both source-equivalent results and that
+  the reconstructed function contains no PC dispatcher.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  and compiles with Lua 5.1; PC dispatcher comments fell from 193 to **183**
+  and aggregate output from 8,789,379 to **8,516,868** bytes. These corpus
+  samples were parsed and compiled, not executed, so this does not establish
+  behavioral equivalence for the obfuscated samples.
+
 ## Unreleased - Structure captured Lua 5.1 loops
 
 ### Changed

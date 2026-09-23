@@ -81,4 +81,31 @@ if command -v cygpath >/dev/null 2>&1; then
     GENERIC_RECONSTRUCTED_PATH="$(cygpath -m "$GENERIC_RECONSTRUCTED_PATH")"
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_closure_runtime.lua" "$NUMERIC_ORIGINAL_PATH" "$NUMERIC_RECONSTRUCTED_PATH" "$GENERIC_ORIGINAL_PATH" "$GENERIC_RECONSTRUCTED_PATH"
+cat >"$TMP/condition-chains.lua" <<'LUA'
+local function classify(value)
+    if value == "alpha" or value == "beta" or value == "gamma" then
+        return "matched"
+    end
+    return "other"
+end
+local function choose(first, second, third)
+    if first or second or third then return "truthy" end
+    return "falsy"
+end
+return classify, choose
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
+"$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"
+if grep -q 'PC dispatcher' "$TMP/condition-chains.reconstructed.lua"; then
+    echo "a short-circuit condition chain was not reconstructed structurally" >&2
+    exit 1
+fi
+"$BYTEVEIL_LUAC51" -p "$TMP/condition-chains.reconstructed.lua"
+CONDITION_ORIGINAL_PATH="$TMP/condition-chains.lua"
+CONDITION_RECONSTRUCTED_PATH="$TMP/condition-chains.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    CONDITION_ORIGINAL_PATH="$(cygpath -m "$CONDITION_ORIGINAL_PATH")"
+    CONDITION_RECONSTRUCTED_PATH="$(cygpath -m "$CONDITION_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_condition_chain_runtime.lua" "$CONDITION_ORIGINAL_PATH" "$CONDITION_RECONSTRUCTED_PATH"
 printf 'Lua 5.1 reconstruction tests: PASS\n'
