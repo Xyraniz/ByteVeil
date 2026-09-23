@@ -684,6 +684,10 @@ static bool straightLineConditionGap(const Instr& instruction){
     if(instruction.op==37) return instruction.b>0;
     return false;
 }
+static bool separatedConditionGap(const Instr& instruction){
+    if(instruction.op==2&&instruction.c!=0) return false;
+    return straightLineConditionGap(instruction)||instruction.op==28;
+}
 static std::string conditionChainFlagName(const Proto& p,int pc,const RenderContext& context){
     std::set<std::string> names;
     for(const LocalInfo& local:p.locals) if(validIdentifier(local.name)) names.insert(local.name);
@@ -1351,6 +1355,19 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     if(!jumpsToJoin){resume=end;hasElse=true;bodyEndsInReturn=true;}
                 }
                 commonTrueBody=commonOrPrefix||commonOrAnd;
+                bool callSeparatedBooleanTail=false;
+                if(commonOrPrefix&&separatedChain.size()>=2&&bodyBegin>=0&&bodyBegin+2<end&&
+                   separatedChain.front().target==bodyBegin&&separatedChain.back().target==bodyBegin+1&&
+                   p.code[bodyBegin].op==2&&p.code[bodyBegin].b==0&&p.code[bodyBegin].c==1&&
+                   p.code[bodyBegin+1].op==2&&p.code[bodyBegin+1].a==p.code[bodyBegin].a&&
+                   p.code[bodyBegin+1].b==1&&p.code[bodyBegin+1].c==0&&
+                   p.code[bodyBegin+2].op==30&&p.code[bodyBegin+2].a==p.code[bodyBegin].a&&
+                   p.code[bodyBegin+2].b==2){
+                    for(const ConditionGap& gap:separatedGaps)
+                        for(int gapPc=gap.begin;gapPc<gap.end;++gapPc)
+                            if(p.code[gapPc].op==28) callSeparatedBooleanTail=true;
+                }
+                if(callSeparatedBooleanTail) commonTrueBody=false;
                 if(commonTrueBody){
                     // A branch from outside this expression into one of its
                     // gaps or arms would bypass the generated flag protocol.
@@ -1416,6 +1433,155 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     o<<scopePad<<"end\n"<<pad<<"end\n";
                     pc=resume;
+                    emittedChain=true;
+                }
+            }
+            // A comparison chain can stay lazy even when its operand setup
+            // contains calls (including open-result call chains). Keep those
+            // gaps inside nested `if`s when every failed test reaches one
+            // shared join and the successful body has no other control edges.
+            if(!emittedChain&&isCondition(i.op)&&pc+1<end&&p.code[pc+1].op==22){
+                std::vector<ConditionJump> exitTests;
+                std::vector<ConditionGap> exitGaps;
+                int sharedJoin=-1;
+                int testPc=pc;
+                auto directReturnTarget=[&](int conditionPc){
+                    if(conditionPc+1>=end||!isCondition(p.code[conditionPc].op)||p.code[conditionPc+1].op!=22) return -1;
+                    const int target=p.code[conditionPc+1].target;
+                    return target>sharedJoin&&target<end&&p.code[target].op==30?target:-1;
+                };
+                for(size_t testIndex=0;testIndex<128;++testIndex){
+                    if(testPc+1>=end||!isCondition(p.code[testPc].op)||p.code[testPc+1].op!=22) break;
+                    const int target=p.code[testPc+1].target;
+                    if(sharedJoin<0) sharedJoin=target;
+                    if(target!=sharedJoin) break;
+                    exitTests.push_back({testPc,target,conditionExpr(p,p.code[testPc],context)});
+                    int cursor=testPc+2;
+                    const int gapBegin=cursor;
+                    while(cursor<end&&cursor<sharedJoin&&cursor-gapBegin<64){
+                        if(directReturnTarget(cursor)>=0){cursor+=2;continue;}
+                        if(separatedConditionGap(p.code[cursor])){++cursor;continue;}
+                        break;
+                    }
+                    if(cursor>gapBegin&&cursor+1<end&&isCondition(p.code[cursor].op)&&
+                       p.code[cursor+1].op==22&&p.code[cursor+1].target==sharedJoin){
+                        exitGaps.push_back({gapBegin,cursor});
+                        testPc=cursor;
+                        continue;
+                    }
+                    break;
+                }
+                const int bodyBegin=exitTests.empty()?-1:exitTests.back().pc+2;
+                const int booleanTestPc=sharedJoin-2;
+                const bool booleanResultTail=sharedJoin+2<end&&booleanTestPc>=bodyBegin&&
+                    isCondition(p.code[booleanTestPc].op)&&p.code[booleanTestPc+1].op==22&&
+                    p.code[booleanTestPc+1].target==sharedJoin+1&&
+                    p.code[sharedJoin].op==2&&p.code[sharedJoin].b==0&&p.code[sharedJoin].c==1&&
+                    p.code[sharedJoin+1].op==2&&p.code[sharedJoin+1].a==p.code[sharedJoin].a&&
+                    p.code[sharedJoin+1].b==1&&p.code[sharedJoin+1].c==0&&
+                    p.code[sharedJoin+2].op==30&&p.code[sharedJoin+2].a==p.code[sharedJoin].a&&
+                    p.code[sharedJoin+2].b==2;
+                const int guardBodyEnd=booleanResultTail?booleanTestPc:sharedJoin;
+                const int handledEnd=booleanResultTail?sharedJoin+3:sharedJoin;
+                bool commonGuardExit=exitTests.size()>=2&&exitGaps.size()+1==exitTests.size()&&
+                    guardBodyEnd>=bodyBegin&&handledEnd<=end;
+                if(commonGuardExit){
+                    std::set<int> allowedConditions,allowedJumps;
+                    for(const ConditionJump& test:exitTests){
+                        allowedConditions.insert(test.pc);
+                        allowedJumps.insert(test.pc+1);
+                    }
+                    std::map<int,int> earlyReturnTargets;
+                    for(const ConditionGap& gap:exitGaps)
+                        for(int scan=gap.begin;scan+1<gap.end;++scan){
+                            const int target=directReturnTarget(scan);
+                            if(target>=0){
+                                earlyReturnTargets[scan]=target;
+                                allowedConditions.insert(scan);
+                                allowedJumps.insert(scan+1);
+                            }
+                        }
+                    if(booleanResultTail){
+                        allowedConditions.insert(booleanTestPc);
+                        allowedJumps.insert(booleanTestPc+1);
+                    }
+                    auto branchEntersMiddle=[](const Proto& proto,const Instr& edge,int first,int last){
+                        int target=-1;
+                        if(edge.op==22||edge.op==31||edge.op==32) target=edge.target;
+                        else if(isCondition(edge.op)||edge.op==27||edge.op==33)
+                            target=followingControlTarget(proto,edge);
+                        return target>first&&target<last;
+                    };
+                    for(const Instr& edge:p.code){
+                        if(edge.pc>=pc&&edge.pc<sharedJoin){
+                            if(isCondition(edge.op)&&allowedConditions.count(edge.pc)) continue;
+                            const auto earlyReturn=earlyReturnTargets.find(edge.pc-1);
+                            if(edge.op==22&&allowedJumps.count(edge.pc)&&
+                               (edge.target==sharedJoin||(booleanResultTail&&edge.pc==booleanTestPc+1&&edge.target==sharedJoin+1)||
+                                (earlyReturn!=earlyReturnTargets.end()&&edge.target==earlyReturn->second))) continue;
+                            if(edge.op==22||isCondition(edge.op)||edge.op==27||edge.op==31||edge.op==32||edge.op==33||
+                               (edge.op==2&&edge.c!=0)) commonGuardExit=false;
+                        }else if(branchEntersMiddle(p,edge,pc,handledEnd)){
+                            commonGuardExit=false;
+                        }
+                    }
+                    for(int scan=pc;commonGuardExit&&scan<handledEnd;++scan){
+                        const Instr& instruction=p.code[scan];
+                        if(openResultProducer(instruction)&&!openProducerConsumedInRange(p,scan,sharedJoin))
+                            commonGuardExit=false;
+                        if(instruction.op==28&&instruction.b==0&&openProducerFor(p,instruction)<0)
+                            commonGuardExit=false;
+                    }
+                }
+                if(commonGuardExit){
+                    const std::string flag=booleanResultTail?conditionChainFlagName(p,pc,context):std::string();
+                    const std::string scopePad(size_t(indent+4),' ');
+                    if(booleanResultTail) o<<pad<<"do\n"<<scopePad<<"local "<<flag<<" = false\n";
+                    int nestedIndent=booleanResultTail?indent+4:indent;
+                    auto emitGuardGap=[&](const ConditionGap& gap,int gapIndent){
+                        int cursor=gap.begin;
+                        for(int scan=gap.begin;scan+1<gap.end;++scan){
+                            const int returnTarget=directReturnTarget(scan);
+                            if(returnTarget<0) continue;
+                            if(cursor<scan) emitRange(o,p,cursor,scan,gapIndent,context,true,
+                                                      loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                            o<<std::string(size_t(gapIndent),' ')<<"if "
+                             <<negateConditionExpr(conditionExpr(p,p.code[scan],context))<<" then\n";
+                            emitRange(o,p,returnTarget,returnTarget+1,gapIndent+4,context,false,
+                                      loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                            o<<std::string(size_t(gapIndent),' ')<<"end\n";
+                            cursor=scan+2;
+                            scan++;
+                        }
+                        if(cursor<gap.end) emitRange(o,p,cursor,gap.end,gapIndent,context,true,
+                                                      loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    };
+                    for(size_t testIndex=0;testIndex<exitTests.size();++testIndex){
+                        o<<std::string(size_t(nestedIndent),' ')<<"if "<<exitTests[testIndex].fallthrough<<" then\n";
+                        nestedIndent+=4;
+                        if(testIndex<exitGaps.size()){
+                            const ConditionGap& gap=exitGaps[testIndex];
+                            if(gap.begin<gap.end) emitGuardGap(gap,nestedIndent);
+                        }
+                    }
+                    emitRange(o,p,bodyBegin,guardBodyEnd,nestedIndent,context,true,
+                              loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    if(booleanResultTail){
+                        o<<std::string(size_t(nestedIndent),' ')<<"if "
+                         <<conditionExpr(p,p.code[booleanTestPc],context)<<" then\n"
+                         <<std::string(size_t(nestedIndent+4),' ')<<flag<<" = false\n"
+                         <<std::string(size_t(nestedIndent),' ')<<"else\n"
+                         <<std::string(size_t(nestedIndent+4),' ')<<flag<<" = true\n"
+                         <<std::string(size_t(nestedIndent),' ')<<"end\n";
+                    }
+                    for(size_t testIndex=exitTests.size();testIndex>0;--testIndex){
+                        nestedIndent-=4;
+                        o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                    }
+                    if(booleanResultTail){
+                        o<<scopePad<<"return "<<flag<<"\n"<<pad<<"end\n";
+                        pc=handledEnd;
+                    }else pc=sharedJoin;
                     emittedChain=true;
                 }
             }

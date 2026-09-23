@@ -122,12 +122,19 @@ local function choose(first, second, third)
     if first or second or third then return "truthy" end
     return "falsy"
 end
-return classify, choose
+local function compareWithCalls(a, b, c, d, probe)
+    return a == b and probe("first") == c and probe("second") == d
+end
+return classify, choose, compareWithCalls
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"
 if grep -q 'PC dispatcher' "$TMP/condition-chains.reconstructed.lua"; then
     echo "a short-circuit condition chain was not reconstructed structurally" >&2
+    exit 1
+fi
+if ! grep -q '__byteveil_condition_' "$TMP/condition-chains.reconstructed.lua"; then
+    echo "a call-separated boolean condition chain lost its lazy result structure" >&2
     exit 1
 fi
 "$BYTEVEIL_LUAC51" -p "$TMP/condition-chains.reconstructed.lua"
