@@ -125,7 +125,14 @@ end
 local function compareWithCalls(a, b, c, d, probe)
     return a == b and probe("first") == c and probe("second") == d
 end
-return classify, choose, compareWithCalls
+local function callChainElse(enabled, probe, record)
+    if enabled and probe("first") and probe("second") then
+        record("body")
+    else
+        record("fallback")
+    end
+end
+return classify, choose, compareWithCalls, callChainElse
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"

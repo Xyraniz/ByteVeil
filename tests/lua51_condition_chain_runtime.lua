@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalClassify, originalChoose, originalCompareWithCalls = assert(loadfile(originalPath))()
-local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls = assert(loadfile(reconstructedPath))()
+local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse = assert(loadfile(originalPath))()
+local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse = assert(loadfile(reconstructedPath))()
 
 for _, value in ipairs({"alpha", "beta", "gamma", "delta", "", 0}) do
     assert(reconstructedClassify(value) == originalClassify(value),
@@ -46,4 +46,31 @@ for index, case in ipairs(callCases) do
         assert(reconstructedCalls[callIndex] == name,
             "reconstructed comparison chain evaluated calls out of order")
     end
+end
+
+local elseCases = {
+    {false, {first = true, second = true}, {"fallback"}},
+    {true, {first = false, second = true}, {"probe:first", "fallback"}},
+    {true, {first = true, second = false}, {"probe:first", "probe:second", "fallback"}},
+    {true, {first = true, second = true}, {"probe:first", "probe:second", "body"}},
+}
+for index, case in ipairs(elseCases) do
+    local function run(callChain)
+        local trace = {}
+        local function probe(name)
+            trace[#trace + 1] = "probe:" .. name
+            return case[2][name]
+        end
+        local function record(name)
+            trace[#trace + 1] = name
+        end
+        callChain(case[1], probe, record)
+        return trace
+    end
+    local originalTrace = run(originalCallChainElse)
+    local reconstructedTrace = run(reconstructedCallChainElse)
+    assert(table.concat(originalTrace, ",") == table.concat(case[3], ","),
+        "source call-chain else case " .. index .. " differs")
+    assert(table.concat(reconstructedTrace, ",") == table.concat(originalTrace, ","),
+        "reconstructed call-chain else effects differ in case " .. index)
 end

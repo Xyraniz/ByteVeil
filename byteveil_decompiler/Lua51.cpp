@@ -1481,8 +1481,13 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     p.code[sharedJoin+1].b==1&&p.code[sharedJoin+1].c==0&&
                     p.code[sharedJoin+2].op==30&&p.code[sharedJoin+2].a==p.code[sharedJoin].a&&
                     p.code[sharedJoin+2].b==2;
-                const int guardBodyEnd=booleanResultTail?booleanTestPc:sharedJoin;
-                const int handledEnd=booleanResultTail?sharedJoin+3:sharedJoin;
+                const int bodyTailJumpPc=sharedJoin-1;
+                const int elseResume=bodyTailJumpPc>=bodyBegin&&bodyTailJumpPc>=0&&bodyTailJumpPc<end&&
+                    p.code[bodyTailJumpPc].op==22&&p.code[bodyTailJumpPc].target>sharedJoin&&
+                    p.code[bodyTailJumpPc].target<=end?p.code[bodyTailJumpPc].target:-1;
+                const bool sharedElseTail=!booleanResultTail&&elseResume>=0;
+                const int guardBodyEnd=booleanResultTail?booleanTestPc:(sharedElseTail?bodyTailJumpPc:sharedJoin);
+                const int handledEnd=booleanResultTail?sharedJoin+3:(sharedElseTail?elseResume:sharedJoin);
                 bool commonGuardExit=exitTests.size()>=2&&exitGaps.size()+1==exitTests.size()&&
                     guardBodyEnd>=bodyBegin&&handledEnd<=end;
                 if(commonGuardExit){
@@ -1505,6 +1510,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                         allowedConditions.insert(booleanTestPc);
                         allowedJumps.insert(booleanTestPc+1);
                     }
+                    if(sharedElseTail) allowedJumps.insert(bodyTailJumpPc);
                     auto branchEntersMiddle=[](const Proto& proto,const Instr& edge,int first,int last){
                         int target=-1;
                         if(edge.op==22||edge.op==31||edge.op==32) target=edge.target;
@@ -1518,6 +1524,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                             const auto earlyReturn=earlyReturnTargets.find(edge.pc-1);
                             if(edge.op==22&&allowedJumps.count(edge.pc)&&
                                (edge.target==sharedJoin||(booleanResultTail&&edge.pc==booleanTestPc+1&&edge.target==sharedJoin+1)||
+                                (sharedElseTail&&edge.pc==bodyTailJumpPc&&edge.target==elseResume)||
                                 (earlyReturn!=earlyReturnTargets.end()&&edge.target==earlyReturn->second))) continue;
                             if(edge.op==22||isCondition(edge.op)||edge.op==27||edge.op==31||edge.op==32||edge.op==33||
                                (edge.op==2&&edge.c!=0)) commonGuardExit=false;
@@ -1527,17 +1534,23 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     for(int scan=pc;commonGuardExit&&scan<handledEnd;++scan){
                         const Instr& instruction=p.code[scan];
-                        if(openResultProducer(instruction)&&!openProducerConsumedInRange(p,scan,sharedJoin))
+                        const int producerEnd=sharedElseTail?elseResume:sharedJoin;
+                        if(openResultProducer(instruction)&&!openProducerConsumedInRange(p,scan,producerEnd))
                             commonGuardExit=false;
                         if(instruction.op==28&&instruction.b==0&&openProducerFor(p,instruction)<0)
+                            commonGuardExit=false;
+                        if(sharedElseTail&&scan>=sharedJoin&&
+                           (instruction.op==22||isCondition(instruction.op)||instruction.op==27||instruction.op==31||
+                            instruction.op==32||instruction.op==33||(instruction.op==2&&instruction.c!=0)))
                             commonGuardExit=false;
                     }
                 }
                 if(commonGuardExit){
-                    const std::string flag=booleanResultTail?conditionChainFlagName(p,pc,context):std::string();
+                    const bool needsMatchedFlag=booleanResultTail||sharedElseTail;
+                    const std::string flag=needsMatchedFlag?conditionChainFlagName(p,pc,context):std::string();
                     const std::string scopePad(size_t(indent+4),' ');
-                    if(booleanResultTail) o<<pad<<"do\n"<<scopePad<<"local "<<flag<<" = false\n";
-                    int nestedIndent=booleanResultTail?indent+4:indent;
+                    if(needsMatchedFlag) o<<pad<<"do\n"<<scopePad<<"local "<<flag<<" = false\n";
+                    int nestedIndent=needsMatchedFlag?indent+4:indent;
                     auto emitGuardGap=[&](const ConditionGap& gap,int gapIndent){
                         int cursor=gap.begin;
                         for(int scan=gap.begin;scan+1<gap.end;++scan){
@@ -1566,6 +1579,8 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     emitRange(o,p,bodyBegin,guardBodyEnd,nestedIndent,context,true,
                               loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    if(sharedElseTail)
+                        o<<std::string(size_t(nestedIndent),' ')<<flag<<" = true\n";
                     if(booleanResultTail){
                         o<<std::string(size_t(nestedIndent),' ')<<"if "
                          <<conditionExpr(p,p.code[booleanTestPc],context)<<" then\n"
@@ -1578,9 +1593,18 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                         nestedIndent-=4;
                         o<<std::string(size_t(nestedIndent),' ')<<"end\n";
                     }
+                    if(sharedElseTail){
+                        o<<scopePad<<"if not "<<flag<<" then\n";
+                        emitRange(o,p,sharedJoin,elseResume,indent+8,context,true,
+                                  loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        o<<scopePad<<"end\n";
+                    }
                     if(booleanResultTail){
                         o<<scopePad<<"return "<<flag<<"\n"<<pad<<"end\n";
                         pc=handledEnd;
+                    }else if(sharedElseTail){
+                        o<<pad<<"end\n";
+                        pc=elseResume;
                     }else pc=sharedJoin;
                     emittedChain=true;
                 }
