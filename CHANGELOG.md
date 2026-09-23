@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Preserve Lua 5.1 repeat latches inside conditional blocks
+
+### Corrected
+
+- Conditional bodies now retain their final backward jump when it forms the
+  condition-and-jump latch of a `repeat` loop. The prefix scan also avoids
+  lifting a nested `repeat` out of an earlier conditional branch, while still
+  allowing completed structured loops in the prefix.
+
+### Validation
+
+- Extended Lua 5.1 runtime differential coverage to a `repeat` loop nested in
+  an `if`, checking both flag values and bounds from -1 through 5. The output
+  matches the Lua 5.1 runtime and has no PC dispatcher.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  and compiles with Lua 5.1; PC dispatcher comments fell from 178 to **172**
+  and aggregate output from 8,390,193 to **8,305,657** bytes. The samples were
+  not executed, so parse and compile checks do not establish their behavioral
+  equivalence.
+
 ## Unreleased - Reconstruct shared-exit Lua 5.1 condition chains
 
 ### Changed

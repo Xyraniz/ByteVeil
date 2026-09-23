@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalCheck, originalBounded = assert(loadfile(originalPath))()
-local reconstructedCheck, reconstructedBounded = assert(loadfile(reconstructedPath))()
+local originalCheck, originalBounded, originalCount = assert(loadfile(originalPath))()
+local reconstructedCheck, reconstructedBounded, reconstructedCount = assert(loadfile(reconstructedPath))()
 
 local cases = {
     {false, true, true, "no"},
@@ -23,4 +23,13 @@ for n = 0, 6 do
     local reconstructedResult = reconstructedBounded(n)
     assert(reconstructedResult == originalResult,
         "reconstructed while-and-chain case " .. n .. " differs")
+end
+
+for _, flag in ipairs({false, true}) do
+    for n = -1, 5 do
+        local originalResult = originalCount(flag, n)
+        local reconstructedResult = reconstructedCount(flag, n)
+        assert(reconstructedResult == originalResult,
+            "reconstructed if-repeat case " .. tostring(flag) .. ", " .. n .. " differs")
+    end
 end

@@ -181,7 +181,15 @@ local function bounded(n)
     end
     return total
 end
-return check, bounded
+local function count(flag, n)
+    if flag then
+        repeat
+            n = n - 1
+        until n <= 0
+    end
+    return n
+end
+return check, bounded, count
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/and-chain.luac" "$TMP/and-chain.lua"
 "$BIN" --bytecode "$TMP/and-chain.luac" --format lua > "$TMP/and-chain.reconstructed.lua"

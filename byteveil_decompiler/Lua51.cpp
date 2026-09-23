@@ -887,13 +887,34 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 }
             }
             if(repeatStart>=0&&repeatLatch>=0&&uniqueLatch){
-                if(repeatStart>begin)
-                    emitRange(o,p,begin,repeatStart,indent,context,allowInfiniteLoop,loopBreakTarget);
-                o<<pad<<"repeat\n";
-                emitRange(o,p,repeatStart,repeatLatch,indent+4,context,false,repeatLatch+2);
-                o<<pad<<"until "<<conditionExpr(p,p.code[repeatLatch],context)<<"\n";
-                pc=repeatLatch+2;
-                continue;
+                bool containedPrefix=true;
+                for(int prefix=begin;prefix<repeatStart;++prefix){
+                    const Instr& prior=p.code[prefix];
+                    int takenTarget=-1;
+                    if(prior.op==22) takenTarget=prior.target;
+                    else if(isCondition(prior.op)||prior.op==27||prior.op==33){
+                        if(prefix+1>=int(p.code.size())){containedPrefix=false;break;}
+                        const Instr& skipped=p.code[prefix+1];
+                        takenTarget=skipped.pc+skipped.sbx+1;
+                    }else if(prior.op==31||prior.op==32){
+                        takenTarget=prior.target;
+                    }
+                    const bool skipsPastStart=(prior.op==2&&prior.c&&prefix+2>=repeatStart)||
+                        (prior.op==34&&prior.c==0&&prefix+2>=repeatStart);
+                    if(takenTarget>=repeatStart||skipsPastStart||prior.op==29||prior.op==30){
+                        containedPrefix=false;
+                        break;
+                    }
+                }
+                if(containedPrefix){
+                    if(repeatStart>begin)
+                        emitRange(o,p,begin,repeatStart,indent,context,allowInfiniteLoop,loopBreakTarget);
+                    o<<pad<<"repeat\n";
+                    emitRange(o,p,repeatStart,repeatLatch,indent+4,context,false,repeatLatch+2);
+                    o<<pad<<"until "<<conditionExpr(p,p.code[repeatLatch],context)<<"\n";
+                    pc=repeatLatch+2;
+                    continue;
+                }
             }
         }
         // A closed, entry-anchored back-edge with no jump out of its body is
@@ -1124,8 +1145,19 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
             int trueBegin=pc+2, falseBegin=p.code[pc+1].target;
             int join=falseBegin;
-            if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22 && p.code[falseBegin-1].target>falseBegin){ join=p.code[falseBegin-1].target; }
-            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,(falseBegin-1>=trueBegin&&p.code[falseBegin-1].op==22?p.code[falseBegin-1].pc:falseBegin),indent+4,context,true,loopBreakTarget);
+            int trueEnd=falseBegin;
+            if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22){
+                const Instr& tailJump=p.code[falseBegin-1];
+                const bool repeatLatch=falseBegin-2>=trueBegin && isCondition(p.code[falseBegin-2].op) &&
+                    tailJump.target>=trueBegin && tailJump.target<falseBegin-2;
+                if(tailJump.target>falseBegin){
+                    join=tailJump.target;
+                    trueEnd=falseBegin-1;
+                }else if(!repeatLatch){
+                    trueEnd=falseBegin-1;
+                }
+            }
+            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget);
             if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4,context,true,loopBreakTarget); }
             o<<pad<<"end\n"; pc=join; continue;
         }
