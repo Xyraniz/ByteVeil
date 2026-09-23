@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased - Lua 5.1 open-arity calls and returns
+
+### Added
+
+- The readable lifter now folds an adjacent open-result `CALL` or `VARARG`
+  into a following `CALL`, `TAILCALL`, or `RETURN`. This preserves all values
+  in expression forms such as `consume(fixed, produce(...))`, `consume(...)`,
+  and `return produce(...)` instead of keeping only one result or dropping
+  dynamic arguments.
+- Lua 5.1 JSON now records the producer PC for open-argument calls, open
+  returns, and open tail calls as well as open `SETLIST` instructions.
+
+### Explicit limit
+
+- The fold requires adjacent producer and consumer instructions and a
+  representable register range. Open `SETLIST` tails, separated control-flow
+  paths, and unresolved producers remain visible as diagnostics.
+
+### Validation
+
+- Added Lua 5.1.5 execution regressions for nested multi-result calls,
+  variadic argument forwarding, and returning every result from an open call.
+  Full CTest: **9/9 PASS**.
+- The public MoonSec V3 corpus remains **21/21 parseable**. Open-arity
+  diagnostics fell from **2,327 to 10**, and aggregate lifted output fell from
+  **4,811,490** to **4,662,317** bytes.
+
 ## Unreleased - Lua 5.1 conditional and shared-range recovery
 
 ### Corrected

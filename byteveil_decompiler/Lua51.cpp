@@ -240,6 +240,10 @@ static void parseProto(Reader& r, Proto& p, int& next, int parent, int depth) {
             else i.setlistBlock=i.c;
             if(i.b==0)for(int prev=int(pc)-1;prev>=0;--prev)if(p.code[prev].op==28||p.code[prev].op==29||p.code[prev].op==37){i.openProducer=prev;break;}
         }
+        else if((i.op==28||i.op==29||i.op==30)&&i.b==0){
+            for(int prev=int(pc)-1;prev>=0;--prev)
+                if(p.code[prev].op==28||p.code[prev].op==29||p.code[prev].op==37){i.openProducer=prev;break;}
+        }
         p.code.push_back(i);
     }
     uint32_t nk=r.u32(); if(nk>1000000-r.totalConstants) throw std::runtime_error("Lua constant limit exceeded"); r.totalConstants+=nk; for(uint32_t i=0;i<nk;i++){ConstantInfo info=constant(r);p.constants.push_back(info.lua);p.constantTable.push_back(std::move(info));}
@@ -460,6 +464,66 @@ static std::string renderedArgs(const Proto& p,int a,int b,int pc,const RenderCo
     return result.str();
 }
 
+static bool openResultProducer(const Instr& instruction){
+    return (instruction.op==28&&instruction.c==0)||(instruction.op==37&&instruction.b==0);
+}
+static int openProducerFor(const Proto& p,const Instr& consumer){
+    if(consumer.openProducer<0||consumer.openProducer>=consumer.pc||consumer.openProducer+1!=consumer.pc)
+        return -1;
+    const Instr& producer=p.code[size_t(consumer.openProducer)];
+    return openResultProducer(producer)?consumer.openProducer:-1;
+}
+static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth);
+static std::string renderedOpenArgs(const Proto& p,const Instr& consumer,const RenderContext& context,int depth){
+    if(depth>32) return {};
+    const int producerPc=openProducerFor(p,consumer);
+    if(producerPc<0||p.code[size_t(producerPc)].a<consumer.a+1) return {};
+    std::ostringstream result;
+    for(int regIndex=consumer.a+1;regIndex<p.code[size_t(producerPc)].a;regIndex++){
+        if(regIndex>consumer.a+1) result<<", ";
+        result<<renderedValueAt(p,regIndex,consumer.pc,context);
+    }
+    const std::string tail=openProducerExpression(p,producerPc,context,depth+1);
+    if(tail.empty()) return {};
+    if(p.code[size_t(producerPc)].a>consumer.a+1) result<<", ";
+    result<<tail;
+    return result.str();
+}
+static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
+    if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return {};
+    const Instr& producer=p.code[size_t(producerPc)];
+    if(producer.op==37&&producer.b==0) return "...";
+    if(producer.op!=28||producer.c!=0) return {};
+    const std::string fn=renderedValueAt(p,producer.a,producer.pc,context);
+    const std::string callArgs=producer.b==0
+        ?renderedOpenArgs(p,producer,context,depth+1)
+        :renderedArgs(p,producer.a,producer.b,producer.pc,context);
+    if(producer.b==0&&callArgs.empty()) return {};
+    return fn+"("+callArgs+")";
+}
+static bool openProducerConsumedInRange(const Proto& p,int producerPc,int end){
+    if(producerPc<0||producerPc+1>=end||producerPc+1>=int(p.code.size())) return false;
+    const Instr& producer=p.code[size_t(producerPc)];
+    const Instr& consumer=p.code[size_t(producerPc+1)];
+    if(!openResultProducer(producer)||openProducerFor(p,consumer)!=producerPc) return false;
+    return ((consumer.op==28||consumer.op==29)&&consumer.b==0)||
+           (consumer.op==30&&consumer.b==0);
+}
+static std::string renderedOpenReturnValues(const Proto& p,const Instr& consumer,const RenderContext& context){
+    const int producerPc=openProducerFor(p,consumer);
+    if(producerPc<0||p.code[size_t(producerPc)].a<consumer.a) return {};
+    std::ostringstream result;
+    for(int regIndex=consumer.a;regIndex<p.code[size_t(producerPc)].a;regIndex++){
+        if(regIndex>consumer.a) result<<", ";
+        result<<renderedValueAt(p,regIndex,consumer.pc,context);
+    }
+    const std::string tail=openProducerExpression(p,producerPc,context,0);
+    if(tail.empty()) return {};
+    if(p.code[size_t(producerPc)].a>consumer.a) result<<", ";
+    result<<tail;
+    return result.str();
+}
+
 static void emitRegisterDeclarations(std::ostringstream& o,const Proto& p,const RenderContext& context,int indent,int firstRegister){
     std::set<std::string> names;
     for(int regIndex=firstRegister;regIndex<p.maxstack;++regIndex){
@@ -558,18 +622,31 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 21:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<" .. "<<renderedLocal(p,i.c,i.pc,context)<<"\n";break;
     case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<renderedLocal(p,i.a,i.pc,context)<<" from "<<renderedLocal(p,i.b,i.pc,context)<<" (C="<<i.c<<")\n";break;
     case 28:{
-        if(i.b==0||i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open "<<(i.b==0?"arguments":"results")<<"\n";
-        if(i.c==1)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";
+        const std::string callArgs=i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has unresolved open arguments\n";
+        if(i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";
+        if(i.c==1)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";
         else {
             int results=i.c==0?1:i.c-1;
             o<<pad;
             for(int r=0;r<results;r++){if(r)o<<", ";o<<renderedLocal(p,i.a+r,i.pc,context);}
-            o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";
+            o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";
         }
         break;
     }
-    case 29:if(i.b==0)o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has open arguments\n";o<<pad<<"return "<<renderedValueAt(p,i.a,i.pc,context)<<"("<<renderedArgs(p,i.a,i.b,i.pc,context)<<")\n";break;
-    case 30:{if(i.b==0)o<<pad<<"-- ByteVeil: RETURN at pc "<<i.pc<<" has an open result tail\n";int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<renderedValueAt(p,i.a+k,i.pc,context);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;}
+    case 29:{
+        const std::string callArgs=i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has unresolved open arguments\n";
+        o<<pad<<"return "<<renderedValueAt(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";break;
+    }
+    case 30:{
+        if(i.b==0){
+            const std::string values=renderedOpenReturnValues(p,i,context);
+            if(!values.empty()){o<<pad<<"return "<<values<<"\n";break;}
+            o<<pad<<"-- ByteVeil: RETURN at pc "<<i.pc<<" has an unresolved open result tail\n";
+        }
+        int n=i.b==0?1:i.b-1;if(n==0){o<<pad<<"return\n";break;}o<<pad<<"return ";for(int k=0;k<n;k++){if(k)o<<", ";o<<renderedValueAt(p,i.a+k,i.pc,context);}if(i.b==0&&(p.vararg&2))o<<", ...";o<<"\n";break;
+    }
     case 31:o<<pad<<"-- ByteVeil: FORLOOP at pc "<<i.pc<<" was not paired with FORPREP\n";break;
     case 32:o<<pad<<"-- ByteVeil: FORPREP at pc "<<i.pc<<" was not paired with FORLOOP\n";break;
     case 33:o<<pad<<"-- ByteVeil: TFORLOOP at pc "<<i.pc<<" was not paired with its entry jump\n";break;
@@ -594,7 +671,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
             o<<pad<<"end\n";
         }else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";
         break;
-    case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n";o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = nil\n";}else if(i.b==0)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = ... -- open vararg results\n";else{o<<pad<<renderedLocal(p,i.a,i.pc,context);for(int k=1;k<i.b-1;k++)o<<", "<<renderedLocal(p,i.a+k,i.pc,context);o<<" = ...\n";}break;
+    case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n"<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = nil\n";}else if(i.b==0)o<<pad<<"-- ByteVeil: VARARG at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";else{o<<pad<<renderedLocal(p,i.a,i.pc,context);for(int k=1;k<i.b-1;k++)o<<", "<<renderedLocal(p,i.a+k,i.pc,context);o<<" = ...\n";}break;
     case -1:o<<pad<<"-- ByteVeil: SETLIST extra block word "<<i.setlistBlock<<" consumed at pc "<<i.pc<<"\n";break;
     default:o<<pad<<"-- ByteVeil: unsupported opcode retained: "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" at pc "<<i.pc<<"\n";break;
     }
@@ -763,7 +840,8 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             for(int f=pc+1;f<end && f<=pc+4;f++)
                 if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
         }
-        if(!loopSetup && !returnSetup) emitSimple(o,p,i,indent,context);
+        const bool inlineOpenResults=openProducerConsumedInRange(p,pc,end);
+        if(!loopSetup && !returnSetup && !inlineOpenResults) emitSimple(o,p,i,indent,context);
         if(i.op==29 || i.op==30) break;
         if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;
@@ -774,7 +852,7 @@ static void readableProto(std::ostringstream& o,const Proto& p){
     const RenderContext rootContext;
     emitRegisterDeclarations(o,p,rootContext,0,0);
     emitRange(o,p,0,int(p.code.size()),0,rootContext);
-    if(p.id==0 && (p.code.empty()||p.code.back().op!=30)) o<<"return nil\n";
+    if(p.id==0 && (p.code.empty()||(p.code.back().op!=29&&p.code.back().op!=30))) o<<"return nil\n";
 }
 
 [[maybe_unused]] static void liftProto(std::ostringstream& o,const Proto& p){

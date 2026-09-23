@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -209,6 +209,44 @@ open(sys.argv[23], "wb").write(build(
     [comparison_with_polarity(0), jmp(1, 5), comparison_with_polarity(0),
      jmp(3, 7), loadk_then_r2, loadk_else_r2, return_r2, return_r2],
     [(4, b"inside-range"), (4, b"range-tail")], maxstack=3))
+
+# Open CALL results become the final argument expression of the next CALL.
+# This is equivalent to consume("fixed", produce("payload")), including all
+# values returned by produce.
+def getglobal(a, bx):
+    return 5 | (a << 6) | (bx << 14)
+
+def loadk(a, bx):
+    return 1 | (a << 6) | (bx << 14)
+
+def call(a, b, c):
+    return 28 | (a << 6) | (c << 14) | (b << 23)
+
+def ret(a, b):
+    return 30 | (a << 6) | (b << 23)
+
+open(sys.argv[24], "wb").write(build(
+    [getglobal(0, 0), loadk(1, 1), getglobal(2, 2), loadk(3, 3),
+     call(2, 2, 0), call(0, 0, 1), ret(0, 1)],
+    [(4, b"consume"), (4, b"fixed"), (4, b"produce"), (4, b"payload")], maxstack=4))
+
+# An open VARARG followed by CALL B=0 must retain the full argument tail.
+vararg_open = 37 | (1 << 6)
+open(sys.argv[25], "wb").write(build(
+    [getglobal(0, 0), vararg_open, call(0, 0, 1), ret(0, 1)],
+    [(4, b"consume")], maxstack=2))
+
+# CALL C=0 followed by RETURN B=0 is the source-level `return produce(...)`;
+# a fixed result slot must not truncate the function's open result list.
+open(sys.argv[26], "wb").write(build(
+    [getglobal(0, 0), loadk(1, 1), call(0, 2, 0), ret(0, 0)],
+    [(4, b"produce"), (4, b"payload")], maxstack=2))
+
+# TAILCALL B=0 forwards all varargs and returns the callee's full result list.
+tailcall_open = 29 | (0 << 6)
+open(sys.argv[27], "wb").write(build(
+    [getglobal(0, 0), vararg_open, tailcall_open],
+    [(4, b"consume")], maxstack=2))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -294,16 +332,48 @@ grep -Fq 'if (r0 == r1) then' "$TMP/eq-a0.lua"
 "$BIN" --bytecode "$TMP/branch-range-escape.luac" --format lua >"$TMP/branch-range-escape.lua"
 grep -Fq 'branch at pc 2 exits current structured range to pc 7' "$TMP/branch-range-escape.lua"
 test "$(grep -Fc '"range-tail"' "$TMP/branch-range-escape.lua")" -eq 1
+"$BIN" --bytecode "$TMP/open-call-chain.luac" --format lua >"$TMP/open-call-chain.lua"
+grep -Fq 'r0("fixed", r2("payload"))' "$TMP/open-call-chain.lua"
+if grep -q 'open results not consumed' "$TMP/open-call-chain.lua" || grep -q 'unresolved open arguments' "$TMP/open-call-chain.lua"; then
+    echo "nested open CALL was not reconstructed" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-vararg-call.luac" --format lua >"$TMP/open-vararg-call.lua"
+grep -Fq 'r0(...)' "$TMP/open-vararg-call.lua"
+if grep -q 'open results not consumed' "$TMP/open-vararg-call.lua" || grep -q 'unresolved open arguments' "$TMP/open-vararg-call.lua"; then
+    echo "open VARARG was not reconstructed as a full argument tail" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-return-call.luac" --format lua >"$TMP/open-return-call.lua"
+grep -Fq 'return r0("payload")' "$TMP/open-return-call.lua"
+if grep -q 'open results not consumed' "$TMP/open-return-call.lua" || grep -q 'unresolved open result tail' "$TMP/open-return-call.lua"; then
+    echo "open CALL results were not reconstructed by RETURN" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-tailcall.luac" --format lua >"$TMP/open-tailcall.lua"
+grep -Fq 'return r0(...)' "$TMP/open-tailcall.lua"
+if grep -q 'unresolved open arguments' "$TMP/open-tailcall.lua"; then
+    echo "open TAILCALL arguments were not reconstructed" >&2
+    exit 1
+fi
 if command -v lua5.1 >/dev/null 2>&1; then
     MOVE_COPY_PATH="$TMP/move-overwritten-source.lua"
     EQ_A1_PATH="$TMP/eq-a1.lua"
     EQ_A0_PATH="$TMP/eq-a0.lua"
+    OPEN_CALL_PATH="$TMP/open-call-chain.lua"
+    OPEN_VARARG_PATH="$TMP/open-vararg-call.lua"
+    OPEN_RETURN_PATH="$TMP/open-return-call.lua"
+    OPEN_TAILCALL_PATH="$TMP/open-tailcall.lua"
     if command -v cygpath >/dev/null 2>&1; then
         MOVE_COPY_PATH="$(cygpath -m "$MOVE_COPY_PATH")"
         EQ_A1_PATH="$(cygpath -m "$EQ_A1_PATH")"
         EQ_A0_PATH="$(cygpath -m "$EQ_A0_PATH")"
+        OPEN_CALL_PATH="$(cygpath -m "$OPEN_CALL_PATH")"
+        OPEN_VARARG_PATH="$(cygpath -m "$OPEN_VARARG_PATH")"
+        OPEN_RETURN_PATH="$(cygpath -m "$OPEN_RETURN_PATH")"
+        OPEN_TAILCALL_PATH="$(cygpath -m "$OPEN_TAILCALL_PATH")"
     fi
-    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then')"
+    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then'); captured=nil; produce=function(x) return x..'-one', x..'-two' end; consume=function(...) captured={...} end; assert(dofile('$OPEN_CALL_PATH') == nil); assert(#captured==3 and captured[1]=='fixed' and captured[2]=='payload-one' and captured[3]=='payload-two'); captured=nil; local openvararg=assert(loadfile('$OPEN_VARARG_PATH')); openvararg('alpha','beta'); assert(#captured==2 and captured[1]=='alpha' and captured[2]=='beta'); local openreturn=assert(loadfile('$OPEN_RETURN_PATH')); local first,second=openreturn(); assert(first=='payload-one' and second=='payload-two'); consume=function(...) return ... end; local opentail=assert(loadfile('$OPEN_TAILCALL_PATH')); first,second=opentail('gamma','delta'); assert(first=='gamma' and second=='delta')"
 fi
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"
