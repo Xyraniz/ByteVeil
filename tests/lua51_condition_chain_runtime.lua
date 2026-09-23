@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue, originalCaptureBoundary = assert(loadfile(originalPath))()
-local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue, reconstructedCaptureBoundary = assert(loadfile(reconstructedPath))()
+local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue, originalCaptureBoundary, originalIncrementOrFallback = assert(loadfile(originalPath))()
+local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue, reconstructedCaptureBoundary, reconstructedIncrementOrFallback = assert(loadfile(reconstructedPath))()
 
 for _, value in ipairs({"alpha", "beta", "gamma", "delta", "", 0}) do
     assert(reconstructedClassify(value) == originalClassify(value),
@@ -126,4 +126,19 @@ for index, case in ipairs(captureBoundaryCases) do
         "source TESTSET boundary case " .. index .. " differs")
     assert(reconstructedResult == originalResult and reconstructedCalls == originalCalls,
         "reconstructed TESTSET boundary result differs in case " .. index)
+end
+
+local incrementCases = {
+    {2, "fallback", 3},
+    {-1, "fallback", 0},
+    {0, "fallback", 1},
+    {false, "fallback", "fallback"},
+    {nil, "fallback", "fallback"},
+}
+for index, case in ipairs(incrementCases) do
+    local originalResult = originalIncrementOrFallback(case[1], case[2])
+    local reconstructedResult = reconstructedIncrementOrFallback(case[1], case[2])
+    assert(originalResult == case[3], "source nested-test case " .. index .. " differs")
+    assert(reconstructedResult == originalResult,
+        "reconstructed nested-test branch differs in case " .. index)
 end

@@ -1724,15 +1724,16 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             int trueEnd=falseBegin;
             if(falseBegin-1>=trueBegin && p.code[falseBegin-1].op==22){
                 const Instr& tailJump=p.code[falseBegin-1];
-                const bool testSetOwnsTailJump=falseBegin-2>=trueBegin&&
-                    p.code[falseBegin-2].op==27&&tailJump.target>=falseBegin;
+                const bool predicateOwnsTailJump=falseBegin-2>=trueBegin&&
+                    (p.code[falseBegin-2].op==27||isCondition(p.code[falseBegin-2].op))&&
+                    tailJump.target>=falseBegin;
                 const bool repeatLatch=falseBegin-2>=trueBegin && isCondition(p.code[falseBegin-2].op) &&
                     tailJump.target>=trueBegin && tailJump.target<falseBegin-2;
                 if(tailJump.target>falseBegin){
                     join=tailJump.target;
-                    trueEnd=testSetOwnsTailJump?join:falseBegin-1;
+                    trueEnd=predicateOwnsTailJump?join:falseBegin-1;
                 }else if(tailJump.target==falseBegin&&!repeatLatch){
-                    trueEnd=testSetOwnsTailJump?falseBegin:falseBegin-1;
+                    trueEnd=predicateOwnsTailJump?falseBegin:falseBegin-1;
                 }
             }
             o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget,loopContinueTarget,loopBreakFlag);

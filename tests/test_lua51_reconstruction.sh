@@ -142,7 +142,10 @@ local function captureBoundary(tag, maybeGetter)
     end
     return function() return tag end
 end
-return classify, choose, compareWithCalls, callChainElse, mixedValue, captureBoundary
+local function incrementOrFallback(value, fallback)
+    return value and (value + 1) or fallback
+end
+return classify, choose, compareWithCalls, callChainElse, mixedValue, captureBoundary, incrementOrFallback
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"
