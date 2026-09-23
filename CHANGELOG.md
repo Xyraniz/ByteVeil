@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Preserve Lua 5.1 calls with multiple results
+
+### Corrected
+
+- Direct global-call folding now preserves the destination registers of calls
+  that return values. Previously, folding `ipairs(values)` could discard its
+  iterator, state, and control values, changing generic-for behavior. Folding
+  is limited to matching one-argument tail calls and calls whose results are
+  explicitly discarded.
+
+### Validation
+
+- Added a Lua 5.1 runtime differential regression for an `ipairs` loop with an
+  early return, including empty, matching, and non-matching inputs. Its
+  irreducible control flow remains in the PC dispatcher to preserve semantics.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  and compiles with Lua 5.1; the corpus has 181 PC dispatcher comments and
+  totals 8,408,589 bytes. Samples were not executed, so parse and compile checks
+  do not establish behavioral equivalence for the obfuscated corpus.
+
 ## Unreleased - Reconstruct loop exits and repeat bodies
 
 ### Corrected

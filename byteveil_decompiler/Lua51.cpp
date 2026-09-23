@@ -925,12 +925,14 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 continue;
             }
         }
-        // GETGLOBAL/MOVE/CALL (or TAILCALL) is the common compiler shape for
-        // a direct global call. Emit the source-level call and consume the
-        // temporary function/argument registers.
+        // GETGLOBAL/MOVE/CALL is safe to collapse only for a one-argument
+        // tail call or a call whose results are explicitly discarded. Calls
+        // producing iterator triples and other results must keep their
+        // destination registers.
         if(i.op==5 && pc+2<end && p.code[pc+1].op==0 &&
            (p.code[pc+2].op==28 || p.code[pc+2].op==29) &&
-           p.code[pc+2].a==i.a){
+           p.code[pc+2].a==i.a && p.code[pc+1].a==p.code[pc+2].a+1 && p.code[pc+2].b==2 &&
+           (p.code[pc+2].op==29 || p.code[pc+2].c==1)){
             const Instr& call=p.code[pc+2];
             std::string fn=i.bx<int(p.constants.size())?p.constants[i.bx]:"_G[\"unknown\"]";
             if(fn.size()>=2 && fn.front()=='"' && fn.back()=='"') fn=fn.substr(1,fn.size()-2);

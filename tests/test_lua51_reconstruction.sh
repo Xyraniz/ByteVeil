@@ -149,4 +149,23 @@ if command -v cygpath >/dev/null 2>&1; then
     LOOP_BREAKS_RECONSTRUCTED_PATH="$(cygpath -m "$LOOP_BREAKS_RECONSTRUCTED_PATH")"
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_break_runtime.lua" "$LOOP_BREAKS_ORIGINAL_PATH" "$LOOP_BREAKS_RECONSTRUCTED_PATH"
+cat >"$TMP/loop-early-return.lua" <<'LUA'
+local function findValue(values)
+    for _, value in ipairs(values) do
+        if value == "stop" then return value end
+    end
+    return "missing"
+end
+return findValue
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/loop-early-return.luac" "$TMP/loop-early-return.lua"
+"$BIN" --bytecode "$TMP/loop-early-return.luac" --format lua > "$TMP/loop-early-return.reconstructed.lua"
+"$BYTEVEIL_LUAC51" -p "$TMP/loop-early-return.reconstructed.lua"
+LOOP_RETURN_ORIGINAL_PATH="$TMP/loop-early-return.lua"
+LOOP_RETURN_RECONSTRUCTED_PATH="$TMP/loop-early-return.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    LOOP_RETURN_ORIGINAL_PATH="$(cygpath -m "$LOOP_RETURN_ORIGINAL_PATH")"
+    LOOP_RETURN_RECONSTRUCTED_PATH="$(cygpath -m "$LOOP_RETURN_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_return_runtime.lua" "$LOOP_RETURN_ORIGINAL_PATH" "$LOOP_RETURN_RECONSTRUCTED_PATH"
 printf 'Lua 5.1 reconstruction tests: PASS\n'
