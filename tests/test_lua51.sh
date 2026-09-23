@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -266,8 +266,9 @@ open(sys.argv[29], "wb").write(build(
 test = lambda a, c: 26 | (a << 6) | (c << 14)
 open(sys.argv[30], "wb").write(build(
     [loadk(1, 0), getglobal(0, 1), test(0, 0), jmp(3, 9), getglobal(2, 2),
-     test(2, 0), jmp(6, 10), loadk(1, 3), jmp(8, 10), loadk(1, 4), ret(1, 2)],
-    [(4, b"default"), (4, b"flag"), (4, b"inner"), (4, b"left"), (4, b"right")], maxstack=3))
+     test(2, 0), jmp(6, 10), loadk(1, 3), jmp(8, 10), loadk(1, 4), ret(1, 2),
+     getglobal(0, 5), 29 | (1 << 23), ret(0, 0)],
+    [(4, b"default"), (4, b"flag"), (4, b"inner"), (4, b"left"), (4, b"right"), (4, b"exit")], maxstack=3))
 
 # One branch enters a CALL directly while the other first executes its
 # adjacent SELF. The CALL must not be rendered with colon syntax on both paths.
@@ -275,6 +276,23 @@ open(sys.argv[31], "wb").write(build(
     [getglobal(0, 0), getglobal(1, 1), getglobal(2, 2), test(2, 0), jmp(4, 6),
      11 | (1 << 23) | (259 << 14), call(0, 2, 2), ret(0, 2)],
     [(4, b"plain"), (4, b"object"), (4, b"flag"), (4, b"ping")], maxstack=3))
+
+# An open CALL tail extends fixed table-list values, including nil results,
+# and SETLIST must retain the register-to-array index offset.
+open(sys.argv[32], "wb").write(build(
+    [10, loadk(1, 0), getglobal(2, 1), loadk(3, 2), call(2, 2, 0),
+     34 | (1 << 14), ret(0, 2)],
+    [(4, b"prefix"), (4, b"produce"), (4, b"payload")], maxstack=4))
+
+open(sys.argv[33], "wb").write(build(
+    [10, vararg_open, 34 | (1 << 14), ret(0, 2)], [], maxstack=2, vararg=2))
+
+# A jump can enter an open-argument CALL while bypassing its adjacent producer;
+# keep both operations explicit instead of folding across that edge.
+open(sys.argv[34], "wb").write(build(
+    [getglobal(0, 0), test(0, 0), jmp(2, 6), getglobal(1, 1), loadk(2, 2),
+     call(1, 2, 0), call(0, 0, 1), ret(0, 1)],
+    [(4, b"flag"), (4, b"produce"), (4, b"payload")], maxstack=3))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -405,9 +423,30 @@ if grep -Fq 'branch at pc ' "$TMP/nested-branch-exit.lua"; then
     echo "non-reducible nested branch was left as a diagnostic" >&2
     exit 1
 fi
+if grep -Fq 'RETURN at pc 13 has an unresolved open result tail' "$TMP/nested-branch-exit.lua"; then
+    echo "the return after a terminal TAILCALL was emitted as reachable" >&2
+    exit 1
+fi
 "$BIN" --bytecode "$TMP/colon-flow-entry.luac" --format lua >"$TMP/colon-flow-entry.lua"
 if grep -Fq ':ping(' "$TMP/colon-flow-entry.lua"; then
     echo "a branch that skips SELF was incorrectly rendered as a colon call" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-setlist.luac" --format lua >"$TMP/open-setlist.lua"
+if grep -q 'has an open value tail' "$TMP/open-setlist.lua"; then
+    echo "adjacent open results were dropped by SETLIST" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-setlist-vararg.luac" --format lua >"$TMP/open-setlist-vararg.lua"
+if grep -q 'has an open value tail' "$TMP/open-setlist-vararg.lua"; then
+    echo "open VARARG results were dropped by SETLIST" >&2
+    exit 1
+fi
+"$BIN" --bytecode "$TMP/open-branch-entry.luac" --format lua >"$TMP/open-branch-entry.lua"
+grep -Fq 'has open results not consumed' "$TMP/open-branch-entry.lua"
+grep -Fq 'has unresolved open arguments' "$TMP/open-branch-entry.lua"
+if grep -Fq 'r0(r1("payload"))' "$TMP/open-branch-entry.lua"; then
+    echo "open results were folded across a branch that bypasses the producer" >&2
     exit 1
 fi
 if command -v lua5.1 >/dev/null 2>&1; then
@@ -422,6 +461,8 @@ if command -v lua5.1 >/dev/null 2>&1; then
     COLON_OPEN_PATH="$TMP/colon-open-call.lua"
     NESTED_BRANCH_PATH="$TMP/nested-branch-exit.lua"
     COLON_FLOW_PATH="$TMP/colon-flow-entry.lua"
+    OPEN_SETLIST_PATH="$TMP/open-setlist.lua"
+    OPEN_SETLIST_VARARG_PATH="$TMP/open-setlist-vararg.lua"
     if command -v cygpath >/dev/null 2>&1; then
         MOVE_COPY_PATH="$(cygpath -m "$MOVE_COPY_PATH")"
         EQ_A1_PATH="$(cygpath -m "$EQ_A1_PATH")"
@@ -434,8 +475,10 @@ if command -v lua5.1 >/dev/null 2>&1; then
         COLON_OPEN_PATH="$(cygpath -m "$COLON_OPEN_PATH")"
         NESTED_BRANCH_PATH="$(cygpath -m "$NESTED_BRANCH_PATH")"
         COLON_FLOW_PATH="$(cygpath -m "$COLON_FLOW_PATH")"
+        OPEN_SETLIST_PATH="$(cygpath -m "$OPEN_SETLIST_PATH")"
+        OPEN_SETLIST_VARARG_PATH="$(cygpath -m "$OPEN_SETLIST_VARARG_PATH")"
     fi
-    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then'); captured=nil; produce=function(x) return x..'-one', x..'-two' end; consume=function(...) captured={...} end; assert(dofile('$OPEN_CALL_PATH') == nil); assert(#captured==3 and captured[1]=='fixed' and captured[2]=='payload-one' and captured[3]=='payload-two'); captured=nil; local openvararg=assert(loadfile('$OPEN_VARARG_PATH')); openvararg('alpha','beta'); assert(#captured==2 and captured[1]=='alpha' and captured[2]=='beta'); local openreturn=assert(loadfile('$OPEN_RETURN_PATH')); local first,second=openreturn(); assert(first=='payload-one' and second=='payload-two'); consume=function(...) return ... end; local opentail=assert(loadfile('$OPEN_TAILCALL_PATH')); first,second=opentail('gamma','delta'); assert(first=='gamma' and second=='delta'); ping_called=false; object={ping=function(self) assert(self==object); ping_called=true end}; assert(dofile('$COLON_SELF_PATH') == nil); assert(ping_called); captured=nil; object={ping=function(self) assert(self==object); return 'method-one','method-two' end}; consume=function(...) captured={...} end; assert(dofile('$COLON_OPEN_PATH') == nil); assert(#captured==2 and captured[1]=='method-one' and captured[2]=='method-two'); flag=true; inner=false; assert(dofile('$NESTED_BRANCH_PATH')=='default'); flag=true; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='left'); flag=false; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='right'); local plain_calls,method_calls=0,0; plain=function(value) plain_calls=plain_calls+1; return 'plain' end; object={ping=function(self) assert(self==object); method_calls=method_calls+1; return 'method' end}; flag=false; assert(dofile('$COLON_FLOW_PATH')=='plain'); flag=true; assert(dofile('$COLON_FLOW_PATH')=='method'); assert(plain_calls==1 and method_calls==1)"
+    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then'); captured=nil; produce=function(x) return x..'-one', x..'-two' end; consume=function(...) captured={...} end; assert(dofile('$OPEN_CALL_PATH') == nil); assert(#captured==3 and captured[1]=='fixed' and captured[2]=='payload-one' and captured[3]=='payload-two'); captured=nil; local openvararg=assert(loadfile('$OPEN_VARARG_PATH')); openvararg('alpha','beta'); assert(#captured==2 and captured[1]=='alpha' and captured[2]=='beta'); local openreturn=assert(loadfile('$OPEN_RETURN_PATH')); local first,second=openreturn(); assert(first=='payload-one' and second=='payload-two'); consume=function(...) return ... end; local opentail=assert(loadfile('$OPEN_TAILCALL_PATH')); first,second=opentail('gamma','delta'); assert(first=='gamma' and second=='delta'); ping_called=false; object={ping=function(self) assert(self==object); ping_called=true end}; assert(dofile('$COLON_SELF_PATH') == nil); assert(ping_called); captured=nil; object={ping=function(self) assert(self==object); return 'method-one','method-two' end}; consume=function(...) captured={...} end; assert(dofile('$COLON_OPEN_PATH') == nil); assert(#captured==2 and captured[1]=='method-one' and captured[2]=='method-two'); flag=true; inner=false; assert(dofile('$NESTED_BRANCH_PATH')=='default'); flag=true; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='left'); flag=false; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='right'); local plain_calls,method_calls=0,0; plain=function(value) plain_calls=plain_calls+1; return 'plain' end; object={ping=function(self) assert(self==object); method_calls=method_calls+1; return 'method' end}; flag=false; assert(dofile('$COLON_FLOW_PATH')=='plain'); flag=true; assert(dofile('$COLON_FLOW_PATH')=='method'); assert(plain_calls==1 and method_calls==1); produce=function(value) return value..'-head', nil, value..'-tail' end; local listed=dofile('$OPEN_SETLIST_PATH'); assert(listed[1]=='prefix' and listed[2]=='payload-head' and listed[3]==nil and listed[4]=='payload-tail'); local listvararg=assert(loadfile('$OPEN_SETLIST_VARARG_PATH')); local variadic=listvararg('one', nil, 'three'); assert(variadic[1]=='one' and variadic[2]==nil and variadic[3]=='three')"
 fi
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"

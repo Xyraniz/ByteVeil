@@ -470,9 +470,11 @@ static std::string renderedArgs(const Proto& p,int a,int b,int pc,const RenderCo
 static bool openResultProducer(const Instr& instruction){
     return (instruction.op==28&&instruction.c==0)||(instruction.op==37&&instruction.b==0);
 }
+static bool hasControlEntryAt(const Proto& p,int targetPc);
 static int openProducerFor(const Proto& p,const Instr& consumer){
     if(consumer.openProducer<0||consumer.openProducer>=consumer.pc||consumer.openProducer+1!=consumer.pc)
         return -1;
+    if(hasControlEntryAt(p,consumer.pc)) return -1;
     const Instr& producer=p.code[size_t(consumer.openProducer)];
     return openResultProducer(producer)?consumer.openProducer:-1;
 }
@@ -515,7 +517,7 @@ static bool openProducerConsumedInRange(const Proto& p,int producerPc,int end){
     const Instr& consumer=p.code[size_t(producerPc+1)];
     if(!openResultProducer(producer)||openProducerFor(p,consumer)!=producerPc) return false;
     return ((consumer.op==28||consumer.op==29)&&consumer.b==0)||
-           (consumer.op==30&&consumer.b==0);
+           (consumer.op==30&&consumer.b==0)||(consumer.op==34&&consumer.b==0);
 }
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
     if(selfPc<0||callPc!=selfPc+1||callPc>=int(p.code.size())) return false;
@@ -634,6 +636,28 @@ static RenderContext closureContext(const Proto& p,const Instr& closure,const Re
 }
 static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister);
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true);
+static bool emitOpenSetList(std::ostringstream& o,const Proto& p,const Instr& setlist,int indent,const RenderContext& context){
+    const int producerPc=openProducerFor(p,setlist);
+    if(producerPc<0) return false;
+    const Instr& producer=p.code[size_t(producerPc)];
+    const std::string tail=openProducerExpression(p,producerPc,context,0);
+    if(tail.empty()) return false;
+    const int firstRegister=setlist.a+1;
+    const int prefixEnd=std::max(firstRegister,producer.a);
+    const int skipped=std::max(0,firstRegister-producer.a);
+    const int base=(setlist.setlistBlock-1)*50;
+    const std::string pad(size_t(indent),' ');
+    o<<pad<<"(function(__table, __base, __skip, ...)\n"
+     <<pad<<"    local __values = { n = _G[\"select\"](\"#\", ...), ... }\n"
+     <<pad<<"    for __index = __skip + 1, __values.n do\n"
+     <<pad<<"        __table[__base + __index - __skip] = __values[__index]\n"
+     <<pad<<"    end\n"
+     <<pad<<"end)("<<renderedLocal(p,setlist.a,setlist.pc,context)<<", "<<base<<", "<<skipped;
+    for(int regIndex=firstRegister;regIndex<prefixEnd;regIndex++)
+        o<<", "<<renderedValueAt(p,regIndex,setlist.pc,context);
+    o<<", "<<tail<<")\n";
+    return true;
+}
 static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false){
     std::string pad(indent,' ');
     if(i.closureBindingFor>=0) return;
@@ -688,7 +712,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 31:o<<pad<<"-- ByteVeil: FORLOOP at pc "<<i.pc<<" was not paired with FORPREP\n";break;
     case 32:o<<pad<<"-- ByteVeil: FORPREP at pc "<<i.pc<<" was not paired with FORLOOP\n";break;
     case 33:o<<pad<<"-- ByteVeil: TFORLOOP at pc "<<i.pc<<" was not paired with its entry jump\n";break;
-    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<base+k<<"] = "<<renderedLocal(p,i.a+k,i.pc,context)<<"\n";}else o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
+    case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<base+k<<"] = "<<renderedLocal(p,i.a+k,i.pc,context)<<"\n";}else if(!emitOpenSetList(o,p,i,indent,context))o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
     case 35:o<<pad<<"-- ByteVeil: CLOSE registers >= "<<i.a<<"; captured upvalues remain represented\n";break;
     case 36:
         if(size_t(i.bx)<p.children.size()){
@@ -1008,7 +1032,7 @@ static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,con
         else if(i.op==32){addLeader(i.pc+1);addLeader(i.target);}
         else if(i.op==33){addLeader(i.pc+1);addLeader(i.pc+2);addLeader(followingControlTarget(p,i));}
         else if(i.op==2&&i.c){addLeader(i.pc+1);addLeader(i.pc+2);}
-        else if(i.op==29||i.op==30){addLeader(i.pc+1);}
+        else if(i.op==30){addLeader(i.pc+1);}
         else if(i.op==34&&i.c==0){addLeader(i.pc+2);}
         else if(i.op==36){addLeader(i.pc+1+int(i.captures.size()));}
     }

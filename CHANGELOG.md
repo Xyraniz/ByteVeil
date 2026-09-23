@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased - Lua 5.1 open SETLIST tails and terminal returns
+
+### Added
+
+- `SETLIST B=0` now consumes an adjacent open-result `CALL` or `VARARG`. The
+  generated helper counts and packs every result before writing table indices,
+  preserving nil holes as well as fixed values that precede the call.
+- Open producer folding is disabled when a control-flow edge can enter the
+  consumer without executing that producer.
+- The PC dispatcher treats `TAILCALL` as terminal. Its following compiler
+  `RETURN` is no longer emitted as a reachable block unless a real branch
+  targets it.
+
+### Explicit limit
+
+- `CLOSE` still appears as a diagnostic. Closure lifetimes across reused
+  registers are not fully reconstructed, so those cases need separate work.
+
+### Validation
+
+- Added Lua 5.1.5 execution coverage for open `CALL` and `VARARG` table tails
+  with fixed prefixes and nil results, plus a `TAILCALL`/`RETURN` sentinel.
+  Full CTest: **9/9 PASS**.
+- All **21/21** public MoonSec V3 sample outputs parse as Lua 5.1, with **0**
+  remaining open-tail diagnostics. Aggregate output is **9,327,466** bytes.
+
 ## Unreleased - Lua 5.1 non-reducible branch recovery
 
 ### Added
@@ -16,8 +42,9 @@
 ### Explicit limit
 
 - The dispatcher is intentionally register-oriented and less idiomatic than
-  structured Lua. Open `SETLIST` tails and unresolved open-result flows remain
-  visible diagnostics; this change does not claim complete semantic recovery.
+  structured Lua. Open-result flows are folded only when their producer and
+  consumer are adjacent and no branch bypasses the producer; other unsupported
+  shapes remain visible diagnostics.
 
 ### Validation
 
@@ -27,9 +54,9 @@
   The pass removed **270** lost-branch markers and **212** unsupported
   comparison/test markers. Aggregate output is **9,330,518** bytes; the first
   per-instruction dispatcher was **28,244,981** bytes on the same corpus.
-- Open-tail diagnostics remain explicit: **10** `CALL` sites, **4** `VARARG`
-  sites, **7** `RETURN` tails, and **10** `SETLIST` tails. These counts can
-  overlap when one producer feeds another operation.
+- At this intermediate revision, open-tail diagnostics remained explicit:
+  **10** `CALL` sites, **4** `VARARG` sites, **7** `RETURN` tails, and **10**
+  `SETLIST` tails. The follow-up above removes those adjacent supported cases.
 
 ## Unreleased - Lua 5.1 method-call recovery
 
