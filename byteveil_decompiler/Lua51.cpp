@@ -53,7 +53,7 @@ struct Instr {
     std::vector<CaptureInfo> captures;
 };
 struct ConstantInfo { std::string type; std::string lua; std::string value; std::string stringBytesHex; };
-struct Proto { int id=0,parent=-1,linedefined=0,lastline=0,nups=0,params=0,vararg=0,maxstack=0; std::string source; std::vector<int> lines; std::vector<LocalInfo> locals; std::vector<std::string> upvalues; std::vector<Instr> code; std::vector<std::string> constants; std::vector<ConstantInfo> constantTable; std::vector<Proto> children; };
+struct Proto { int id=0,parent=-1,linedefined=0,lastline=0,nups=0,params=0,vararg=0,maxstack=0; std::string source; std::vector<int> lines; std::vector<LocalInfo> locals; std::vector<std::string> upvalues; std::vector<Instr> code; std::vector<std::string> constants; std::vector<ConstantInfo> constantTable; std::vector<Proto> children; std::vector<char> capturedRegisters,managedCapturedRegisters; };
 
 static const char* ops[] = {"MOVE","LOADK","LOADBOOL","LOADNIL","GETUPVAL","GETGLOBAL","GETTABLE","SETGLOBAL","SETUPVAL","SETTABLE","NEWTABLE","SELF","ADD","SUB","MUL","DIV","MOD","POW","UNM","NOT","LEN","CONCAT","JMP","EQ","LT","LE","TEST","TESTSET","CALL","TAILCALL","RETURN","FORLOOP","FORPREP","TFORLOOP","SETLIST","CLOSE","CLOSURE","VARARG"};
 static const char* opName(int op) { return op==-1 ? "EXTRAARG" : op>=0 && op<38 ? ops[op] : "UNKNOWN"; }
@@ -130,6 +130,7 @@ static void advanced(std::ostringstream& o,const Proto& p){
 }
 
 static void associateClosureCaptures(Proto& p){
+    p.capturedRegisters.assign(size_t(p.maxstack),0);
     for(int pc=0;pc<int(p.code.size());++pc){
         Instr& closure=p.code[pc];
         if(closure.op!=36) continue;
@@ -148,11 +149,22 @@ static void associateClosureCaptures(Proto& p){
             binding.closureBindingFor=closure.pc;
             binding.captureSlot=slot;
             closure.captures.push_back({binding.pc,binding.b,binding.op==4});
+            if(binding.op==0&&binding.b>=0&&binding.b<p.maxstack)
+                p.capturedRegisters[size_t(binding.b)]=1;
         }
         // A valid binding cannot itself be CLOSURE, so no later closure is
         // skipped.  Advancing avoids treating the pseudo-instructions as
         // regular bytecode during this association pass.
         pc+=expected;
+    }
+    p.managedCapturedRegisters.assign(size_t(p.maxstack),0);
+    for(const Instr& instruction:p.code){
+        const int firstClosed=instruction.op==35?instruction.a:
+            instruction.op==22&&instruction.a>0?instruction.a-1:-1;
+        if(firstClosed<0) continue;
+        for(int registerIndex=firstClosed;registerIndex<p.maxstack;++registerIndex)
+            if(p.capturedRegisters[size_t(registerIndex)])
+                p.managedCapturedRegisters[size_t(registerIndex)]=1;
     }
 }
 
@@ -377,17 +389,37 @@ struct RenderContext {
     // Entries point at lexical variables in the enclosing emitted function.
     // They are created from the CLOSURE pseudo-instructions, never guessed.
     std::vector<std::string> capturedUpvalues;
+    // Managed upvalues point at a one-slot cell so CLOSE can detach the
+    // current register while older closures keep the cell they captured.
+    std::vector<std::string> capturedUpvalueCells;
     bool stateMachine=false;
 };
 
-static std::string renderedLocal(const Proto& p,int registerIndex,int pc,const RenderContext& context){
-    (void)context;
+static bool managedCapturedLocal(const Proto& p,int registerIndex){
+    return registerIndex>=0&&registerIndex<int(p.managedCapturedRegisters.size())&&
+        p.managedCapturedRegisters[size_t(registerIndex)]!=0;
+}
+static std::string renderedRegisterName(const Proto& p,int registerIndex,int pc,const RenderContext& context){
     if(context.stateMachine) return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
     // Root names remain compact for readable diagnostics.  Nested prototypes
     // need their own register namespace so an inner r0 cannot shadow an outer
     // r0 captured by a closure.
     if(p.id==0) return localReg(p,registerIndex,pc);
     return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
+}
+static std::string capturedCellName(const Proto& p,int registerIndex,const RenderContext& context){
+    (void)context;
+    std::string name="__byteveil_upcell_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
+    auto conflicts=[&](const std::string& candidate){
+        for(const LocalInfo& local:p.locals) if(validIdentifier(local.name)&&local.name==candidate) return true;
+        return false;
+    };
+    while(conflicts(name)) name.push_back('_');
+    return name;
+}
+static std::string renderedLocal(const Proto& p,int registerIndex,int pc,const RenderContext& context){
+    const std::string name=renderedRegisterName(p,registerIndex,pc,context);
+    return managedCapturedLocal(p,registerIndex)?capturedCellName(p,registerIndex,context)+"[1]":name;
 }
 
 static std::string renderedUpvalue(const Proto& p,int index,const RenderContext& context){
@@ -564,17 +596,26 @@ static std::string renderedOpenReturnValues(const Proto& p,const Instr& consumer
 static void emitRegisterDeclarations(std::ostringstream& o,const Proto& p,const RenderContext& context,int indent,int firstRegister){
     std::set<std::string> names;
     for(int regIndex=firstRegister;regIndex<p.maxstack;++regIndex){
+        if(managedCapturedLocal(p,regIndex)) continue;
         if(p.id==0){
             names.insert(renderedLocal(p,regIndex,0,context));
             for(const Instr& instruction:p.code)
                 names.insert(renderedLocal(p,regIndex,instruction.pc,context));
         }else names.insert(renderedLocal(p,regIndex,0,context));
     }
-    if(names.empty()) return;
-    o<<std::string(size_t(indent),' ')<<"local ";
-    bool first=true;
-    for(const std::string& name:names){ if(!first)o<<", "; o<<name; first=false; }
-    o<<"\n";
+    if(!names.empty()){
+        o<<std::string(size_t(indent),' ')<<"local ";
+        bool first=true;
+        for(const std::string& name:names){ if(!first)o<<", "; o<<name; first=false; }
+        o<<"\n";
+    }
+    for(int regIndex=0;regIndex<p.maxstack;++regIndex){
+        if(!managedCapturedLocal(p,regIndex)) continue;
+        o<<std::string(size_t(indent),' ')<<"local "<<capturedCellName(p,regIndex,context)<<" = {";
+        if(regIndex<p.params) o<<renderedRegisterName(p,regIndex,0,context);
+        else o<<"nil";
+        o<<"}\n";
+    }
 }
 static void liftFunctionBody(std::ostringstream& o,const Proto& p){
     for(const auto&i:p.code){
@@ -624,13 +665,53 @@ static std::string conditionExpr(const Proto& p,const Instr& i,const RenderConte
     // A, so A=1 requires the negated expression here.
     return i.a ? "not "+comparison : comparison;
 }
-static RenderContext closureContext(const Proto& p,const Instr& closure,const RenderContext& parent){
+static std::string closureCaptureCellSource(const Proto& p,const CaptureInfo& capture,const RenderContext& parent){
+    if(capture.fromUpvalue){
+        if(capture.sourceIndex>=0&&capture.sourceIndex<int(parent.capturedUpvalueCells.size()))
+            return parent.capturedUpvalueCells[size_t(capture.sourceIndex)];
+        return {};
+    }
+    return managedCapturedLocal(p,capture.sourceIndex)?capturedCellName(p,capture.sourceIndex,parent):std::string();
+}
+static std::string closureCaptureParameterName(const Proto& child,int slot,const RenderContext& context){
+    std::string name="__byteveil_capture_f"+std::to_string(child.id)+"_u"+std::to_string(slot);
+    auto conflicts=[&](const std::string& candidate){
+        for(const LocalInfo& local:child.locals) if(validIdentifier(local.name)&&local.name==candidate) return true;
+        for(int regIndex=0;regIndex<child.maxstack;++regIndex){
+            if(renderedRegisterName(child,regIndex,0,context)==candidate) return true;
+            if(managedCapturedLocal(child,regIndex)&&capturedCellName(child,regIndex,context)==candidate) return true;
+        }
+        return false;
+    };
+    while(conflicts(name)) name.push_back('_');
+    return name;
+}
+static bool emitCapturedCellClose(std::ostringstream& o,const Proto& p,int firstRegister,int indent,const RenderContext& context){
+    bool detached=false;
+    const std::string pad(size_t(indent),' ');
+    for(int registerIndex=std::max(0,firstRegister);registerIndex<p.maxstack;++registerIndex){
+        if(!managedCapturedLocal(p,registerIndex)) continue;
+        const std::string cell=capturedCellName(p,registerIndex,context);
+        o<<pad<<cell<<" = {"<<cell<<"[1]}\n";
+        detached=true;
+    }
+    return detached;
+}
+static RenderContext closureContext(const Proto& p,const Instr& closure,const RenderContext& parent,const std::vector<std::string>& captureCellParameters){
     RenderContext result;
     result.capturedUpvalues.reserve(closure.captures.size());
-    for(const CaptureInfo& capture:closure.captures){
-        result.capturedUpvalues.push_back(capture.fromUpvalue
-            ? renderedUpvalue(p,capture.sourceIndex,parent)
-            : renderedLocal(p,capture.sourceIndex,capture.bindingPc,parent));
+    result.capturedUpvalueCells.reserve(closure.captures.size());
+    for(size_t slot=0;slot<closure.captures.size();++slot){
+        const CaptureInfo& capture=closure.captures[slot];
+        if(slot<captureCellParameters.size()&&!captureCellParameters[slot].empty()){
+            result.capturedUpvalues.push_back(captureCellParameters[slot]+"[1]");
+            result.capturedUpvalueCells.push_back(captureCellParameters[slot]);
+        }else{
+            result.capturedUpvalues.push_back(capture.fromUpvalue
+                ? renderedUpvalue(p,capture.sourceIndex,parent)
+                : renderedLocal(p,capture.sourceIndex,capture.bindingPc,parent));
+            result.capturedUpvalueCells.emplace_back();
+        }
     }
     return result;
 }
@@ -713,25 +794,54 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 32:o<<pad<<"-- ByteVeil: FORPREP at pc "<<i.pc<<" was not paired with FORLOOP\n";break;
     case 33:o<<pad<<"-- ByteVeil: TFORLOOP at pc "<<i.pc<<" was not paired with its entry jump\n";break;
     case 34: if(i.b>0){int base=(i.setlistBlock-1)*50;for(int k=1;k<=i.b;k++)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<base+k<<"] = "<<renderedLocal(p,i.a+k,i.pc,context)<<"\n";}else if(!emitOpenSetList(o,p,i,indent,context))o<<pad<<"-- ByteVeil: SETLIST at pc "<<i.pc<<" has an open value tail\n";break;
-    case 35:o<<pad<<"-- ByteVeil: CLOSE registers >= "<<i.a<<"; captured upvalues remain represented\n";break;
+    case 35:{
+        const bool detached=emitCapturedCellClose(o,p,i.a,indent,context);
+        if(!detached)o<<pad<<"-- ByteVeil: CLOSE registers >= "<<i.a<<"; no captured local cell was found\n";
+        break;
+    }
     case 36:
         if(size_t(i.bx)<p.children.size()){
             const Proto& child=p.children[i.bx];
-            RenderContext childContext=closureContext(p,i,context);
+            std::vector<std::string> captureCellSources(i.captures.size());
+            std::vector<std::string> captureCellParameters(i.captures.size());
+            for(size_t slot=0;slot<i.captures.size();++slot){
+                captureCellSources[slot]=closureCaptureCellSource(p,i.captures[slot],context);
+                if(!captureCellSources[slot].empty())
+                    captureCellParameters[slot]=closureCaptureParameterName(child,int(slot),context);
+            }
+            const bool wrapCaptures=std::any_of(captureCellParameters.begin(),captureCellParameters.end(),
+                [](const std::string& name){return !name.empty();});
+            RenderContext childContext=closureContext(p,i,context,captureCellParameters);
             std::ostringstream childBody;
-            emitReadableBody(childBody,child,childContext,indent+4,child.params);
+            emitReadableBody(childBody,child,childContext,indent+(wrapCaptures?8:4),child.params);
             for(size_t slot=0;slot<i.captures.size();++slot){
                 const CaptureInfo& capture=i.captures[slot];
                 o<<pad<<"-- ByteVeil: CLOSURE pc "<<i.pc<<" captures upvalue "<<slot<<" from "
-                 <<(capture.fromUpvalue?"parent upvalue ":"local register ")<<childContext.capturedUpvalues[slot]
+                 <<(capture.fromUpvalue?"parent upvalue "+upvalue(p,capture.sourceIndex):
+                    "local register "+renderedRegisterName(p,capture.sourceIndex,capture.bindingPc,context))
                  <<" (binding pc "<<capture.bindingPc<<")\n";
             }
-            o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = function(";
-            for(int k=0;k<child.params;k++){if(k)o<<", ";o<<renderedLocal(child,k,0,childContext);}
+            o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = ";
+            if(wrapCaptures){
+                o<<"(function(";
+                bool first=true;
+                for(const std::string& parameter:captureCellParameters) if(!parameter.empty()){
+                    if(!first)o<<", ";o<<parameter;first=false;
+                }
+                o<<")\n"<<pad<<"    return function(";
+            }else o<<"function(";
+            for(int k=0;k<child.params;k++){if(k)o<<", ";o<<renderedRegisterName(child,k,0,childContext);}
             if(child.vararg&2){if(child.params)o<<", ";o<<"...";}
             o<<")\n";
             o<<childBody.str();
-            o<<pad<<"end\n";
+            if(wrapCaptures){
+                o<<pad<<"    end\n"<<pad<<"end)(";
+                bool first=true;
+                for(size_t slot=0;slot<captureCellParameters.size();++slot) if(!captureCellParameters[slot].empty()){
+                    if(!first)o<<", ";o<<captureCellSources[slot];first=false;
+                }
+                o<<")\n";
+            }else o<<pad<<"end\n";
         }else o<<pad<<"-- ByteVeil: CLOSURE child index "<<i.bx<<" unavailable\n";
         break;
     case 37:if(!(p.vararg&2)){o<<pad<<"-- ByteVeil: VARARG used by a non-variadic prototype\n"<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = nil\n";}else if(i.b==0)o<<pad<<"-- ByteVeil: VARARG at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";else{o<<pad<<renderedLocal(p,i.a,i.pc,context);for(int k=1;k<i.b-1;k++)o<<", "<<renderedLocal(p,i.a+k,i.pc,context);o<<" = ...\n";}break;
@@ -932,6 +1042,25 @@ static bool needsPcDispatcher(const std::string& source){
     for(const char* marker:markers) if(source.find(marker)!=std::string::npos) return true;
     return false;
 }
+static bool hasJumpClose(const Proto& p){
+    for(const Instr& instruction:p.code){
+        if(instruction.op!=22||instruction.a<=0) continue;
+        for(int registerIndex=instruction.a-1;registerIndex<p.maxstack;++registerIndex)
+            if(managedCapturedLocal(p,registerIndex)) return true;
+    }
+    return false;
+}
+static bool hasCapturedLoopVariables(const Proto& p){
+    for(const Instr& instruction:p.code){
+        if(instruction.op==31||instruction.op==32){
+            if(managedCapturedLocal(p,instruction.a+3)) return true;
+        }else if(instruction.op==33){
+            for(int registerIndex=instruction.a+3;registerIndex<instruction.a+3+instruction.c;++registerIndex)
+                if(managedCapturedLocal(p,registerIndex)) return true;
+        }
+    }
+    return false;
+}
 static std::string dispatcherPcName(const Proto& p,const RenderContext& context){
     std::set<std::string> names;
     for(const LocalInfo& local:p.locals) if(validIdentifier(local.name)) names.insert(local.name);
@@ -955,18 +1084,33 @@ static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& bloc
     for(int pc=block.start;pc<block.end;){
         const Instr& i=p.code[size_t(pc)];
         if(i.closureBindingFor>=0||i.extraWord){++pc;continue;}
-        if(i.op==22){o<<pad<<pcName<<" = "<<i.target<<"\n";return;}
+        if(i.op==22){
+            if(i.a>0) emitCapturedCellClose(o,p,i.a-1,indent,context);
+            o<<pad<<pcName<<" = "<<i.target<<"\n";
+            return;
+        }
         if(isCondition(i.op)||i.op==27){
             const int target=followingControlTarget(p,i);
+            const Instr* closeJump=i.pc+1<int(p.code.size())&&p.code[size_t(i.pc+1)].op==22
+                ? &p.code[size_t(i.pc+1)] : nullptr;
+            const bool closesJump=closeJump&&closeJump->a>0;
             if(i.op==23||i.op==24||i.op==25){
                 const std::string lhs=renderedValue(p,i.b,i.pc,context),rhs=renderedValue(p,i.c,i.pc,context);
                 const char* op=i.op==23?" == ":i.op==24?" < ":" <= ";
-                o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then "<<pcName<<" = "<<target
-                 <<" else "<<pcName<<" = "<<i.pc+2<<" end\n";
+                if(closesJump){
+                    o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then\n";
+                    emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
+                    o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<target<<"\n"
+                     <<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
+                }else{
+                    o<<pad<<"if ("<<lhs<<op<<rhs<<") == "<<(i.a?"true":"false")<<" then "<<pcName<<" = "<<target
+                     <<" else "<<pcName<<" = "<<i.pc+2<<" end\n";
+                }
             }else{
                 const int testRegister=i.op==27?i.b:i.a;
                 o<<pad<<"if (not "<<renderedLocal(p,testRegister,i.pc,context)<<") ~= "<<(i.c?"true":"false")<<" then\n";
                 if(i.op==27)o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"\n";
+                if(closesJump) emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
                 o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<target<<"\n";
                 o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
             }
@@ -990,11 +1134,15 @@ static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& bloc
             return;
         }
         if(i.op==33){
+            const Instr* closeJump=i.pc+1<int(p.code.size())&&p.code[size_t(i.pc+1)].op==22
+                ? &p.code[size_t(i.pc+1)] : nullptr;
             o<<pad;
             for(int result=0;result<i.c;result++){if(result)o<<", ";o<<renderedLocal(p,i.a+3+result,i.pc,context);}
             o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<renderedLocal(p,i.a+1,i.pc,context)<<", "<<renderedLocal(p,i.a+2,i.pc,context)<<")\n";
             o<<pad<<"if "<<renderedLocal(p,i.a+3,i.pc,context)<<" ~= nil then\n";
             o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a+2,i.pc,context)<<" = "<<renderedLocal(p,i.a+3,i.pc,context)<<"\n";
+            if(closeJump&&closeJump->a>0)
+                emitCapturedCellClose(o,p,closeJump->a-1,indent+4,context);
             o<<std::string(size_t(indent+4),' ')<<pcName<<" = "<<followingControlTarget(p,i)<<"\n";
             o<<pad<<"else "<<pcName<<" = "<<i.pc+2<<" end\n";
             return;
@@ -1039,7 +1187,9 @@ static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,con
     std::vector<int> starts(leaders.begin(),leaders.end());
     std::vector<PcBlock> blocks;
     for(size_t n=0;n<starts.size();n++) blocks.push_back({starts[n],n+1<starts.size()?starts[n+1]:int(p.code.size())});
-    o<<pad<<"-- ByteVeil: PC dispatcher preserves non-reducible control flow in function "<<p.id<<"\n";
+    o<<pad<<"-- ByteVeil: PC dispatcher preserves "
+     <<(hasJumpClose(p)?"Lua 5.1 jump-close semantics and control flow in function ":"non-reducible control flow in function ")
+     <<p.id<<"\n";
     o<<pad<<"local "<<pcName<<" = 0\n";
     o<<pad<<"while "<<pcName<<" >= 0 and "<<pcName<<" < "<<p.code.size()<<" do\n";
     std::function<void(size_t,size_t,int)> dispatch=[&](size_t first,size_t last,int level){
@@ -1066,7 +1216,7 @@ static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext&
     }
     std::ostringstream structured;
     emitRange(structured,p,0,int(p.code.size()),indent,context);
-    if(needsPcDispatcher(structured.str())){
+    if(hasJumpClose(p)||hasCapturedLoopVariables(p)||needsPcDispatcher(structured.str())){
         context.stateMachine=true;
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
         emitPcDispatcher(o,p,indent,context);

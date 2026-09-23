@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-close-captured-register.luac" "$TMP/conditional-jump-close-captured-register.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -293,6 +293,36 @@ open(sys.argv[34], "wb").write(build(
     [getglobal(0, 0), test(0, 0), jmp(2, 6), getglobal(1, 1), loadk(2, 2),
      call(1, 2, 0), call(0, 0, 1), ret(0, 1)],
     [(4, b"flag"), (4, b"produce"), (4, b"payload")], maxstack=3))
+
+# Closing a captured register detaches earlier closures from later reuse of
+# the same register. The two returned functions must keep different values.
+closure_local_r2 = 36 | (2 << 6)
+binding_move_from_r0 = 0
+settable_r1_k1_from_r2 = 9 | (1 << 6) | (257 << 23) | (2 << 14)
+settable_r1_k3_from_r2 = 9 | (1 << 6) | (259 << 23) | (2 << 14)
+getupval_then_return = [4, ret(0, 2)]
+open(sys.argv[35], "wb").write(build(
+    [loadk(0, 0), 10 | (1 << 6), closure_local_r2, binding_move_from_r0, settable_r1_k1_from_r2,
+     35, loadk(0, 2), closure_local_r2, binding_move_from_r0,
+     settable_r1_k3_from_r2, ret(1, 2)],
+    [(3, 1), (3, 1), (3, 2), (3, 2)], maxstack=3,
+    children=[dict(code=getupval_then_return, constants=[], maxstack=1, nups=1)]))
+open(sys.argv[36], "wb").write(build(
+    [loadk(0, 0), 10 | (1 << 6), closure_local_r2, binding_move_from_r0, settable_r1_k1_from_r2,
+     22 | (1 << 6) | (131071 << 14), loadk(0, 2), closure_local_r2, binding_move_from_r0,
+     settable_r1_k3_from_r2, ret(1, 2)],
+    [(3, 1), (3, 1), (3, 2), (3, 2)], maxstack=3,
+    children=[dict(code=getupval_then_return, constants=[], maxstack=1, nups=1)]))
+conditional_jump_close = 22 | (1 << 6) | (131071 << 14)
+conditional_close_code = [
+    loadk(0, 0), 10 | (1 << 6), closure_local_r2, binding_move_from_r0,
+    settable_r1_k1_from_r2, 5 | (3 << 6) | (3 << 14), 26 | (3 << 6),
+    conditional_jump_close, loadk(0, 2), closure_local_r2, binding_move_from_r0,
+    9 | (1 << 6) | (258 << 23) | (2 << 14), 30 | (1 << 6) | (2 << 23),
+]
+open(sys.argv[37], "wb").write(build(
+    conditional_close_code, [(3, 1), (3, 1), (3, 2), (4, b"flag")], maxstack=4,
+    children=[dict(code=getupval_then_return, constants=[], maxstack=1, nups=1)]))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -449,6 +479,10 @@ if grep -Fq 'r0(r1("payload"))' "$TMP/open-branch-entry.lua"; then
     echo "open results were folded across a branch that bypasses the producer" >&2
     exit 1
 fi
+"$BIN" --bytecode "$TMP/close-captured-register.luac" --format lua >"$TMP/close-captured-register.lua"
+"$BIN" --bytecode "$TMP/jump-close-captured-register.luac" --format lua >"$TMP/jump-close-captured-register.lua"
+grep -q 'PC dispatcher preserves Lua 5.1 jump-close semantics and control flow in function 0' "$TMP/jump-close-captured-register.lua"
+"$BIN" --bytecode "$TMP/conditional-jump-close-captured-register.luac" --format lua >"$TMP/conditional-jump-close-captured-register.lua"
 if command -v lua5.1 >/dev/null 2>&1; then
     MOVE_COPY_PATH="$TMP/move-overwritten-source.lua"
     EQ_A1_PATH="$TMP/eq-a1.lua"
@@ -463,6 +497,9 @@ if command -v lua5.1 >/dev/null 2>&1; then
     COLON_FLOW_PATH="$TMP/colon-flow-entry.lua"
     OPEN_SETLIST_PATH="$TMP/open-setlist.lua"
     OPEN_SETLIST_VARARG_PATH="$TMP/open-setlist-vararg.lua"
+    CLOSE_CAPTURED_PATH="$TMP/close-captured-register.lua"
+    JMP_CLOSE_CAPTURED_PATH="$TMP/jump-close-captured-register.lua"
+    CONDITIONAL_JMP_CLOSE_PATH="$TMP/conditional-jump-close-captured-register.lua"
     if command -v cygpath >/dev/null 2>&1; then
         MOVE_COPY_PATH="$(cygpath -m "$MOVE_COPY_PATH")"
         EQ_A1_PATH="$(cygpath -m "$EQ_A1_PATH")"
@@ -477,8 +514,11 @@ if command -v lua5.1 >/dev/null 2>&1; then
         COLON_FLOW_PATH="$(cygpath -m "$COLON_FLOW_PATH")"
         OPEN_SETLIST_PATH="$(cygpath -m "$OPEN_SETLIST_PATH")"
         OPEN_SETLIST_VARARG_PATH="$(cygpath -m "$OPEN_SETLIST_VARARG_PATH")"
+        CLOSE_CAPTURED_PATH="$(cygpath -m "$CLOSE_CAPTURED_PATH")"
+        JMP_CLOSE_CAPTURED_PATH="$(cygpath -m "$JMP_CLOSE_CAPTURED_PATH")"
+        CONDITIONAL_JMP_CLOSE_PATH="$(cygpath -m "$CONDITIONAL_JMP_CLOSE_PATH")"
     fi
-    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then'); captured=nil; produce=function(x) return x..'-one', x..'-two' end; consume=function(...) captured={...} end; assert(dofile('$OPEN_CALL_PATH') == nil); assert(#captured==3 and captured[1]=='fixed' and captured[2]=='payload-one' and captured[3]=='payload-two'); captured=nil; local openvararg=assert(loadfile('$OPEN_VARARG_PATH')); openvararg('alpha','beta'); assert(#captured==2 and captured[1]=='alpha' and captured[2]=='beta'); local openreturn=assert(loadfile('$OPEN_RETURN_PATH')); local first,second=openreturn(); assert(first=='payload-one' and second=='payload-two'); consume=function(...) return ... end; local opentail=assert(loadfile('$OPEN_TAILCALL_PATH')); first,second=opentail('gamma','delta'); assert(first=='gamma' and second=='delta'); ping_called=false; object={ping=function(self) assert(self==object); ping_called=true end}; assert(dofile('$COLON_SELF_PATH') == nil); assert(ping_called); captured=nil; object={ping=function(self) assert(self==object); return 'method-one','method-two' end}; consume=function(...) captured={...} end; assert(dofile('$COLON_OPEN_PATH') == nil); assert(#captured==2 and captured[1]=='method-one' and captured[2]=='method-two'); flag=true; inner=false; assert(dofile('$NESTED_BRANCH_PATH')=='default'); flag=true; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='left'); flag=false; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='right'); local plain_calls,method_calls=0,0; plain=function(value) plain_calls=plain_calls+1; return 'plain' end; object={ping=function(self) assert(self==object); method_calls=method_calls+1; return 'method' end}; flag=false; assert(dofile('$COLON_FLOW_PATH')=='plain'); flag=true; assert(dofile('$COLON_FLOW_PATH')=='method'); assert(plain_calls==1 and method_calls==1); produce=function(value) return value..'-head', nil, value..'-tail' end; local listed=dofile('$OPEN_SETLIST_PATH'); assert(listed[1]=='prefix' and listed[2]=='payload-head' and listed[3]==nil and listed[4]=='payload-tail'); local listvararg=assert(loadfile('$OPEN_SETLIST_VARARG_PATH')); local variadic=listvararg('one', nil, 'three'); assert(variadic[1]=='one' and variadic[2]==nil and variadic[3]=='three')"
+    lua5.1 -e "object='saved'; callback=function(value) return value end; local copied=assert(loadfile('$MOVE_COPY_PATH')); assert(copied() == 'saved'); assert(dofile('$EQ_A1_PATH') == 'else'); assert(dofile('$EQ_A0_PATH') == 'then'); captured=nil; produce=function(x) return x..'-one', x..'-two' end; consume=function(...) captured={...} end; assert(dofile('$OPEN_CALL_PATH') == nil); assert(#captured==3 and captured[1]=='fixed' and captured[2]=='payload-one' and captured[3]=='payload-two'); captured=nil; local openvararg=assert(loadfile('$OPEN_VARARG_PATH')); openvararg('alpha','beta'); assert(#captured==2 and captured[1]=='alpha' and captured[2]=='beta'); local openreturn=assert(loadfile('$OPEN_RETURN_PATH')); local first,second=openreturn(); assert(first=='payload-one' and second=='payload-two'); consume=function(...) return ... end; local opentail=assert(loadfile('$OPEN_TAILCALL_PATH')); first,second=opentail('gamma','delta'); assert(first=='gamma' and second=='delta'); ping_called=false; object={ping=function(self) assert(self==object); ping_called=true end}; assert(dofile('$COLON_SELF_PATH') == nil); assert(ping_called); captured=nil; object={ping=function(self) assert(self==object); return 'method-one','method-two' end}; consume=function(...) captured={...} end; assert(dofile('$COLON_OPEN_PATH') == nil); assert(#captured==2 and captured[1]=='method-one' and captured[2]=='method-two'); flag=true; inner=false; assert(dofile('$NESTED_BRANCH_PATH')=='default'); flag=true; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='left'); flag=false; inner=true; assert(dofile('$NESTED_BRANCH_PATH')=='right'); local plain_calls,method_calls=0,0; plain=function(value) plain_calls=plain_calls+1; return 'plain' end; object={ping=function(self) assert(self==object); method_calls=method_calls+1; return 'method' end}; flag=false; assert(dofile('$COLON_FLOW_PATH')=='plain'); flag=true; assert(dofile('$COLON_FLOW_PATH')=='method'); assert(plain_calls==1 and method_calls==1); produce=function(value) return value..'-head', nil, value..'-tail' end; local listed=dofile('$OPEN_SETLIST_PATH'); assert(listed[1]=='prefix' and listed[2]=='payload-head' and listed[3]==nil and listed[4]=='payload-tail'); local listvararg=assert(loadfile('$OPEN_SETLIST_VARARG_PATH')); local variadic=listvararg('one', nil, 'three'); assert(variadic[1]=='one' and variadic[2]==nil and variadic[3]=='three'); local closed=dofile('$CLOSE_CAPTURED_PATH'); assert(closed[1]()==1 and closed[2]()==2); local jumpclosed=dofile('$JMP_CLOSE_CAPTURED_PATH'); assert(jumpclosed[1]()==1 and jumpclosed[2]()==2); flag=false; local conditionalclosed=dofile('$CONDITIONAL_JMP_CLOSE_PATH'); assert(conditionalclosed[1]()==1 and conditionalclosed[2]()==2); flag=true; conditionalclosed=dofile('$CONDITIONAL_JMP_CLOSE_PATH'); assert(conditionalclosed[1]()==2 and conditionalclosed[2]()==2)"
 fi
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"
@@ -503,7 +543,7 @@ if grep -q '^r255 = r0$' "$TMP/closure-local.lua"; then
     echo "CLOSURE local capture was emitted as a standalone MOVE" >&2
     exit 1
 fi
-grep -q '^    -- ByteVeil: CLOSURE pc 0 captures upvalue 0 from parent upvalue r0 (binding pc 1)$' "$TMP/closure-nested.lua"
+grep -Fq 'ByteVeil: CLOSURE pc 0 captures upvalue 0 from parent upvalue __upvalue_0 (binding pc 1)' "$TMP/closure-nested.lua"
 grep -q '^        __byteveil_f2_r0 = r0$' "$TMP/closure-nested.lua"
 if grep -q '__byteveil_f1_r254 = r0' "$TMP/closure-nested.lua"; then
     echo "CLOSURE upvalue capture was emitted as a standalone GETUPVAL" >&2

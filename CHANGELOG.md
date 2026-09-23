@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased - Lua 5.1 captured upvalue lifetimes
+
+### Corrected
+
+- Captured Lua 5.1 local registers affected by a close now use shared cells.
+  `CLOSE A` detaches captured cells at or above `A`, so closures created before
+  register reuse keep their original value while later closures capture the new
+  cell. Captures that cannot be closed keep direct lexical references.
+- `JMP A>0` now closes cells at or above `A-1`. The Lua 5.1 PC dispatcher
+  applies this only on the edge that takes the jump, including conditional and
+  generic-for control flow.
+- Nested closures pass managed cells through their capture wrappers, keeping
+  inherited upvalue reads and writes attached to the same cell.
+
+### Validation
+
+- Added Lua 5.1 runtime regressions for explicit `CLOSE`, unconditional
+  `JMP A` closes, and conditional jump-close behavior on both branch outcomes.
+  The fixtures verify that earlier and later closures retain separate values.
+- All 21 MoonSec V3 sample outputs parse and compile with Lua 5.1 `luac -p`;
+  this corpus run left **0** explicit-close diagnostics and produced
+  **9,604,763** bytes of source. The samples were compiled only, never run.
+
+
 ## Unreleased - Lua 5.1 open SETLIST tails and terminal returns
 
 ### Added
@@ -12,11 +36,6 @@
 - The PC dispatcher treats `TAILCALL` as terminal. Its following compiler
   `RETURN` is no longer emitted as a reachable block unless a real branch
   targets it.
-
-### Explicit limit
-
-- `CLOSE` still appears as a diagnostic. Closure lifetimes across reused
-  registers are not fully reconstructed, so those cases need separate work.
 
 ### Validation
 
