@@ -5,6 +5,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1169,9 +1170,143 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 cursor+=2;
             }
             bool emittedChain=false;
+            int guardedJoin=-1;
             // Some compilers leave short-circuit operand setup between each
             // TEST/JMP pair (for example SELF, LOADK, CALL). Keep those
             // instructions in the false path so calls remain lazy and ordered.
+            // A repeated `if gate then value = load(); if value then goto join`
+            // shape is another common short-circuit form. Each primary test jumps
+            // over its payload and secondary test to the next candidate, while
+            // each secondary test jumps to one shared join on success. Preserve
+            // that order with a local success flag instead of flattening the
+            // condition into an eager expression.
+            struct GuardedConditionCandidate {
+                int primaryPc;
+                int prefixBegin;
+                int payloadBegin;
+                int secondaryPc;
+                int nextBegin;
+            };
+            if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22){
+                std::vector<GuardedConditionCandidate> guarded;
+                int candidatePc=pc;
+                int prefixBegin=pc;
+                int join=-1;
+                int fallbackBegin=-1;
+                bool validGuardedChain=true;
+                auto guardedGapSafe=[](const Instr& instruction){
+                    return straightLineConditionGap(instruction)&&
+                        !(instruction.op==2&&instruction.c!=0);
+                };
+                auto seekCondition=[&](int begin,int& found){
+                    int cursor=begin;
+                    while(cursor<end&&cursor-begin<16&&guardedGapSafe(p.code[cursor])) ++cursor;
+                    if(cursor+1<end&&isCondition(p.code[cursor].op)&&p.code[cursor+1].op==22){
+                        found=cursor;
+                        return true;
+                    }
+                    found=-1;
+                    return false;
+                };
+                for(size_t candidateCount=0;candidateCount<128;++candidateCount){
+                    if(candidatePc+1>=end||!isCondition(p.code[candidatePc].op)||p.code[candidatePc+1].op!=22){
+                        validGuardedChain=false;
+                        break;
+                    }
+                    int secondaryPc=-1;
+                    if(!seekCondition(candidatePc+2,secondaryPc)){
+                        validGuardedChain=false;
+                        break;
+                    }
+                    const int nextBegin=secondaryPc+2;
+                    const int primaryTarget=p.code[candidatePc+1].target;
+                    const int secondaryTarget=p.code[secondaryPc+1].target;
+                    if(primaryTarget!=nextBegin||secondaryTarget<=nextBegin||secondaryTarget>end||
+                       (join>=0&&join!=secondaryTarget)){
+                        validGuardedChain=false;
+                        break;
+                    }
+                    join=secondaryTarget;
+                    guarded.push_back({candidatePc,prefixBegin,candidatePc+2,secondaryPc,nextBegin});
+
+                    int nextPrimary=-1;
+                    if(seekCondition(nextBegin,nextPrimary)){
+                        prefixBegin=nextBegin;
+                        candidatePc=nextPrimary;
+                        continue;
+                    }
+                    // Once candidates end, the no-match path may contain a
+                    // straight-line fallback assignment before the shared join.
+                    fallbackBegin=nextBegin;
+                    if(join-fallbackBegin>16){
+                        validGuardedChain=false;
+                        break;
+                }
+                for(int fallbackPc=fallbackBegin;fallbackPc<join;++fallbackPc){
+                    if(!guardedGapSafe(p.code[fallbackPc])) validGuardedChain=false;
+                    }
+                    break;
+                }
+                if(guarded.size()<2||join<0||fallbackBegin<0) validGuardedChain=false;
+                if(validGuardedChain){
+                    std::set<int> allowedConditions;
+                    std::map<int,int> allowedJumps;
+                    for(const GuardedConditionCandidate& candidate:guarded){
+                        allowedConditions.insert(candidate.primaryPc);
+                        allowedConditions.insert(candidate.secondaryPc);
+                        allowedJumps[candidate.primaryPc+1]=candidate.nextBegin;
+                        allowedJumps[candidate.secondaryPc+1]=join;
+                    }
+                    for(const Instr& edge:p.code){
+                        if(edge.op==22||edge.op==31||edge.op==32){
+                            if(edge.pc>=pc&&edge.pc<join){
+                                if(edge.op!=22||!allowedJumps.count(edge.pc)||allowedJumps[edge.pc]!=edge.target)
+                                    validGuardedChain=false;
+                            }else if(edge.target>pc&&edge.target<join){
+                                validGuardedChain=false;
+                            }
+                        }else if(isCondition(edge.op)&&edge.pc>=pc&&edge.pc<join&&
+                                 !allowedConditions.count(edge.pc)){
+                            validGuardedChain=false;
+                        }else if((edge.op==27||edge.op==33)&&edge.pc>=pc&&edge.pc<join){
+                            validGuardedChain=false;
+                        }
+                    }
+                }
+                if(validGuardedChain){
+                    const std::string flag=conditionChainFlagName(p,pc,context);
+                    const std::string scopePad(size_t(indent+4),' ');
+                    o<<pad<<"do\n"<<scopePad<<"local "<<flag<<" = false\n";
+                    for(size_t candidateIndex=0;candidateIndex<guarded.size();++candidateIndex){
+                        const GuardedConditionCandidate& candidate=guarded[candidateIndex];
+                        const int candidateIndent=indent+8;
+                        const std::string candidatePad(size_t(candidateIndent),' ');
+                        if(candidateIndex>0){
+                            o<<scopePad<<"if not "<<flag<<" then\n";
+                            if(candidate.prefixBegin<candidate.primaryPc)
+                                emitRange(o,p,candidate.prefixBegin,candidate.primaryPc,candidateIndent,context,true,
+                                          loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        }
+                        o<<candidatePad<<"if "<<conditionExpr(p,p.code[candidate.primaryPc],context)<<" then\n";
+                        if(candidate.payloadBegin<candidate.secondaryPc)
+                            emitRange(o,p,candidate.payloadBegin,candidate.secondaryPc,candidateIndent+4,context,true,
+                                      loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        o<<std::string(size_t(candidateIndent+4),' ')<<"if "
+                         <<negateConditionExpr(conditionExpr(p,p.code[candidate.secondaryPc],context))<<" then\n"
+                         <<std::string(size_t(candidateIndent+8),' ')<<flag<<" = true\n"
+                         <<std::string(size_t(candidateIndent+4),' ')<<"end\n"
+                         <<candidatePad<<"end\n";
+                        if(candidateIndex>0) o<<scopePad<<"end\n";
+                    }
+                    o<<scopePad<<"if not "<<flag<<" then\n";
+                    if(fallbackBegin<join)
+                        emitRange(o,p,fallbackBegin,join,indent+8,context,true,
+                                  loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    o<<scopePad<<"end\n"<<pad<<"end\n";
+                    guardedJoin=join;
+                    emittedChain=true;
+                }
+            }
             const int firstTarget=pc+1<end&&p.code[pc+1].op==22?p.code[pc+1].target:-1;
             separatedChain.push_back({pc,firstTarget,conditionExpr(p,p.code[pc],context)});
             cursor=pc+2;
@@ -1185,7 +1320,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 separatedChain.push_back({cursor,p.code[cursor+1].target,conditionExpr(p,p.code[cursor],context)});
                 cursor+=2;
             }
-            if(sawGap&&separatedChain.size()>=2){
+            if(!emittedChain&&sawGap&&separatedChain.size()>=2){
                 const int bodyBegin=separatedChain.back().pc+2;
                 const int join=separatedChain.back().target;
                 bool commonTrueBody=join>bodyBegin&&join<=end;
@@ -1281,7 +1416,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             // Lua lowers `a and b and ...` to consecutive conditions whose
             // failed branches all jump to one shared join. When every test
             // falls through, the source body begins after the final pair.
-            if(chain.size()>=2){
+            if(!emittedChain&&chain.size()>=2){
                 const int bodyBegin=chain.back().pc+2;
                 const int join=chain.front().target;
                 const bool loopLatch=join>0 && join<=end && p.code[join-1].op==22 &&
@@ -1301,7 +1436,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     emittedChain=true;
                 }
             }
-            if(emittedChain)continue;
+            if(emittedChain){
+                if(guardedJoin>=0) pc=guardedJoin;
+                continue;
+            }
             for(size_t final=1;final<chain.size();++final){
                 const int bodyBegin=chain[final].pc+2;
                 const int join=chain[final].target;
