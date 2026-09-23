@@ -357,6 +357,11 @@ if grep -q 'stopped at repeated control-flow' "$TMP/generic-for.lua"; then
 fi
 "$BIN" --bytecode "$TMP/cyclic-jump.luac" --format lua >"$TMP/cyclic-jump.lua"
 grep -q 'PC dispatcher preserves non-reducible control flow in function 0' "$TMP/cyclic-jump.lua"
+grep -q '^local r0$' "$TMP/cyclic-jump.lua"
+if grep -q '__byteveil_f0_r0' "$TMP/cyclic-jump.lua"; then
+    echo "a function without upvalues used a qualified dispatcher register name" >&2
+    exit 1
+fi
 "$BIN" --bytecode "$TMP/infinite-loop.luac" --format lua >"$TMP/infinite-loop.lua"
 grep -q '^while true do$' "$TMP/infinite-loop.lua"
 if grep -q 'stopped at repeated control-flow' "$TMP/infinite-loop.lua"; then

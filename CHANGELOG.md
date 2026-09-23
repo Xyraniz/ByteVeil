@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - Compact Lua 5.1 dispatcher registers
+
+### Changed
+
+- Functions without lexical upvalues now use local `rN` register names even in
+  PC-dispatcher output. Functions with captures keep prototype-qualified names
+  to avoid shadowing their enclosing upvalues.
+
+### Validation
+
+- Added a regression for compact names in a dispatcher with no upvalues. The
+  largest MoonSec sample has 176 prototypes without upvalues; on the full
+  corpus, the shorter names reduced source from 9,250,060 to **8,744,996**
+  bytes. All 21 outputs still parse and compile with Lua 5.1.
+
+
 ## Unreleased - Cleaner Lua 5.1 closure output
 
 ### Changed

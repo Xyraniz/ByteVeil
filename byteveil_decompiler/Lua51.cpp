@@ -400,11 +400,17 @@ static bool managedCapturedLocal(const Proto& p,int registerIndex){
         p.managedCapturedRegisters[size_t(registerIndex)]!=0;
 }
 static std::string renderedRegisterName(const Proto& p,int registerIndex,int pc,const RenderContext& context){
+    // Register scopes already isolate functions that have no lexical
+    // upvalues.  Keep those dispatcher variables compact; functions with
+    // captures retain prototype-qualified names so locals cannot shadow an
+    // enclosing captured register.
+    if(context.stateMachine&&p.nups==0) return reg(registerIndex);
     if(context.stateMachine) return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
     // Root names remain compact for readable diagnostics.  Nested prototypes
     // need their own register namespace so an inner r0 cannot shadow an outer
     // r0 captured by a closure.
     if(p.id==0) return localReg(p,registerIndex,pc);
+    if(p.nups==0) return reg(registerIndex);
     return "__byteveil_f"+std::to_string(p.id)+"_r"+std::to_string(registerIndex);
 }
 static std::string capturedCellName(const Proto& p,int registerIndex,const RenderContext& context){
