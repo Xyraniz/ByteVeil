@@ -1055,12 +1055,17 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             // source iteration a fresh cell so closures retain that value.
             if(managedCapturedLocal(p,loopRegister))
                 o<<std::string(size_t(indent+4),' ')<<capturedCellName(p,loopRegister,context)<<" = {"<<var<<"}\n";
-            const bool needsContinueWrapper=hasLoopEdgeTo(p,bodyBegin,bodyEnd,i.target);
+            // Lua 5.1 may route a continue through CLOSE immediately before
+            // FORLOOP so closures keep the current iteration's cell. The
+            // emitted loop already gives captured variables fresh cells, so
+            // let that edge exit the synthetic repeat wrapper at CLOSE.
+            const int continueTarget=i.target>bodyBegin&&p.code[i.target-1].op==35?i.target-1:i.target;
+            const bool needsContinueWrapper=hasLoopEdgeTo(p,bodyBegin,bodyEnd,continueTarget);
             const std::string breakFlag=needsContinueWrapper?loopBreakFlagName(p,i.pc,context):std::string();
             if(needsContinueWrapper)
                 o<<std::string(size_t(indent+4),' ')<<"local "<<breakFlag<<" = false\n"
                  <<std::string(size_t(indent+4),' ')<<"repeat\n";
-            emitRange(o,p,bodyBegin,bodyEnd,indent+(needsContinueWrapper?8:4),context,true,i.target+1,i.target,breakFlag);
+            emitRange(o,p,bodyBegin,bodyEnd,indent+(needsContinueWrapper?8:4),context,true,i.target+1,continueTarget,breakFlag);
             if(needsContinueWrapper)
                 o<<std::string(size_t(indent+4),' ')<<"until true\n"
                  <<std::string(size_t(indent+4),' ')<<"if "<<breakFlag<<" then break end\n";
@@ -1089,12 +1094,13 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 }
             }
             const int bodyBegin=pc+1, bodyEnd=i.target;
-            const bool needsContinueWrapper=hasLoopEdgeTo(p,bodyBegin,bodyEnd,i.target);
+            const int continueTarget=i.target>bodyBegin&&p.code[i.target-1].op==35?i.target-1:i.target;
+            const bool needsContinueWrapper=hasLoopEdgeTo(p,bodyBegin,bodyEnd,continueTarget);
             const std::string breakFlag=needsContinueWrapper?loopBreakFlagName(p,i.pc,context):std::string();
             if(needsContinueWrapper)
                 o<<std::string(size_t(indent+4),' ')<<"local "<<breakFlag<<" = false\n"
                  <<std::string(size_t(indent+4),' ')<<"repeat\n";
-            emitRange(o,p,bodyBegin,bodyEnd,indent+(needsContinueWrapper?8:4),context,true,i.target+2,i.target,breakFlag);
+            emitRange(o,p,bodyBegin,bodyEnd,indent+(needsContinueWrapper?8:4),context,true,i.target+2,continueTarget,breakFlag);
             if(needsContinueWrapper)
                 o<<std::string(size_t(indent+4),' ')<<"until true\n"
                  <<std::string(size_t(indent+4),' ')<<"if "<<breakFlag<<" then break end\n";

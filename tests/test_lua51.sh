@@ -367,19 +367,19 @@ open(sys.argv[40], "wb").write(build(
     [(3, 2), (3, 3), (4, b"iterator"), (4, b"seenValue"), (4, b"processValue")],
     maxstack=6))
 
-# The numeric-for latch needs the same continue translation and outer-break
-# preservation as the generic-for latch.
+# Numeric-for continue edges may target CLOSE before FORLOOP; preserve that
+# latch path while keeping the separate outer-break edge.
 def loop_edge(op, a, pc, target):
     return op | (a << 6) | ((131071 + target - pc - 1) << 14)
 
 eq_r3_k3 = 23 | (1 << 6) | (3 << 23) | ((256 + 3) << 14)
 eq_r3_k4 = 23 | (1 << 6) | (3 << 23) | ((256 + 4) << 14)
 numeric_for_continue_code = [
-    loadk(0, 0), loadk(1, 1), loadk(2, 2), loop_edge(32, 0, 3, 15),
+    loadk(0, 0), loadk(1, 1), loadk(2, 2), loop_edge(32, 0, 3, 16),
     getglobal(4, 5), move_r5_r3, call(4, 2, 1),
-    eq_r3_k3, jmp(8, 15), eq_r3_k4, jmp(10, 16),
+    eq_r3_k3, jmp(8, 15), eq_r3_k4, jmp(10, 17),
     getglobal(4, 6), move_r5_r3, call(4, 2, 1), jmp(14, 15),
-    loop_edge(31, 0, 15, 4), ret(0, 1),
+    35 | (3 << 6), loop_edge(31, 0, 16, 4), ret(0, 1),
 ]
 open(sys.argv[41], "wb").write(build(
     numeric_for_continue_code,
