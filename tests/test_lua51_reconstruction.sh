@@ -132,7 +132,11 @@ local function callChainElse(enabled, probe, record)
         record("fallback")
     end
 end
-return classify, choose, compareWithCalls, callChainElse
+local function mixedValue(getValue, mapValue, fallback)
+    local value = getValue()
+    return mapValue(value) and value or fallback
+end
+return classify, choose, compareWithCalls, callChainElse, mixedValue
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/condition-chains.luac" "$TMP/condition-chains.lua"
 "$BIN" --bytecode "$TMP/condition-chains.luac" --format lua > "$TMP/condition-chains.reconstructed.lua"

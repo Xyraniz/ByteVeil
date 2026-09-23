@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse = assert(loadfile(originalPath))()
-local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse = assert(loadfile(reconstructedPath))()
+local originalClassify, originalChoose, originalCompareWithCalls, originalCallChainElse, originalMixedValue = assert(loadfile(originalPath))()
+local reconstructedClassify, reconstructedChoose, reconstructedCompareWithCalls, reconstructedCallChainElse, reconstructedMixedValue = assert(loadfile(reconstructedPath))()
 
 for _, value in ipairs({"alpha", "beta", "gamma", "delta", "", 0}) do
     assert(reconstructedClassify(value) == originalClassify(value),
@@ -73,4 +73,34 @@ for index, case in ipairs(elseCases) do
         "source call-chain else case " .. index .. " differs")
     assert(table.concat(reconstructedTrace, ",") == table.concat(originalTrace, ","),
         "reconstructed call-chain else effects differ in case " .. index)
+end
+
+local mixedValueCases = {
+    {value = "payload", mapResult = true, fallback = "fallback", expected = "payload"},
+    {value = "payload", mapResult = false, fallback = "fallback", expected = "fallback"},
+    {value = false, mapResult = true, fallback = "fallback", expected = "fallback"},
+    {value = nil, mapResult = "mapped", fallback = "fallback", expected = "fallback"},
+    {value = 0, mapResult = "mapped", fallback = "fallback", expected = 0},
+}
+for index, case in ipairs(mixedValueCases) do
+    local function run(mixedValue)
+        local trace = {}
+        local function getValue()
+            trace[#trace + 1] = "get"
+            return case.value
+        end
+        local function mapValue(value)
+            trace[#trace + 1] = "map"
+            assert(value == case.value, "mixed-value operand changed in case " .. index)
+            return case.mapResult
+        end
+        return mixedValue(getValue, mapValue, case.fallback), table.concat(trace, ",")
+    end
+    local originalResult, originalTrace = run(originalMixedValue)
+    local reconstructedResult, reconstructedTrace = run(reconstructedMixedValue)
+    assert(originalResult == case.expected, "source mixed-value case " .. index .. " differs")
+    assert(reconstructedResult == originalResult,
+        "reconstructed mixed-value result differs in case " .. index)
+    assert(originalTrace == "get,map" and reconstructedTrace == originalTrace,
+        "mixed-value expression changed call order in case " .. index)
 end
