@@ -37,6 +37,36 @@ grep -q '^repeat$' "$TMP/reconstructed.lua"
 grep -q 'if ' "$TMP/reconstructed.lua"
 grep -q 'elseif\|else' "$TMP/reconstructed.lua"
 ! grep -q 'unsupported opcode retained' "$TMP/reconstructed.lua"
+cat >"$TMP/if-loop.lua" <<'LUA'
+local function bounded(enabled, limit)
+    local total = 0
+    if enabled then
+        local index = 0
+        while index < limit do
+            total = total + index
+            index = index + 1
+        end
+    end
+    return total
+end
+return bounded
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/if-loop.luac" "$TMP/if-loop.lua"
+"$BIN" --bytecode "$TMP/if-loop.luac" --format lua > "$TMP/if-loop.reconstructed.lua"
+if grep -q 'PC dispatcher' "$TMP/if-loop.reconstructed.lua"; then
+    echo "a loop latch at the end of an if body triggered the PC dispatcher" >&2
+    exit 1
+fi
+grep -q '^    if r0 then$' "$TMP/if-loop.reconstructed.lua"
+grep -q '^        while true do$' "$TMP/if-loop.reconstructed.lua"
+"$BYTEVEIL_LUAC51" -p "$TMP/if-loop.reconstructed.lua"
+IF_LOOP_ORIGINAL_PATH="$TMP/if-loop.lua"
+IF_LOOP_RECONSTRUCTED_PATH="$TMP/if-loop.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    IF_LOOP_ORIGINAL_PATH="$(cygpath -m "$IF_LOOP_ORIGINAL_PATH")"
+    IF_LOOP_RECONSTRUCTED_PATH="$(cygpath -m "$IF_LOOP_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" -e "local original=assert(loadfile('$IF_LOOP_ORIGINAL_PATH'))(); local reconstructed=assert(loadfile('$IF_LOOP_RECONSTRUCTED_PATH'))(); for _, enabled in ipairs({false, true}) do for _, limit in ipairs({-1, 0, 1, 4}) do assert(original(enabled, limit) == reconstructed(enabled, limit), 'if-wrapped loop differs') end end"
 cat >"$TMP/numeric-closures.lua" <<'LUA'
 local functions = {}
 for index = 1, 3 do

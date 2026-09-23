@@ -1539,7 +1539,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 if(tailJump.target>falseBegin){
                     join=tailJump.target;
                     trueEnd=falseBegin-1;
-                }else if(!repeatLatch){
+                }else if(tailJump.target==falseBegin&&!repeatLatch){
                     trueEnd=falseBegin-1;
                 }
             }
