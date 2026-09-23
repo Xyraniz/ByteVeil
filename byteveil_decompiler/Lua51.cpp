@@ -916,6 +916,13 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // them as ordinary MOVE/GETUPVAL instructions would fabricate writes
         // that the Lua 5.1 VM never performs.
         if(i.closureBindingFor>=0){ ++pc; continue; }
+        // An unconditional jump to its own instruction never observes the
+        // following bytecode. Preserve that behavior as an empty infinite loop
+        // instead of rejecting it as a repeated, unstructured PC.
+        if(i.op==22&&i.target==pc){
+            o<<pad<<"while true do end\n";
+            return;
+        }
         // A `repeat` body starts before its condition and backward jump, so
         // recognize the latch from the range entry before emitting the body
         // linearly. This also gives nested `break` jumps their loop exit PC.
@@ -1056,7 +1063,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // Generic for: the initial JMP lands on TFORLOOP.  TFORLOOP skips the
         // following backward JMP on exhaustion; otherwise that JMP enters the
         // body.  Reconstruct the iterator triple and all C loop variables.
-        if(i.op==22 && i.target>pc && i.target+1<end &&
+        if(i.op==22 && i.target>pc && i.target+1<int(p.code.size()) &&
            p.code[i.target].op==33 && p.code[i.target+1].op==22 &&
            p.code[i.target+1].target==pc+1){
             const Instr& loop=p.code[i.target];

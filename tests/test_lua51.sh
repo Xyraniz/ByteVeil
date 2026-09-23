@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -94,8 +94,8 @@ return_empty = 30 | (1 << 23)                 # RETURN A=0 B=1
 open(sys.argv[7], "wb").write(build(
     [jmp_to_tfor, move_body, tforloop, jmp_to_body, return_empty], [], maxstack=4))
 
-# A valid but irreducible self-jump must terminate with an explicit marker;
-# it is not safe for a readable renderer to execute its control flow forever.
+# An unconditional self-jump is an empty infinite loop. The readable output
+# preserves its non-terminating behavior without needing a PC dispatcher.
 jump_to_self = 22 | ((131071 - 1) << 14)      # pc 0 -> pc 0
 open(sys.argv[8], "wb").write(build([jump_to_self], [], maxstack=1))
 
@@ -385,6 +385,20 @@ open(sys.argv[41], "wb").write(build(
     numeric_for_continue_code,
     [(3, 1), (3, 4), (3, 1), (3, 2), (3, 3), (4, b"seenValue"), (4, b"processValue")],
     maxstack=6))
+
+# The parent `if` range ends just before the generic-for back-jump. That jump
+# still proves the TFORLOOP's body entry and must not prevent loop recovery.
+test_enabled_r6 = 26 | (6 << 6)
+generic_for_nested_if_code = [
+    getglobal(6, 0), test_enabled_r6, jmp(2, 11),
+    getglobal(0, 1), loadnil_r1_r2, jmp(5, 9),
+    getglobal(4, 2), move_r5_r3, call(4, 2, 1),
+    tforloop_a0_c1, jmp(10, 6), ret(0, 1),
+]
+open(sys.argv[42], "wb").write(build(
+    generic_for_nested_if_code,
+    [(4, b"enabled"), (4, b"iterator"), (4, b"seenValue")],
+    maxstack=7))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -417,11 +431,18 @@ if grep -q 'stopped at repeated control-flow' "$TMP/generic-for.lua"; then
     exit 1
 fi
 "$BIN" --bytecode "$TMP/cyclic-jump.luac" --format lua >"$TMP/cyclic-jump.lua"
-grep -q 'PC dispatcher preserves Lua 5.1 control flow in function 0' "$TMP/cyclic-jump.lua"
+grep -q '^while true do end$' "$TMP/cyclic-jump.lua"
+if grep -q 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/cyclic-jump.lua"; then
+    echo "a direct self-jump still uses a PC dispatcher" >&2
+    exit 1
+fi
 grep -q '^local r0$' "$TMP/cyclic-jump.lua"
 if grep -q '__byteveil_f0_r0' "$TMP/cyclic-jump.lua"; then
     echo "a function without upvalues used a qualified dispatcher register name" >&2
     exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/cyclic-jump.lua"
 fi
 "$BIN" --bytecode "$TMP/infinite-loop.luac" --format lua >"$TMP/infinite-loop.lua"
 grep -q '^while true do$' "$TMP/infinite-loop.lua"
@@ -478,6 +499,23 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
         NUMERIC_FOR_CONTINUE_PATH="$(cygpath -m "$NUMERIC_FOR_CONTINUE_PATH")"
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_generic_for_continue_runtime.lua" "$NUMERIC_FOR_CONTINUE_PATH"
+fi
+"$BIN" --bytecode "$TMP/generic-for-nested-if.luac" --format lua >"$TMP/generic-for-nested-if.lua"
+grep -q '^if r6 then$' "$TMP/generic-for-nested-if.lua"
+grep -q 'for r3 in r0, r1, r2 do' "$TMP/generic-for-nested-if.lua"
+if grep -q 'PC dispatcher\|stopped at repeated control-flow\|TFORLOOP at pc' "$TMP/generic-for-nested-if.lua"; then
+    echo "generic for at an enclosing branch boundary was not reconstructed structurally" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/generic-for-nested-if.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    GENERIC_FOR_NESTED_IF_PATH="$TMP/generic-for-nested-if.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        GENERIC_FOR_NESTED_IF_PATH="$(cygpath -m "$GENERIC_FOR_NESTED_IF_PATH")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_generic_for_nested_if_runtime.lua" "$GENERIC_FOR_NESTED_IF_PATH"
 fi
 "$BIN" --bytecode "$TMP/test-repeat.luac" --format lua >"$TMP/test-repeat.lua"
 grep -q '^repeat$' "$TMP/test-repeat.lua"
