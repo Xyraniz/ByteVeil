@@ -395,6 +395,37 @@ static std::string renderedValue(const Proto& p,int x,int pc,const RenderContext
     return renderedLocal(p,x,pc,context);
 }
 
+static bool writesRegister(const Instr& instruction,int registerIndex,int maxstack){
+    if(instruction.extraWord||instruction.closureBindingFor>=0) return false;
+    auto contains=[&](int first,int last){return registerIndex>=first&&registerIndex<=last;};
+    switch(instruction.op){
+    case 0: case 1: case 2: case 4: case 5: case 6: case 10:
+    case 12: case 13: case 14: case 15: case 16: case 17:
+    case 18: case 19: case 20: case 21: case 36:
+        return registerIndex==instruction.a;
+    case 3:
+        return contains(instruction.a,instruction.b);
+    case 11:
+        return registerIndex==instruction.a||registerIndex==instruction.a+1;
+    case 27:
+        return registerIndex==instruction.a;
+    case 28:
+        if(instruction.c==0) return registerIndex>=instruction.a&&registerIndex<maxstack;
+        return instruction.c>1&&contains(instruction.a,instruction.a+instruction.c-2);
+    case 31:
+        return registerIndex==instruction.a||registerIndex==instruction.a+3;
+    case 32:
+        return registerIndex==instruction.a;
+    case 33:
+        return contains(instruction.a+3,instruction.a+2+instruction.c);
+    case 37:
+        if(instruction.b==0) return registerIndex>=instruction.a&&registerIndex<maxstack;
+        return instruction.b>1&&contains(instruction.a,instruction.a+instruction.b-2);
+    default:
+        return false;
+    }
+}
+
 static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const RenderContext& context){
     for(int n=pc-1;n>=0;--n){
         const Instr& definition=p.code[n];
@@ -407,7 +438,16 @@ static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const
             if(edge.pc<n && edge.target>=pc && edge.target>n)
                 return renderedLocal(p,registerIndex,pc,context);
         if(definition.op==1) return definition.bx<int(p.constants.size())?p.constants[definition.bx]:"nil";
-        if(definition.op==0) return renderedValueAt(p,definition.b,n,context);
+        if(definition.op==0){
+            bool sourceChanged=false;
+            for(int between=n+1;between<pc;++between)
+                if(writesRegister(p.code[between],definition.b,p.maxstack)){sourceChanged=true;break;}
+            if(!sourceChanged) return renderedValueAt(p,definition.b,n,context);
+            // MOVE stores the value at its own PC.  If the source register is
+            // written before this use, keep the copied destination instead
+            // of substituting the source's newer value.
+            return renderedLocal(p,registerIndex,pc,context);
+        }
         if(definition.op==3) return "nil";
         break;
     }

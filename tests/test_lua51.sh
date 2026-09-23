@@ -22,7 +22,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -174,6 +174,16 @@ open(sys.argv[18], "wb").write(build(
 open(sys.argv[19], "wb").write(build(
     [loadk_r1, testset_or, jump_over_fallback, loadk_fallback_r0, ret],
     [(1, True), (4, b"fallback")], maxstack=2))
+
+# A MOVE snapshots the source register.  Replacing that source later must not
+# rewrite the copied value when a later CALL argument is rendered.
+getglobal_object = 5
+move_r1_from_r0 = 0 | (1 << 6)
+getglobal_callback = 5 | (2 << 14)
+call_r0_with_one_arg = 28 | (2 << 23) | (1 << 14)  # CALL A=0 B=2 C=1
+open(sys.argv[20], "wb").write(build(
+    [getglobal_object, move_r1_from_r0, getglobal_callback, call_r0_with_one_arg, ret],
+    [(4, b"object"), (4, b"unused"), (4, b"callback")], maxstack=2))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -246,6 +256,12 @@ for case in testset-and testset-or; do
         exit 1
     fi
 done
+"$BIN" --bytecode "$TMP/move-overwritten-source.luac" --format lua >"$TMP/move-overwritten-source.lua"
+grep -Fq 'r0(r1)' "$TMP/move-overwritten-source.lua"
+if grep -Fq 'r0(r0)' "$TMP/move-overwritten-source.lua"; then
+    echo "MOVE copy was rewritten after its source register changed" >&2
+    exit 1
+fi
 "$BIN" --bytecode "$TMP/closure-local.luac" --format json >"$TMP/closure-local.json"
 "$BIN" --bytecode "$TMP/closure-local.luac" --disassemble >"$TMP/closure-local.dis"
 "$BIN" --bytecode "$TMP/closure-local.luac" --format lua >"$TMP/closure-local.lua"

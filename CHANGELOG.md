@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased - Lua 5.1 MOVE value snapshots
+
+### Corrected
+
+- Readable Lua 5.1 output no longer substitutes a copied register with the
+  source register's newer value after the source has been overwritten. The
+  destination register is kept for later uses, including call arguments.
+
+### Validation
+
+- Added a binary Lua 5.1 regression that copies a value, overwrites its source,
+  then checks that the call still uses the copied destination. Full CTest:
+  **9/9 PASS**.
+
 ## Unreleased - Lua 5.1 TESTSET short-circuit recovery
 
 ### Corrected
