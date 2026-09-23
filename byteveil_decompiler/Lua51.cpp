@@ -747,7 +747,7 @@ static RenderContext closureContext(const Proto& p,const Instr& closure,const Re
     return result;
 }
 static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister);
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true,int loopBreakTarget=-1);
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true,int loopBreakTarget=-1,int loopContinueTarget=-1);
 static int followingControlTarget(const Proto& p,const Instr& i);
 static bool emitOpenSetList(std::ostringstream& o,const Proto& p,const Instr& setlist,int indent,const RenderContext& context){
     const int producerPc=openProducerFor(p,setlist);
@@ -874,7 +874,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     default:o<<pad<<"-- ByteVeil: unsupported opcode retained: "<<opName(i.op)<<" A="<<i.a<<" B="<<i.b<<" C="<<i.c<<" at pc "<<i.pc<<"\n";break;
     }
 }
-static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop,int loopBreakTarget){
+static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop,int loopBreakTarget,int loopContinueTarget){
     const std::string pad(indent,' ');
     // A readable reconstruction must never follow an unstructured back-edge
     // forever.  Structured loops below consume their back-edge; anything that
@@ -908,6 +908,13 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     else if(target==repeatStart)uniqueLatch=false;
                 }
             }
+            if(repeatStart>=0&&uniqueLatch){
+                for(int edge=repeatStart+1;edge<end;++edge)
+                    if(p.code[edge].op==22&&edge!=repeatLatch+1&&p.code[edge].target==repeatStart){
+                        uniqueLatch=false;
+                        break;
+                    }
+            }
             if(repeatStart>=0&&repeatLatch>=0&&uniqueLatch){
                 bool containedPrefix=true;
                 for(int prefix=begin;prefix<repeatStart;++prefix){
@@ -930,7 +937,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 }
                 if(containedPrefix){
                     if(repeatStart>begin)
-                        emitRange(o,p,begin,repeatStart,indent,context,allowInfiniteLoop,loopBreakTarget);
+                        emitRange(o,p,begin,repeatStart,indent,context,allowInfiniteLoop,loopBreakTarget,loopContinueTarget);
                     o<<pad<<"repeat\n";
                     emitRange(o,p,repeatStart,repeatLatch,indent+4,context,false,repeatLatch+2);
                     o<<pad<<"until "<<conditionExpr(p,p.code[repeatLatch],context)<<"\n";
@@ -939,31 +946,53 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 }
             }
         }
-        // A closed, entry-anchored back-edge with no jump out of its body is
-        // an unconditional source loop.  Treat it structurally; cycles that
-        // have an exit or competing latch are deliberately left visible.
-        if(allowInfiniteLoop && pc==begin){
-            int latch=-1;
+        // A loop can have several explicit edges back to its header. Accept
+        // only regions whose edges stay inside the loop or share one exit,
+        // then render the back-edges as natural flow in `while true`.
+        if(allowInfiniteLoop){
+            auto branchTarget=[&](const Instr& edge){
+                if(edge.op==22||edge.op==31||edge.op==32) return edge.target;
+                if((isCondition(edge.op)||edge.op==27)&&edge.pc+1<int(p.code.size())&&p.code[edge.pc+1].op==22)
+                    return p.code[edge.pc+1].target;
+                if(edge.op==33) return followingControlTarget(p,edge);
+                return -1;
+            };
+            int backEdges=0;
+            int lastBackEdge=pc;
             bool closed=true;
-            for(int scan=begin+1;scan<end;scan++){
-                const Instr& edge=p.code[scan];
-                if(edge.op==22 && edge.target==begin){
-                    if(latch>=0){closed=false;break;}
-                    latch=scan;
-                }
+            for(int scan=pc;scan<end;++scan){
+                if(p.code[scan].op==22&&scan>pc&&
+                   (isCondition(p.code[scan-1].op)||p.code[scan-1].op==27||p.code[scan-1].op==33)) continue;
+                const int target=branchTarget(p.code[scan]);
+                if(target==pc&&scan>pc){++backEdges;lastBackEdge=std::max(lastBackEdge,scan+(p.code[scan].op==22?0:1));}
+                else if(target>=0&&target<scan) closed=false;
             }
-            if(latch>=0&&closed){
-                for(int scan=begin;scan<latch;scan++){
-                    const Instr& edge=p.code[scan];
-                    if(edge.target>=0&&(edge.target>=latch+1||edge.target<begin)){closed=false;break;}
+            int loopEnd=end;
+            if((backEdges>=2||(backEdges==1&&pc==begin))&&closed){
+                for(int scan=pc;scan<end;++scan){
+                    const int target=branchTarget(p.code[scan]);
+                    if(target>lastBackEdge) loopEnd=std::min(loopEnd,target);
                 }
-            }
-            if(latch>=0&&closed){
-                o<<pad<<"while true do\n";
-                emitRange(o,p,begin,latch,indent+4,context,false,latch+1);
-                o<<pad<<"end\n";
-                pc=latch+1;
-                continue;
+                if(loopEnd>lastBackEdge){
+                    for(int scan=pc;scan<loopEnd;++scan){
+                        const int target=branchTarget(p.code[scan]);
+                        if(target>=0&&target!=pc&&(target<=pc||target>loopEnd)){closed=false;break;}
+                    }
+                    if(closed){
+                        for(const Instr& edge:p.code){
+                            if(edge.pc>=pc&&edge.pc<loopEnd) continue;
+                            const int target=branchTarget(edge);
+                            if(target>pc&&target<loopEnd){closed=false;break;}
+                        }
+                    }
+                    if(closed){
+                        o<<pad<<"while true do\n";
+                        emitRange(o,p,pc,loopEnd,indent+4,context,false,loopEnd,pc);
+                        o<<pad<<"end\n";
+                        pc=loopEnd;
+                        continue;
+                    }
+                }
             }
         }
         // GETGLOBAL/MOVE/CALL is safe to collapse only for a one-argument
@@ -1041,6 +1070,14 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 pc+=3;
                 continue;
             }
+        }
+        if(loopContinueTarget>=0&&isCondition(i.op)&&pc+1<end&&p.code[pc+1].op==22&&
+           p.code[pc+1].target==loopContinueTarget){
+            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n";
+            if(pc+2<end)
+                emitRange(o,p,pc+2,end,indent+4,context,false,loopBreakTarget,loopContinueTarget);
+            o<<pad<<"end\n";
+            return;
         }
         // Lua 5.1 lowers `a or b or ...` conditions to comparison/test and
         // JMP pairs. Earlier pairs jump to the shared true body; the final
@@ -1125,7 +1162,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                          <<std::string(size_t(outerIndent+4),' ')<<flag<<" = true\n"
                          <<std::string(size_t(outerIndent),' ')<<"else\n";
                         const ConditionGap& firstGap=separatedGaps.front();
-                        emitRange(o,p,firstGap.begin,firstGap.end,outerIndent+4,context,true,loopBreakTarget);
+                        emitRange(o,p,firstGap.begin,firstGap.end,outerIndent+4,context,true,loopBreakTarget,loopContinueTarget);
                         int nestedIndent=outerIndent+4;
                         for(size_t test=1;test<separatedChain.size();++test){
                             o<<std::string(size_t(nestedIndent),' ')<<"if "<<separatedChain[test].fallthrough<<" then\n";
@@ -1133,7 +1170,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                                 o<<std::string(size_t(nestedIndent+4),' ')<<flag<<" = true\n";
                             }else{
                                 const ConditionGap& gap=separatedGaps[test];
-                                emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget);
+                                emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget,loopContinueTarget);
                                 nestedIndent+=4;
                             }
                         }
@@ -1150,7 +1187,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                              <<std::string(size_t(nestedIndent+4),' ')<<flag<<" = true\n"
                              <<nestedPad<<"else\n";
                             const ConditionGap& gap=separatedGaps[test];
-                            emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget);
+                            emitRange(o,p,gap.begin,gap.end,nestedIndent+4,context,true,loopBreakTarget,loopContinueTarget);
                             nestedIndent+=4;
                         }
                         o<<std::string(size_t(nestedIndent),' ')<<flag<<" = "<<separatedChain.back().fallthrough<<"\n";
@@ -1161,10 +1198,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     }
                     o<<scopePad<<"if "<<flag<<" then\n";
                     const int bodyEnd=hasElse&&!bodyEndsInReturn?join-1:join;
-                    if(bodyBegin<bodyEnd) emitRange(o,p,bodyBegin,bodyEnd,indent+8,context,true,loopBreakTarget);
+                    if(bodyBegin<bodyEnd) emitRange(o,p,bodyBegin,bodyEnd,indent+8,context,true,loopBreakTarget,loopContinueTarget);
                     if(hasElse){
                         o<<scopePad<<"else\n";
-                        if(join<resume) emitRange(o,p,join,resume,indent+8,context,true,loopBreakTarget);
+                        if(join<resume) emitRange(o,p,join,resume,indent+8,context,true,loopBreakTarget,loopContinueTarget);
                     }
                     o<<scopePad<<"end\n"<<pad<<"end\n";
                     pc=resume;
@@ -1188,7 +1225,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                         o<<chain[n].fallthrough;
                     }
                     o<<" then\n";
-                    emitRange(o,p,bodyBegin,join,indent+4,context,true,loopBreakTarget);
+                    emitRange(o,p,bodyBegin,join,indent+4,context,true,loopBreakTarget,loopContinueTarget);
                     o<<pad<<"end\n";
                     pc=join;
                     emittedChain=true;
@@ -1208,7 +1245,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                         else o<<chain[n].fallthrough;
                     }
                     o<<" then\n";
-                    emitRange(o,p,bodyBegin,join,indent+4,context,true,loopBreakTarget);
+                    emitRange(o,p,bodyBegin,join,indent+4,context,true,loopBreakTarget,loopContinueTarget);
                     o<<pad<<"end\n";
                     pc=join;
                     emittedChain=true;
@@ -1233,11 +1270,11 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<tested<<"\n";
                 o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
                 o<<pad<<"else\n";
-                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget);
+                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget,loopContinueTarget);
                 o<<pad<<"end\n";
             }else{
                 o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n";
-                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget);
+                if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget,loopContinueTarget);
                 o<<pad<<"else\n";
                 o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
                 o<<pad<<"end\n";
@@ -1259,7 +1296,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<tested<<"\n";
             if(fallthrough<join){
                 o<<pad<<"else\n";
-                emitRange(o,p,fallthrough,join,indent+4,context,true,loopBreakTarget);
+                emitRange(o,p,fallthrough,join,indent+4,context,true,loopBreakTarget,loopContinueTarget);
             }
             o<<pad<<"end\n";
             pc=join;
@@ -1273,7 +1310,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         if(isCondition(i.op) && pc+1<end && p.code[pc+1].op==22 && p.code[pc+1].target>pc+1){
             int bodyBegin=pc+2, exit=p.code[pc+1].target;
             if(exit<=end && exit>bodyBegin && p.code[exit-1].op==22 && p.code[exit-1].target==pc){
-                o<<pad<<"while "<<conditionExpr(p,i,context)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4,context,true,exit); o<<pad<<"end\n"; pc=exit; continue;
+                o<<pad<<"while "<<conditionExpr(p,i,context)<<" do\n"; emitRange(o,p,bodyBegin,exit-1,indent+4,context,true,exit,pc); o<<pad<<"end\n"; pc=exit; continue;
             }
         }
         // If/elseif/else: conditional, jump over true branch, optional join jump.
@@ -1292,11 +1329,12 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     trueEnd=falseBegin-1;
                 }
             }
-            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget);
-            if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4,context,true,loopBreakTarget); }
+            o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget,loopContinueTarget);
+            if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4,context,true,loopBreakTarget,loopContinueTarget); }
             o<<pad<<"end\n"; pc=join; continue;
         }
         if(i.op==22 && loopBreakTarget>=0 && i.target==loopBreakTarget){o<<pad<<"break\n";return;}
+        if(i.op==22&&loopContinueTarget>=0&&i.target==loopContinueTarget) return;
         if(i.op==22){ pc=i.target>=0?i.target:pc+1; continue; }
         // FORPREP consumes the three setup registers; do not leak their
         // compiler temporaries into reconstructed source.
