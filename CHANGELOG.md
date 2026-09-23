@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Structure captured Lua 5.1 loops
+
+### Changed
+
+- Numeric and generic `for` loops remain structured when their loop variables
+  are captured by closures. The renderer creates a fresh captured cell for
+  each iteration, preserving Lua 5.1 closure lifetimes while avoiding a
+  program-counter dispatcher for these loops.
+
+### Validation
+
+- Added runtime differential regressions where numeric- and generic-for
+  closures mutate their captured variables. The reconstructed functions
+  produce the same values as the Lua 5.1 originals and contain no PC dispatcher.
+- All nine CTest suites pass. On the 21-sample MoonSec V3 corpus, every output
+  parses and compiles with Lua 5.1; output size fell from 8,851,997 to
+  **8,789,379** bytes and PC dispatcher comments from 201 to **193**. Parse and
+  compile checks do not establish behavioral equivalence for the obfuscated
+  samples.
+
 ## Unreleased - Correct Lua 5.1 JMP field handling
 
 ### Corrected

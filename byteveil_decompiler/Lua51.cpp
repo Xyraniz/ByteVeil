@@ -910,8 +910,13 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         // Numeric for: FORPREP jumps over the body to FORLOOP; the loop variable is A+3.
         if(i.op==32 && i.target>pc && i.target<end && i.target<int(p.code.size()) && p.code[i.target].op==31){
             int bodyBegin=pc+1, bodyEnd=i.target;
-            std::string var=renderedLocal(p,i.a+3,bodyBegin,context);
+            const int loopRegister=i.a+3;
+            std::string var=renderedRegisterName(p,loopRegister,bodyBegin,context);
             o<<pad<<"for "<<var<<" = "<<renderedValueAt(p,i.a,pc,context)<<", "<<renderedValueAt(p,i.a+1,pc,context)<<", "<<renderedValueAt(p,i.a+2,pc,context)<<" do\n";
+            // Lua 5.1 closes captured loop registers before reuse. Give each
+            // source iteration a fresh cell so closures retain that value.
+            if(managedCapturedLocal(p,loopRegister))
+                o<<std::string(size_t(indent+4),' ')<<capturedCellName(p,loopRegister,context)<<" = {"<<var<<"}\n";
             emitRange(o,p,bodyBegin,bodyEnd,indent+4,context); o<<pad<<"end\n"; pc=i.target+1; continue;
         }
         // Generic for: the initial JMP lands on TFORLOOP.  TFORLOOP skips the
@@ -924,9 +929,18 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             o<<pad<<"for ";
             for(int n=0;n<loop.c;n++){
                 if(n)o<<", ";
-                o<<renderedLocal(p,loop.a+3+n,pc+1,context);
+                o<<renderedRegisterName(p,loop.a+3+n,pc+1,context);
             }
             o<<" in "<<renderedLocal(p,loop.a,pc,context)<<", "<<renderedLocal(p,loop.a+1,pc,context)<<", "<<renderedLocal(p,loop.a+2,pc,context)<<" do\n";
+            for(int n=0;n<loop.c;n++){
+                const int loopRegister=loop.a+3+n;
+                if(managedCapturedLocal(p,loopRegister)){
+                    // Each generic-for result is a new captured register
+                    // value in Lua 5.1, even though the source loop is lexical.
+                    const std::string var=renderedRegisterName(p,loopRegister,pc+1,context);
+                    o<<std::string(size_t(indent+4),' ')<<capturedCellName(p,loopRegister,context)<<" = {"<<var<<"}\n";
+                }
+            }
             emitRange(o,p,pc+1,i.target,indent+4,context);
             o<<pad<<"end\n";
             pc=i.target+2;
@@ -1038,17 +1052,6 @@ static bool needsPcDispatcher(const std::string& source){
         "TFORLOOP at pc "
     };
     for(const char* marker:markers) if(source.find(marker)!=std::string::npos) return true;
-    return false;
-}
-static bool hasCapturedLoopVariables(const Proto& p){
-    for(const Instr& instruction:p.code){
-        if(instruction.op==31||instruction.op==32){
-            if(managedCapturedLocal(p,instruction.a+3)) return true;
-        }else if(instruction.op==33){
-            for(int registerIndex=instruction.a+3;registerIndex<instruction.a+3+instruction.c;++registerIndex)
-                if(managedCapturedLocal(p,registerIndex)) return true;
-        }
-    }
     return false;
 }
 static std::string dispatcherPcName(const Proto& p,const RenderContext& context){
@@ -1188,7 +1191,7 @@ static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext&
     }
     std::ostringstream structured;
     emitRange(structured,p,0,int(p.code.size()),indent,context);
-    if(hasCapturedLoopVariables(p)||needsPcDispatcher(structured.str())){
+    if(needsPcDispatcher(structured.str())){
         context.stateMachine=true;
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
         emitPcDispatcher(o,p,indent,context);

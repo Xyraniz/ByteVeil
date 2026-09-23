@@ -40,14 +40,21 @@ grep -q 'elseif\|else' "$TMP/reconstructed.lua"
 cat >"$TMP/numeric-closures.lua" <<'LUA'
 local functions = {}
 for index = 1, 3 do
-    functions[index] = function() return index end
+    functions[index] = function(amount)
+        index = index + amount
+        return index
+    end
 end
 return functions
 LUA
 cat >"$TMP/generic-closures.lua" <<'LUA'
 local functions = {}
 for key, value in ipairs({ "alpha", "beta", "gamma" }) do
-    functions[key] = function() return key, value end
+    functions[key] = function(increment, suffix)
+        key = key + increment
+        value = value .. suffix
+        return key, value
+    end
 end
 return functions
 LUA
@@ -55,6 +62,14 @@ LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/generic-closures.luac" "$TMP/generic-closures.lua"
 "$BIN" --bytecode "$TMP/numeric-closures.luac" --format lua > "$TMP/numeric-closures.reconstructed.lua"
 "$BIN" --bytecode "$TMP/generic-closures.luac" --format lua > "$TMP/generic-closures.reconstructed.lua"
+if grep -q 'PC dispatcher' "$TMP/numeric-closures.reconstructed.lua"; then
+    echo "numeric for with a captured loop variable was not reconstructed structurally" >&2
+    exit 1
+fi
+if grep -q 'PC dispatcher' "$TMP/generic-closures.reconstructed.lua"; then
+    echo "generic for with captured loop variables was not reconstructed structurally" >&2
+    exit 1
+fi
 NUMERIC_ORIGINAL_PATH="$TMP/numeric-closures.lua"
 NUMERIC_RECONSTRUCTED_PATH="$TMP/numeric-closures.reconstructed.lua"
 GENERIC_ORIGINAL_PATH="$TMP/generic-closures.lua"
@@ -65,5 +80,5 @@ if command -v cygpath >/dev/null 2>&1; then
     GENERIC_ORIGINAL_PATH="$(cygpath -m "$GENERIC_ORIGINAL_PATH")"
     GENERIC_RECONSTRUCTED_PATH="$(cygpath -m "$GENERIC_RECONSTRUCTED_PATH")"
 fi
-"$BYTEVEIL_LUA51" -e "local original=assert(loadfile('$NUMERIC_ORIGINAL_PATH'))(); local reconstructed=assert(loadfile('$NUMERIC_RECONSTRUCTED_PATH'))(); for i=1,3 do assert(original[i]()==i); assert(reconstructed[i]()==original[i]()) end; local original_generic=assert(loadfile('$GENERIC_ORIGINAL_PATH'))(); local reconstructed_generic=assert(loadfile('$GENERIC_RECONSTRUCTED_PATH'))(); local expected={'alpha','beta','gamma'}; for i=1,3 do local key,value=original_generic[i](); local got_key,got_value=reconstructed_generic[i](); assert(key==i and value==expected[i]); assert(got_key==key and got_value==value) end"
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_loop_closure_runtime.lua" "$NUMERIC_ORIGINAL_PATH" "$NUMERIC_RECONSTRUCTED_PATH" "$GENERIC_ORIGINAL_PATH" "$GENERIC_RECONSTRUCTED_PATH"
 printf 'Lua 5.1 reconstruction tests: PASS\n'
