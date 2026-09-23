@@ -2058,6 +2058,51 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     trueEnd=join;
                 }
             }
+            // The outer then arm can jump past its else arm into a shared
+            // continuation, while every path through the else arm jumps over
+            // that continuation to a later join. Extend both arms through
+            // the shared range so their existing forward branches stay local.
+            if(join>falseBegin&&join<end){
+                int sharedJoin=-1;
+                int sharedExitCount=0;
+                bool validSharedContinuation=true;
+                auto branchTarget=[&](const Instr& edge){
+                    if(edge.op==22||edge.op==31||edge.op==32||edge.op==33) return edge.target;
+                    if((isCondition(edge.op)||edge.op==27)&&edge.pc+1<int(p.code.size())&&
+                       p.code[size_t(edge.pc+1)].op==22) return p.code[size_t(edge.pc+1)].target;
+                    if(edge.op==2&&edge.c) return edge.target;
+                    return -1;
+                };
+                for(int branch=falseBegin;branch<join;++branch){
+                    const int target=branchTarget(p.code[size_t(branch)]);
+                    if(target>join){
+                        if(sharedJoin<0) sharedJoin=target;
+                        else if(sharedJoin!=target) validSharedContinuation=false;
+                        ++sharedExitCount;
+                    }
+                }
+                if(sharedExitCount==0||sharedJoin<=join||sharedJoin>=end)
+                    validSharedContinuation=false;
+                for(int branch=falseBegin;branch<join&&validSharedContinuation;++branch){
+                    const int target=branchTarget(p.code[size_t(branch)]);
+                    if(target>join&&target!=sharedJoin) validSharedContinuation=false;
+                }
+                if(validSharedContinuation){
+                    for(const Instr& edge:p.code){
+                        const int target=branchTarget(edge);
+                        const bool withinExpandedIf=edge.pc>=pc&&edge.pc<sharedJoin;
+                        if(target>=falseBegin&&target<sharedJoin&&!withinExpandedIf&&
+                           !(edge.pc==pc+1&&target==falseBegin))
+                            validSharedContinuation=false;
+                        if(target>=join&&target<sharedJoin&&!withinExpandedIf)
+                            validSharedContinuation=false;
+                    }
+                }
+                if(validSharedContinuation){
+                    join=sharedJoin;
+                    trueEnd=join;
+                }
+            }
             o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget,loopContinueTarget,loopBreakFlag);
             if(join> falseBegin){ o<<pad<<"else\n"; emitRange(o,p,falseBegin,join,indent+4,context,true,loopBreakTarget,loopContinueTarget,loopBreakFlag); }
             o<<pad<<"end\n"; pc=join; continue;
