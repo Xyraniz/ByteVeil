@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" "$TMP/shared-else-join.luac" "$TMP/shared-body-guards.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -490,6 +490,34 @@ open(sys.argv[48], "wb").write(build(
     [(4, b"guard1"), (4, b"guard2"), (4, b"status"), (4, b"StatusCode"),
      (3, 200), (4, b"warn"), (4, b"rejected"), (4, b"observe"), (4, b"decoded"), (3, 1000)],
     maxstack=6))
+
+# A then-arm branch can skip a straight-line else arm and continue at their
+# shared tail. The else side effect must stay exclusive to the outer false path.
+shared_else_join = [
+    getglobal(0, 0), 26, jmp(2, 9),
+    getglobal(1, 1), call(1, 1, 2), 26 | (1 << 6), jmp(6, 13),
+    2 | (2 << 6) | (1 << 23), ret(2, 2),
+    getglobal(3, 2), call(3, 1, 1), loadk(3, 3), 0 | (3 << 6) | (3 << 23),
+    getglobal(4, 4), call(4, 1, 2), ret(4, 2),
+]
+open(sys.argv[49], "wb").write(build(
+    shared_else_join,
+    [(4, b"gate"), (4, b"compare"), (4, b"onElse"), (4, b"unused"), (4, b"observe")],
+    maxstack=5))
+
+# Consecutive tests can all branch around one successful return body. The
+# comparison setup and body call run only when every guard passes.
+shared_body_guards = [
+    getglobal(0, 0), 26, jmp(2, 13),
+    getglobal(1, 1), call(1, 1, 2), 26 | (1 << 6), jmp(6, 13),
+    getglobal(2, 2), 26 | (2 << 6), jmp(9, 13),
+    getglobal(3, 3), call(3, 1, 2), ret(3, 2),
+    getglobal(3, 4), call(3, 1, 2), ret(3, 2),
+]
+open(sys.argv[50], "wb").write(build(
+    shared_body_guards,
+    [(4, b"guard1"), (4, b"prepare"), (4, b"guard2"), (4, b"observe"), (4, b"fallback")],
+    maxstack=4))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -803,6 +831,42 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_return_guard_runtime.lua" \
         "$SHARED_RETURN_GUARDS_BYTECODE" "$SHARED_RETURN_GUARDS_LUA"
+fi
+"$BIN" --bytecode "$TMP/shared-else-join.luac" --format lua >"$TMP/shared-else-join.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/shared-else-join.lua"; then
+    echo "branch to the shared tail after an else block still needs a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/shared-else-join.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    SHARED_ELSE_JOIN_BYTECODE="$TMP/shared-else-join.luac"
+    SHARED_ELSE_JOIN_LUA="$TMP/shared-else-join.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        SHARED_ELSE_JOIN_BYTECODE="$(cygpath -m "$SHARED_ELSE_JOIN_BYTECODE")"
+        SHARED_ELSE_JOIN_LUA="$(cygpath -m "$SHARED_ELSE_JOIN_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_else_join_runtime.lua" \
+        "$SHARED_ELSE_JOIN_BYTECODE" "$SHARED_ELSE_JOIN_LUA"
+fi
+"$BIN" --bytecode "$TMP/shared-body-guards.luac" --format lua >"$TMP/shared-body-guards.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/shared-body-guards.lua"; then
+    echo "shared returning guard body still requires a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/shared-body-guards.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    SHARED_BODY_GUARDS_BYTECODE="$TMP/shared-body-guards.luac"
+    SHARED_BODY_GUARDS_LUA="$TMP/shared-body-guards.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        SHARED_BODY_GUARDS_BYTECODE="$(cygpath -m "$SHARED_BODY_GUARDS_BYTECODE")"
+        SHARED_BODY_GUARDS_LUA="$(cygpath -m "$SHARED_BODY_GUARDS_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_body_guard_runtime.lua" \
+        "$SHARED_BODY_GUARDS_BYTECODE" "$SHARED_BODY_GUARDS_LUA"
 fi
 "$BIN" --bytecode "$TMP/colon-flow-entry.luac" --format lua >"$TMP/colon-flow-entry.lua"
 if grep -Fq ':ping(' "$TMP/colon-flow-entry.lua"; then

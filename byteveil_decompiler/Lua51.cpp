@@ -1245,6 +1245,96 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 }
             }
         }
+        // A sequence of guards may all jump to one continuation, while the
+        // fallthrough path computes and returns a value. Nest the checks so
+        // setup and calls stay lazy, then resume once at the shared target.
+        if(isCondition(i.op)&&pc+1<end&&p.code[pc+1].op==22){
+            struct SharedBodyGuard { int pc; int target; int gapBegin; int gapEnd; };
+            std::vector<SharedBodyGuard> guards;
+            int cursor=pc;
+            for(size_t count=0;count<8&&cursor+1<end&&isCondition(p.code[size_t(cursor)].op)&&
+                p.code[size_t(cursor+1)].op==22;++count){
+                guards.push_back({cursor,p.code[size_t(cursor+1)].target,cursor+2,cursor+2});
+                int next=cursor+2;
+                while(next<end&&next-(cursor+2)<16&&straightLineConditionGap(p.code[size_t(next)])&&
+                      !(p.code[size_t(next)].op==2&&p.code[size_t(next)].c!=0)) ++next;
+                if(next+1<end&&isCondition(p.code[size_t(next)].op)&&
+                   p.code[size_t(next+1)].op==22&&
+                   p.code[size_t(next+1)].target==guards.front().target){
+                    guards.back().gapEnd=next;
+                    cursor=next;
+                }else break;
+            }
+            if(guards.size()>=2){
+                const int join=guards.front().target;
+                const int bodyBegin=guards.back().pc+2;
+                bool valid=join>bodyBegin&&join<=end&&join-bodyBegin<=64&&
+                    p.code[size_t(join-1)].op==30;
+                for(const SharedBodyGuard& guard:guards)
+                    if(guard.target!=join) valid=false;
+                // The shared body can contain ordinary forward if/else blocks.
+                // Keep those for emitRange to structure, but reject loop edges,
+                // out-of-range jumps, and instructions that need special state.
+                for(int scan=bodyBegin;scan<join-1&&valid;++scan){
+                    const Instr& instruction=p.code[size_t(scan)];
+                    if(instruction.op==22){
+                        if(instruction.target<=scan||instruction.target>join) valid=false;
+                    }else if(instruction.op>=23&&instruction.op<=27){
+                        if(scan+1>=join||p.code[size_t(scan+1)].op!=22||
+                           p.code[size_t(scan+1)].target<=scan+1||
+                           p.code[size_t(scan+1)].target>join) valid=false;
+                    }else if((instruction.op>=29&&instruction.op<=33)||instruction.op==35||
+                             instruction.op==36||(instruction.op==2&&instruction.c!=0)) valid=false;
+                }
+                auto hasExternalEntry=[&](int target){
+                    for(const Instr& instruction:p.code){
+                        int edgeTarget=-1;
+                        if(instruction.op==22||instruction.op==31||instruction.op==32||instruction.op==33)
+                            edgeTarget=instruction.target;
+                        else if((instruction.op>=23&&instruction.op<=27)&&
+                                instruction.pc+1<int(p.code.size())&&
+                                p.code[size_t(instruction.pc+1)].op==22)
+                            edgeTarget=p.code[size_t(instruction.pc+1)].target;
+                        else if(instruction.op==2&&instruction.c) edgeTarget=instruction.target;
+                        if(edgeTarget==target&&
+                           (instruction.pc<bodyBegin||instruction.pc>=join)) return true;
+                    }
+                    return false;
+                };
+                // No unrelated edge may enter a setup gap or the returning
+                // body and bypass one or more guards. Edges inside the body
+                // are allowed because emitRange handles its local if/else CFG.
+                if(valid){
+                    for(const SharedBodyGuard& guard:guards){
+                        if(guard.pc!=pc&&hasExternalEntry(guard.pc)) valid=false;
+                        for(int target=guard.gapBegin;target<guard.gapEnd;++target)
+                            if(hasExternalEntry(target)) valid=false;
+                    }
+                    for(int target=bodyBegin;target<join&&valid;++target)
+                        if(hasExternalEntry(target)) valid=false;
+                }
+                if(valid){
+                    int nestedIndent=indent;
+                    for(size_t index=0;index<guards.size();++index){
+                        const SharedBodyGuard& guard=guards[index];
+                        o<<std::string(size_t(nestedIndent),' ')<<"if "
+                         <<conditionExpr(p,p.code[size_t(guard.pc)],context)<<" then\n";
+                        if(guard.gapBegin<guard.gapEnd)
+                            emitRange(o,p,guard.gapBegin,guard.gapEnd,nestedIndent+4,context,
+                                      allowInfiniteLoop,loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                        nestedIndent+=4;
+                    }
+                    emitRange(o,p,bodyBegin,join,nestedIndent,context,false,
+                              loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                    while(nestedIndent>indent){
+                        nestedIndent-=4;
+                        o<<std::string(size_t(nestedIndent),' ')<<"end\n";
+                    }
+                    pc=join;
+                    continue;
+                }
+            }
+        }
         // Lua 5.1 lowers `a or b or ...` conditions to comparison/test and
         // JMP pairs. Earlier pairs jump to the shared true body; the final
         // pair jumps past it when false. Fold that shape before recursively
@@ -1831,6 +1921,50 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                     if(hasNestedSharedBranch&&exitsOnlyAtJoin) trueEnd=join;
                 }else if(tailJump.target==falseBegin&&!repeatLatch){
                     trueEnd=predicateOwnsTailJump?falseBegin:falseBegin-1;
+                }
+            }
+            // A nested branch may skip a straight-line outer else arm and
+            // resume at its shared tail. Extend the parent if/else through
+            // that tail so the nested branch can fall out of the then arm.
+            if(join==falseBegin&&falseBegin<end){
+                int sharedJoin=-1;
+                bool validSharedElse=true;
+                for(int branch=trueBegin;branch<falseBegin;++branch){
+                    const Instr& edge=p.code[size_t(branch)];
+                    int target=-1;
+                    if(edge.op==22) target=edge.target;
+                    else if((isCondition(edge.op)||edge.op==27)&&branch+1<falseBegin&&
+                            p.code[size_t(branch+1)].op==22) target=p.code[size_t(branch+1)].target;
+                    else if(edge.op==2&&edge.c) target=edge.target;
+                    if(target>falseBegin){
+                        if(sharedJoin<0) sharedJoin=target;
+                        else if(sharedJoin!=target) validSharedElse=false;
+                    }
+                    if(target==falseBegin) validSharedElse=false;
+                }
+                if(sharedJoin<=falseBegin||sharedJoin>=end) validSharedElse=false;
+                for(int scan=falseBegin;scan<sharedJoin&&validSharedElse;++scan){
+                    const Instr& instruction=p.code[size_t(scan)];
+                    if(!straightLineConditionGap(instruction)||
+                       (instruction.op==2&&instruction.c!=0)) validSharedElse=false;
+                }
+                for(int target=falseBegin+1;target<sharedJoin&&validSharedElse;++target)
+                    if(hasControlEntryAt(p,target)) validSharedElse=false;
+                if(validSharedElse){
+                    for(const Instr& edge:p.code){
+                        int target=-1;
+                        if(edge.op==22||edge.op==31||edge.op==32||edge.op==33) target=edge.target;
+                        else if(edge.op>=23&&edge.op<=27&&edge.pc+1<int(p.code.size())&&
+                                p.code[size_t(edge.pc+1)].op==22) target=p.code[size_t(edge.pc+1)].target;
+                        else if(edge.op==2&&edge.c) target=edge.target;
+                        const bool outsideRegion=edge.pc<pc||edge.pc>=sharedJoin;
+                        if(outsideRegion&&target>=falseBegin&&target<sharedJoin) validSharedElse=false;
+                        if(outsideRegion&&target==sharedJoin) validSharedElse=false;
+                    }
+                }
+                if(validSharedElse){
+                    join=sharedJoin;
+                    trueEnd=join;
                 }
             }
             o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n"; emitRange(o,p,trueBegin,trueEnd,indent+4,context,true,loopBreakTarget,loopContinueTarget,loopBreakFlag);
