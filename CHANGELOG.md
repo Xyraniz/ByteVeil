@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased - Lua 5.1 method-call recovery
+
+### Added
+
+- A `SELF` followed directly by a no-argument `CALL` or `TAILCALL` with a
+  literal identifier key now renders as Lua's `receiver:method()` syntax. The
+  same expression is preserved when the method's open results feed the next
+  open-argument call.
+
+### Explicit limit
+
+- This fold only applies to adjacent instructions, a fixed receiver register,
+  one implicit receiver argument, and a safe literal identifier. Other method
+  calls retain explicit register and lookup instructions.
+
+### Validation
+
+- Added Lua 5.1.5 execution regressions for direct colon calls and a method
+  whose multiple results feed an open-argument call. Full CTest: **9/9 PASS**.
+- On the public MoonSec V3 corpus, **531** eligible call shapes use colon
+  syntax and aggregate lifted output fell by **60,976** bytes; all **21/21**
+  files still parse as Lua 5.1.
+
 ## Unreleased - Lua 5.1 open-arity calls and returns
 
 ### Added

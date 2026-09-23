@@ -489,13 +489,16 @@ static std::string renderedOpenArgs(const Proto& p,const Instr& consumer,const R
     result<<tail;
     return result.str();
 }
+static bool colonMethodCall(const Proto& p,int selfPc,int callPc);
+static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context);
 static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
     if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return {};
     const Instr& producer=p.code[size_t(producerPc)];
     if(producer.op==37&&producer.b==0) return "...";
     if(producer.op!=28||producer.c!=0) return {};
-    const std::string fn=renderedValueAt(p,producer.a,producer.pc,context);
-    const std::string callArgs=producer.b==0
+    const bool colonCall=producerPc>0&&colonMethodCall(p,producerPc-1,producerPc);
+    const std::string fn=colonCall?colonMethodTarget(p,producer,context):renderedValueAt(p,producer.a,producer.pc,context);
+    const std::string callArgs=colonCall?std::string():producer.b==0
         ?renderedOpenArgs(p,producer,context,depth+1)
         :renderedArgs(p,producer.a,producer.b,producer.pc,context);
     if(producer.b==0&&callArgs.empty()) return {};
@@ -508,6 +511,20 @@ static bool openProducerConsumedInRange(const Proto& p,int producerPc,int end){
     if(!openResultProducer(producer)||openProducerFor(p,consumer)!=producerPc) return false;
     return ((consumer.op==28||consumer.op==29)&&consumer.b==0)||
            (consumer.op==30&&consumer.b==0);
+}
+static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
+    if(selfPc<0||callPc!=selfPc+1||callPc>=int(p.code.size())) return false;
+    const Instr& self=p.code[size_t(selfPc)];
+    const Instr& call=p.code[size_t(callPc)];
+    if(self.op!=11||(call.op!=28&&call.op!=29)||call.a!=self.a||call.b!=2||!(self.c&256)) return false;
+    const int keyIndex=self.c&255;
+    return keyIndex<int(p.constantTable.size())&&p.constantTable[size_t(keyIndex)].type=="string"&&
+           validIdentifier(p.constantTable[size_t(keyIndex)].value);
+}
+static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context){
+    const Instr& self=p.code[size_t(call.pc-1)];
+    const int keyIndex=self.c&255;
+    return renderedLocal(p,self.b,self.pc,context)+":"+p.constantTable[size_t(keyIndex)].value;
 }
 static std::string renderedOpenReturnValues(const Proto& p,const Instr& consumer,const RenderContext& context){
     const int producerPc=openProducerFor(p,consumer);
@@ -598,7 +615,7 @@ static RenderContext closureContext(const Proto& p,const Instr& closure,const Re
     return result;
 }
 static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int indent,const RenderContext& context,bool allowInfiniteLoop=true);
-static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context){
+static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false){
     std::string pad(indent,' ');
     if(i.closureBindingFor>=0) return;
     switch(i.op){
@@ -622,22 +639,24 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 21:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<" .. "<<renderedLocal(p,i.c,i.pc,context)<<"\n";break;
     case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<renderedLocal(p,i.a,i.pc,context)<<" from "<<renderedLocal(p,i.b,i.pc,context)<<" (C="<<i.c<<")\n";break;
     case 28:{
-        const std::string callArgs=i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        const std::string callArgs=colonCall?std::string():i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        const std::string target=colonCall?colonMethodTarget(p,i,context):renderedLocal(p,i.a,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has unresolved open arguments\n";
         if(i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";
-        if(i.c==1)o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";
+        if(i.c==1)o<<pad<<target<<"("<<callArgs<<")\n";
         else {
             int results=i.c==0?1:i.c-1;
             o<<pad;
             for(int r=0;r<results;r++){if(r)o<<", ";o<<renderedLocal(p,i.a+r,i.pc,context);}
-            o<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";
+            o<<" = "<<target<<"("<<callArgs<<")\n";
         }
         break;
     }
     case 29:{
-        const std::string callArgs=i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        const std::string callArgs=colonCall?std::string():i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has unresolved open arguments\n";
-        o<<pad<<"return "<<renderedValueAt(p,i.a,i.pc,context)<<"("<<callArgs<<")\n";break;
+        const std::string target=colonCall?colonMethodTarget(p,i,context):renderedValueAt(p,i.a,i.pc,context);
+        o<<pad<<"return "<<target<<"("<<callArgs<<")\n";break;
     }
     case 30:{
         if(i.b==0){
@@ -841,7 +860,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
         }
         const bool inlineOpenResults=openProducerConsumedInRange(p,pc,end);
-        if(!loopSetup && !returnSetup && !inlineOpenResults) emitSimple(o,p,i,indent,context);
+        const bool inlineSelf=pc+1<end&&colonMethodCall(p,pc,pc+1);
+        const bool colonCall=pc>begin&&colonMethodCall(p,pc-1,pc);
+        if(!loopSetup && !returnSetup && !inlineOpenResults && !inlineSelf)
+            emitSimple(o,p,i,indent,context,colonCall);
         if(i.op==29 || i.op==30) break;
         if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;
