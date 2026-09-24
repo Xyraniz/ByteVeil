@@ -533,8 +533,11 @@ static std::string renderedOpenArgs(const Proto& p,const Instr& consumer,const R
     return result.str();
 }
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc);
+static int colonMethodCallAfter(const Proto& p,int selfPc);
+static int colonMethodSelfForCall(const Proto& p,int callPc);
 static bool hasControlEntryAt(const Proto& p,int targetPc);
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context);
+static std::string colonMethodArguments(const Proto& p,const Instr& call,const RenderContext& context);
 static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
     if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return {};
     const Instr& producer=p.code[size_t(producerPc)];
@@ -543,7 +546,7 @@ static std::string openProducerExpression(const Proto& p,int producerPc,const Re
     const bool colonCall=producerPc>0&&colonMethodCall(p,producerPc-1,producerPc)&&
         !hasControlEntryAt(p,producerPc);
     const std::string fn=colonCall?colonMethodTarget(p,producer,context):renderedValueAt(p,producer.a,producer.pc,context);
-    const std::string callArgs=colonCall?std::string():producer.b==0
+    const std::string callArgs=colonCall?colonMethodArguments(p,producer,context):producer.b==0
         ?renderedOpenArgs(p,producer,context,depth+1)
         :renderedArgs(p,producer.a,producer.b,producer.pc,context);
     if(producer.b==0&&callArgs.empty()) return {};
@@ -558,13 +561,46 @@ static bool openProducerConsumedInRange(const Proto& p,int producerPc,int end){
            (consumer.op==30&&consumer.b==0)||(consumer.op==34&&consumer.b==0);
 }
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
-    if(selfPc<0||callPc!=selfPc+1||callPc>=int(p.code.size())) return false;
+    if(selfPc<0||callPc<=selfPc||callPc>=int(p.code.size())||callPc-selfPc>33) return false;
     const Instr& self=p.code[size_t(selfPc)];
     const Instr& call=p.code[size_t(callPc)];
-    if(self.op!=11||(call.op!=28&&call.op!=29)||call.a!=self.a||call.b!=2||!(self.c&256)) return false;
+    if(self.op!=11||(call.op!=28&&call.op!=29)||call.a!=self.a||call.b<2||!(self.c&256)) return false;
     const int keyIndex=self.c&255;
-    return keyIndex<int(p.constantTable.size())&&p.constantTable[size_t(keyIndex)].type=="string"&&
-           validIdentifier(p.constantTable[size_t(keyIndex)].value);
+    if(keyIndex>=int(p.constantTable.size())||p.constantTable[size_t(keyIndex)].type!="string"||
+       !validIdentifier(p.constantTable[size_t(keyIndex)].value)||hasControlEntryAt(p,callPc)) return false;
+    const int firstArgument=self.a+2;
+    const int lastArgument=self.a+call.b-1;
+    if(lastArgument>=p.maxstack||(self.b>=firstArgument&&self.b<=lastArgument)) return false;
+    for(int pc=selfPc+1;pc<callPc;++pc){
+        if(hasControlEntryAt(p,pc)) return false;
+        const Instr& setup=p.code[size_t(pc)];
+        int firstWritten=setup.a,lastWritten=setup.a;
+        if(setup.op==3) lastWritten=setup.b;
+        else if(setup.op==2&&setup.c!=0) return false;
+        else if(setup.op!=0&&setup.op!=1&&setup.op!=2) return false;
+        if(firstArgument>lastArgument||firstWritten<firstArgument||lastWritten>lastArgument) return false;
+    }
+    return true;
+}
+static int colonMethodCallAfter(const Proto& p,int selfPc){
+    if(selfPc<0||selfPc>=int(p.code.size())) return -1;
+    const int end=std::min(int(p.code.size()),selfPc+34);
+    for(int pc=selfPc+1;pc<end;++pc){
+        const int op=p.code[size_t(pc)].op;
+        if(op==28||op==29) return colonMethodCall(p,selfPc,pc)?pc:-1;
+        if(op!=0&&op!=1&&op!=2&&op!=3) return -1;
+    }
+    return -1;
+}
+static int colonMethodSelfForCall(const Proto& p,int callPc){
+    if(callPc<0||callPc>=int(p.code.size())) return -1;
+    const int begin=std::max(0,callPc-33);
+    for(int pc=callPc-1;pc>=begin;--pc){
+        const int op=p.code[size_t(pc)].op;
+        if(op==11) return colonMethodCall(p,pc,callPc)?pc:-1;
+        if(op!=0&&op!=1&&op!=2&&op!=3) return -1;
+    }
+    return -1;
 }
 static bool hasControlEntryAt(const Proto& p,int targetPc){
     for(const Instr& instruction:p.code){
@@ -600,9 +636,19 @@ static std::string renderedInlineReadBase(const Proto& p,int registerIndex,int c
     return base+"["+renderedValue(p,producer.c,producer.pc,context)+"]";
 }
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context){
-    const Instr& self=p.code[size_t(call.pc-1)];
+    const int selfPc=colonMethodSelfForCall(p,call.pc);
+    if(selfPc<0) return renderedLocal(p,call.a,call.pc,context);
+    const Instr& self=p.code[size_t(selfPc)];
     const int keyIndex=self.c&255;
     return renderedLocal(p,self.b,self.pc,context)+":"+p.constantTable[size_t(keyIndex)].value;
+}
+static std::string colonMethodArguments(const Proto& p,const Instr& call,const RenderContext& context){
+    std::ostringstream result;
+    for(int registerIndex=call.a+2;registerIndex<call.a+call.b;++registerIndex){
+        if(registerIndex>call.a+2) result<<", ";
+        result<<renderedValueAt(p,registerIndex,call.pc,context);
+    }
+    return result.str();
 }
 static std::string renderedOpenReturnValues(const Proto& p,const Instr& consumer,const RenderContext& context){
     const int producerPc=openProducerFor(p,consumer);
@@ -874,7 +920,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 21:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<" .. "<<renderedLocal(p,i.c,i.pc,context)<<"\n";break;
     case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<renderedLocal(p,i.a,i.pc,context)<<" from "<<renderedLocal(p,i.b,i.pc,context)<<" (C="<<i.c<<")\n";break;
     case 28:{
-        const std::string callArgs=colonCall?std::string():i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        const std::string callArgs=colonCall?colonMethodArguments(p,i,context):i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
         const std::string target=colonCall?colonMethodTarget(p,i,context):renderedLocal(p,i.a,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has unresolved open arguments\n";
         if(i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";
@@ -888,7 +934,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
         break;
     }
     case 29:{
-        const std::string callArgs=colonCall?std::string():i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
+        const std::string callArgs=colonCall?colonMethodArguments(p,i,context):i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has unresolved open arguments\n";
         const std::string target=colonCall?colonMethodTarget(p,i,context):renderedValueAt(p,i.a,i.pc,context);
         o<<pad<<"return "<<target<<"("<<callArgs<<")\n";break;
@@ -2217,10 +2263,12 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 if(p.code[f].op==32 && i.a>=p.code[f].a && i.a<=p.code[f].a+2) loopSetup=true;
         }
         const bool inlineOpenResults=openProducerConsumedInRange(p,pc,end);
-        const bool inlineSelf=pc+1<end&&colonMethodCall(p,pc,pc+1)&&
+        const int methodCallPc=!context.stateMachine&&i.op==11?colonMethodCallAfter(p,pc):-1;
+        const bool inlineSelf=methodCallPc>pc&&methodCallPc<end&&
             !hasControlEntryAt(p,pc+1);
-        const bool colonCall=pc>begin&&colonMethodCall(p,pc-1,pc)&&
-            !hasControlEntryAt(p,pc);
+        const int methodSelfPc=!context.stateMachine&&pc>begin&&(i.op==28||i.op==29)
+            ?colonMethodSelfForCall(p,pc):-1;
+        const bool colonCall=methodSelfPc>=begin&&!hasControlEntryAt(p,pc);
         if(!context.stateMachine&&canInlineReadProducer(p,pc,end,context)){
             ++pc;
             continue;

@@ -55,6 +55,28 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_read_chain_runtime.lua" \
     "$READ_CHAIN_ORIGINAL_PATH" "$READ_CHAIN_RECONSTRUCTED_PATH"
+cat >"$TMP/method-argument.lua" <<'LUA'
+local function invoke(object, argument)
+    return object:ping(argument)
+end
+local function invokeComputed(object, evaluate)
+    return object:ping(evaluate())
+end
+return invoke, invokeComputed
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/method-argument.luac" "$TMP/method-argument.lua"
+"$BIN" --bytecode "$TMP/method-argument.luac" --format lua > "$TMP/method-argument.reconstructed.lua"
+test "$(grep -Fc ':ping(' "$TMP/method-argument.reconstructed.lua")" -eq 1
+grep -Eq 'return r[0-9]+:ping\(r[0-9]+\)' "$TMP/method-argument.reconstructed.lua"
+"$BYTEVEIL_LUAC51" -p "$TMP/method-argument.reconstructed.lua"
+METHOD_ARGUMENT_ORIGINAL_PATH="$TMP/method-argument.lua"
+METHOD_ARGUMENT_RECONSTRUCTED_PATH="$TMP/method-argument.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    METHOD_ARGUMENT_ORIGINAL_PATH="$(cygpath -m "$METHOD_ARGUMENT_ORIGINAL_PATH")"
+    METHOD_ARGUMENT_RECONSTRUCTED_PATH="$(cygpath -m "$METHOD_ARGUMENT_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_method_argument_runtime.lua" \
+    "$METHOD_ARGUMENT_ORIGINAL_PATH" "$METHOD_ARGUMENT_RECONSTRUCTED_PATH"
 ISOLATED_DISPATCH_FIXTURE="$ROOT/tests/fixtures/lua51-isolated-dispatch.luac"
 "$BIN" --bytecode "$ISOLATED_DISPATCH_FIXTURE" --format lua > "$TMP/isolated-dispatch.reconstructed.lua"
 grep -q 'isolated PC dispatcher preserves Lua 5.1 control flow' "$TMP/isolated-dispatch.reconstructed.lua"

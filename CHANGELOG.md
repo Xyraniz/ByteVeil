@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased - Reconstruct Lua 5.1 method calls with simple arguments
+
+### Changed
+
+- `SELF` plus a fixed `CALL` or `TAILCALL` now emits Lua's `object:method(...)`
+  form when the intervening instructions only load or move argument registers.
+  Branch entries, receiver-register overwrites, and effectful argument setup
+  keep their explicit instruction sequence so evaluation order is preserved.
+
+### Validation
+
+- Added a Lua 5.1 runtime differential regression for a method with a register
+  argument and for an effectful argument whose evaluation must remain after
+  method lookup. All nine CTest suites pass.
+- On the 21 MoonSec V3 samples, `:GetService(...)` occurrences rose from 2 to
+  367 and aggregate output fell by 313,281 bytes to 4,401,153 bytes. All outputs
+  still parse with `luaparse` and compile with Lua 5.1; zero unsupported markers
+  and two bounded dispatchers remain. The obfuscated samples were not executed.
+
 ## Unreleased - Inline adjacent Lua 5.1 table reads
 
 ### Changed
