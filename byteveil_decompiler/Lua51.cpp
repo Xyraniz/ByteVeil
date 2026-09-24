@@ -1016,12 +1016,42 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                         const int target=branchTarget(p.code[scan]);
                         if(target>=0&&target!=pc&&(target<=pc||target>loopEnd)){closed=false;break;}
                     }
+                    int externalTailStart=-1;
                     if(closed){
                         for(const Instr& edge:p.code){
                             if(edge.pc>=pc&&edge.pc<loopEnd) continue;
                             const int target=branchTarget(edge);
-                            if(target>pc&&target<loopEnd){closed=false;break;}
+                            if(target>pc&&target<loopEnd){
+                                if(externalTailStart<0) externalTailStart=target;
+                                else if(externalTailStart!=target){closed=false;break;}
+                            }
                         }
+                    }
+                    // Some obfuscators place a shared pre-loop failure arm
+                    // after the loop's final back-edge, immediately before
+                    // its common exit. It is outside the natural loop even
+                    // though its bytecode address lies inside the interval.
+                    // Accept only one external entry into a straight-line
+                    // tail, guarded by an unconditional loop-exit jump; any
+                    // edge from inside the loop into that tail keeps the
+                    // conservative dispatcher fallback.
+                    if(closed&&externalTailStart>=0){
+                        bool isolatedTail=externalTailStart>lastBackEdge&&
+                            externalTailStart>pc&&externalTailStart<loopEnd&&
+                            externalTailStart>0&&p.code[externalTailStart-1].op==22&&
+                            p.code[externalTailStart-1].target==loopEnd;
+                        for(int scan=externalTailStart;scan<loopEnd&&isolatedTail;++scan){
+                            const Instr& tail=p.code[scan];
+                            const bool control=tail.op==22||isCondition(tail.op)||tail.op==27||
+                                tail.op==29||tail.op==30||tail.op==31||tail.op==32||tail.op==33||
+                                (tail.op==2&&tail.c!=0)||(tail.op==34&&tail.c==0);
+                            if(control) isolatedTail=false;
+                        }
+                        for(int scan=pc;scan<externalTailStart&&isolatedTail;++scan){
+                            const int target=branchTarget(p.code[scan]);
+                            if(target>=externalTailStart&&target<loopEnd) isolatedTail=false;
+                        }
+                        if(!isolatedTail) closed=false;
                     }
                     if(closed){
                         o<<pad<<"while true do\n";

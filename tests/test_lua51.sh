@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" "$TMP/shared-else-join.luac" "$TMP/shared-body-guards.luac" "$TMP/guarded-boolean-returns.luac" "$TMP/shared-continuation-after-else.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" "$TMP/shared-else-join.luac" "$TMP/shared-body-guards.luac" "$TMP/guarded-boolean-returns.luac" "$TMP/shared-continuation-after-else.luac" "$TMP/shared-loop-external-tail.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -553,6 +553,22 @@ open(sys.argv[52], "wb").write(build(
     [(4, b"outer"), (4, b"thenAction"), (4, b"inner"),
      (4, b"elseAction"), (4, b"continuation")],
     maxstack=4))
+
+# A two-latch loop has a shared pre-loop failure arm laid out after the loop.
+# The outside guard may enter the linear tail, but no loop path can reach it.
+shared_loop_external_tail = [
+    getglobal(0, 0), 26, jmp(2, 17),
+    getglobal(0, 1), call(0, 1, 2), 26, jmp(6, 19),
+    getglobal(0, 2), call(0, 1, 1),
+    getglobal(0, 3), call(0, 1, 2), 26, jmp(12, 3),
+    getglobal(0, 4), call(0, 1, 1), jmp(15, 3),
+    jmp(16, 19),
+    getglobal(0, 5), call(0, 1, 1), ret(0, 1),
+]
+open(sys.argv[53], "wb").write(build(
+    shared_loop_external_tail,
+    [(4, name) for name in (b"pre", b"loopGate", b"body", b"latch", b"extra", b"fallback")],
+    maxstack=1))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -938,6 +954,24 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_continuation_runtime.lua" \
         "$SHARED_CONTINUATION_BYTECODE" "$SHARED_CONTINUATION_LUA"
+fi
+"$BIN" --bytecode "$TMP/shared-loop-external-tail.luac" --format lua >"$TMP/shared-loop-external-tail.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/shared-loop-external-tail.lua"; then
+    echo "shared external tail around a natural loop still requires a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/shared-loop-external-tail.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    SHARED_LOOP_EXTERNAL_TAIL_BYTECODE="$TMP/shared-loop-external-tail.luac"
+    SHARED_LOOP_EXTERNAL_TAIL_LUA="$TMP/shared-loop-external-tail.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        SHARED_LOOP_EXTERNAL_TAIL_BYTECODE="$(cygpath -m "$SHARED_LOOP_EXTERNAL_TAIL_BYTECODE")"
+        SHARED_LOOP_EXTERNAL_TAIL_LUA="$(cygpath -m "$SHARED_LOOP_EXTERNAL_TAIL_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_loop_external_tail_runtime.lua" \
+        "$SHARED_LOOP_EXTERNAL_TAIL_BYTECODE" "$SHARED_LOOP_EXTERNAL_TAIL_LUA"
 fi
 "$BIN" --bytecode "$TMP/colon-flow-entry.luac" --format lua >"$TMP/colon-flow-entry.lua"
 if grep -Fq ':ping(' "$TMP/colon-flow-entry.lua"; then
