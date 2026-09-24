@@ -37,6 +37,20 @@ grep -q '^repeat$' "$TMP/reconstructed.lua"
 grep -q 'if ' "$TMP/reconstructed.lua"
 grep -q 'elseif\|else' "$TMP/reconstructed.lua"
 ! grep -q 'unsupported opcode retained' "$TMP/reconstructed.lua"
+ISOLATED_DISPATCH_FIXTURE="$ROOT/tests/fixtures/lua51-isolated-dispatch.luac"
+"$BIN" --bytecode "$ISOLATED_DISPATCH_FIXTURE" --format lua > "$TMP/isolated-dispatch.reconstructed.lua"
+grep -q 'isolated PC dispatcher preserves Lua 5.1 control flow' "$TMP/isolated-dispatch.reconstructed.lua"
+! grep -q -- '-- ByteVeil: PC dispatcher preserves Lua 5.1 control flow' "$TMP/isolated-dispatch.reconstructed.lua"
+! grep -q 'branch at pc\|unsupported opcode retained\|left reconstructed range' "$TMP/isolated-dispatch.reconstructed.lua"
+"$BYTEVEIL_LUAC51" -p "$TMP/isolated-dispatch.reconstructed.lua"
+ISOLATED_ORIGINAL_PATH="$ROOT/tests/lua51_isolated_dispatch_reference.lua"
+ISOLATED_RECONSTRUCTED_PATH="$TMP/isolated-dispatch.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    ISOLATED_ORIGINAL_PATH="$(cygpath -m "$ISOLATED_ORIGINAL_PATH")"
+    ISOLATED_RECONSTRUCTED_PATH="$(cygpath -m "$ISOLATED_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_isolated_dispatch_runtime.lua" \
+    "$ISOLATED_ORIGINAL_PATH" "$ISOLATED_RECONSTRUCTED_PATH"
 cat >"$TMP/if-loop.lua" <<'LUA'
 local function bounded(enabled, limit)
     local total = 0

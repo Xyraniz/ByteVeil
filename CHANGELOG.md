@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased - Isolate Lua 5.1 dispatchers to single-exit regions
+
+### Changed
+
+- When structured Lua 5.1 recovery encounters shared branch exits, ByteVeil
+  now checks whether the affected control-flow region has one entry and one
+  exit. It keeps the PC dispatcher inside that bounded region and reconstructs
+  the function prefix and suffix normally. Irregular graphs still use the
+  whole-function dispatcher.
+
+### Validation
+
+- Added a Lua 5.1 runtime differential regression for a shared-exit branch
+  chain; the output keeps only its isolated dispatcher and matches all three
+  tested routes.
+- All nine CTest suites pass. On the 21 MoonSec V3 samples, every output parses
+  with `luaparse` and compiles with Lua 5.1. Whole-function dispatchers fell
+  from two to zero, with isolated dispatchers retained in two root functions;
+  output size fell from 5,298,220 to 4,969,282 bytes. No boundary or unsupported
+  opcode markers remain. The obfuscated samples were not executed, so these
+  checks establish syntax and compilation, not behavioral equivalence.
+
 ## Unreleased - Preserve Lua 5.1 repeat latches inside conditional blocks
 
 ### Corrected

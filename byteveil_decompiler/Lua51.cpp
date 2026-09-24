@@ -2243,6 +2243,123 @@ static int followingControlTarget(const Proto& p,const Instr& i){
     return p.code[size_t(following)].pc+p.code[size_t(following)].sbx+1;
 }
 struct PcBlock { int start=0,end=0; };
+struct DispatcherRegion { int begin=0,end=0; };
+struct ControlFlowGraph {
+    std::vector<std::vector<int>> successors;
+    std::vector<std::vector<int>> predecessors;
+};
+static std::vector<int> controlSuccessors(const Proto& p,const Instr& i){
+    std::vector<int> successors;
+    const int next=i.pc+1;
+    auto add=[&](int target){if(target>=0&&target<=int(p.code.size())) successors.push_back(target);};
+    if(i.closureBindingFor>=0||i.extraWord||i.op==29||i.op==30) return successors;
+    if(i.op==22){add(i.target);return successors;}
+    if(i.op==23||i.op==24||i.op==25||i.op==26||i.op==27){
+        int taken=i.pc+2;
+        if(next<int(p.code.size())&&p.code[size_t(next)].op==22) taken=p.code[size_t(next)].target;
+        add(taken);
+        add(i.pc+2);
+        return successors;
+    }
+    if(i.op==31){add(i.target);add(next);return successors;}
+    if(i.op==32){add(i.target);return successors;}
+    if(i.op==33){add(followingControlTarget(p,i));add(i.pc+2);return successors;}
+    if(i.op==2&&i.c){add(i.pc+2);return successors;}
+    if(i.op==34&&i.c==0){add(i.pc+2);return successors;}
+    if(i.op==36){add(i.pc+1+int(i.captures.size()));return successors;}
+    add(next);
+    return successors;
+}
+static ControlFlowGraph buildControlFlowGraph(const Proto& p){
+    ControlFlowGraph graph;
+    graph.successors.resize(p.code.size());
+    graph.predecessors.resize(p.code.size());
+    for(const Instr& instruction:p.code){
+        if(instruction.pc<0||instruction.pc>=int(p.code.size())) continue;
+        graph.successors[size_t(instruction.pc)]=controlSuccessors(p,instruction);
+        for(int target:graph.successors[size_t(instruction.pc)])
+            if(target<int(p.code.size())) graph.predecessors[size_t(target)].push_back(instruction.pc);
+    }
+    return graph;
+}
+static bool isSingleEntryExitRegion(const ControlFlowGraph& graph,int begin,int end){
+    if(begin<0||end<=begin||end>int(graph.successors.size())) return false;
+    std::set<int> entries,exits;
+    if(begin==0) entries.insert(0);
+    for(int target=begin;target<end;++target){
+        for(int source:graph.predecessors[size_t(target)])
+            if(source<begin||source>=end) entries.insert(target);
+    }
+    for(int source=begin;source<end;++source){
+        for(int target:graph.successors[size_t(source)])
+            if(target<begin||target>=end) exits.insert(target);
+    }
+    return entries.size()==1&&*entries.begin()==begin&&exits.size()==1&&*exits.begin()==end;
+}
+static bool parseMarkerNumber(const std::string& source,size_t& position,int& value){
+    if(position>=source.size()||source[position]<'0'||source[position]>'9') return false;
+    int result=0;
+    while(position<source.size()&&source[position]>='0'&&source[position]<='9'){
+        const int digit=source[position++]-'0';
+        if(result>(std::numeric_limits<int>::max()-digit)/10) return false;
+        result=result*10+digit;
+    }
+    value=result;
+    return true;
+}
+static bool findSingleExitDispatcherRegion(const Proto& p,const std::string& source,DispatcherRegion& region){
+    static const std::string marker="-- ByteVeil: branch at pc ";
+    static const std::string branchTail=" exits current structured range to pc ";
+    static const char* otherMarkers[]={
+        "-- ByteVeil: unsupported opcode retained:",
+        "-- ByteVeil: TESTSET at pc ",
+        "stopped at repeated control-flow pc ",
+        "left reconstructed range at pc ",
+        "FORLOOP at pc ",
+        "FORPREP at pc ",
+        "TFORLOOP at pc "
+    };
+    for(const char* other:otherMarkers) if(source.find(other)!=std::string::npos) return false;
+    std::set<std::pair<int,int>> branches;
+    size_t search=0;
+    while((search=source.find(marker,search))!=std::string::npos){
+        size_t position=search+marker.size();
+        int pc=0,target=0;
+        if(!parseMarkerNumber(source,position,pc)||
+           source.compare(position,branchTail.size(),branchTail)!=0) return false;
+        position+=branchTail.size();
+        if(!parseMarkerNumber(source,position,target)) return false;
+        branches.emplace(pc,target);
+        search=position;
+    }
+    if(branches.empty()) return false;
+    // The localized fallback is intended for short regions.  Keep both the
+    // graph allocation and the bounded interval search predictable on very
+    // large, attacker-controlled chunks; those still use the whole-function
+    // dispatcher below.
+    if(p.code.size()>65536) return false;
+    const int exit=branches.begin()->second;
+    int firstBranch=int(p.code.size());
+    for(const auto& branch:branches){
+        if(branch.second!=exit||branch.first<0||branch.first>=int(p.code.size())) return false;
+        firstBranch=std::min(firstBranch,branch.first);
+    }
+    const ControlFlowGraph graph=buildControlFlowGraph(p);
+    const int lastEnd=std::min(int(p.code.size()),exit+256);
+    const int firstBegin=std::max(0,firstBranch-512);
+    for(int end=exit;end<=lastEnd;++end){
+        for(int begin=firstBranch;begin>=firstBegin&&end-begin<=512;--begin){
+            bool containsEveryMarker=true;
+            for(const auto& branch:branches)
+                if(branch.first<begin||branch.first>=end){containsEveryMarker=false;break;}
+            if(containsEveryMarker&&isSingleEntryExitRegion(graph,begin,end)){
+                region={begin,end};
+                return true;
+            }
+        }
+    }
+    return false;
+}
 static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& block,int indent,const RenderContext& context,const std::string& pcName){
     const std::string pad(size_t(indent),' ');
     for(int pc=block.start;pc<block.end;){
@@ -2313,14 +2430,15 @@ static void emitPcBlock(std::ostringstream& o,const Proto& p,const PcBlock& bloc
     }
     o<<pad<<pcName<<" = "<<block.end<<"\n";
 }
-static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,const RenderContext& context){
-    if(p.code.empty()) return;
+static void emitPcDispatcherRange(std::ostringstream& o,const Proto& p,int indent,const RenderContext& context,int begin,int end){
+    if(p.code.empty()||begin<0||end>int(p.code.size())||end<=begin) return;
     const std::string pad(size_t(indent),' '),pcName=dispatcherPcName(p,context);
-    std::set<int> leaders{0};
+    std::set<int> leaders{begin};
     auto addLeader=[&](int pc){
-        if(pc>=0&&pc<int(p.code.size())&&!p.code[size_t(pc)].extraWord&&p.code[size_t(pc)].closureBindingFor<0) leaders.insert(pc);
+        if(pc>=begin&&pc<end&&!p.code[size_t(pc)].extraWord&&p.code[size_t(pc)].closureBindingFor<0) leaders.insert(pc);
     };
-    for(const Instr& i:p.code){
+    for(int pc=begin;pc<end;++pc){
+        const Instr& i=p.code[size_t(pc)];
         if(i.closureBindingFor>=0||i.extraWord) continue;
         if(i.op==22){addLeader(i.pc+1);addLeader(i.target);}
         else if(isCondition(i.op)||i.op==27){addLeader(i.pc+1);addLeader(i.pc+2);addLeader(followingControlTarget(p,i));}
@@ -2334,10 +2452,13 @@ static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,con
     }
     std::vector<int> starts(leaders.begin(),leaders.end());
     std::vector<PcBlock> blocks;
-    for(size_t n=0;n<starts.size();n++) blocks.push_back({starts[n],n+1<starts.size()?starts[n+1]:int(p.code.size())});
-    o<<pad<<"-- ByteVeil: PC dispatcher preserves Lua 5.1 control flow in function "<<p.id<<"\n";
-    o<<pad<<"local "<<pcName<<" = 0\n";
-    o<<pad<<"while "<<pcName<<" >= 0 and "<<pcName<<" < "<<p.code.size()<<" do\n";
+    for(size_t n=0;n<starts.size();n++) blocks.push_back({starts[n],n+1<starts.size()?starts[n+1]:end});
+    if(begin==0&&end==int(p.code.size()))
+        o<<pad<<"-- ByteVeil: PC dispatcher preserves Lua 5.1 control flow in function "<<p.id<<"\n";
+    else
+        o<<pad<<"-- ByteVeil: isolated PC dispatcher preserves Lua 5.1 control flow in function "<<p.id<<" ("<<begin<<".."<<end<<")\n";
+    o<<pad<<"local "<<pcName<<" = "<<begin<<"\n";
+    o<<pad<<"while "<<pcName<<" >= "<<begin<<" and "<<pcName<<" < "<<end<<" do\n";
     std::function<void(size_t,size_t,int)> dispatch=[&](size_t first,size_t last,int level){
         const std::string branchPad(size_t(level),' ');
         if(last-first==1){
@@ -2354,6 +2475,9 @@ static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,con
     dispatch(0,blocks.size(),indent+4);
     o<<pad<<"end\n";
 }
+static void emitPcDispatcher(std::ostringstream& o,const Proto& p,int indent,const RenderContext& context){
+    emitPcDispatcherRange(o,p,indent,context,0,int(p.code.size()));
+}
 static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext& context,int indent,int firstRegister){
     if(context.stateMachine){
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
@@ -2363,9 +2487,17 @@ static void emitReadableBody(std::ostringstream& o,const Proto& p,RenderContext&
     std::ostringstream structured;
     emitRange(structured,p,0,int(p.code.size()),indent,context);
     if(needsPcDispatcher(structured.str())){
-        context.stateMachine=true;
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
-        emitPcDispatcher(o,p,indent,context);
+        DispatcherRegion region;
+        if(findSingleExitDispatcherRegion(p,structured.str(),region)){
+            if(region.begin>0) emitRange(o,p,0,region.begin,indent,context);
+            emitPcDispatcherRange(o,p,indent,context,region.begin,region.end);
+            if(region.end<int(p.code.size()))
+                emitRange(o,p,region.end,int(p.code.size()),indent,context);
+        }else{
+            context.stateMachine=true;
+            emitPcDispatcher(o,p,indent,context);
+        }
     }else{
         emitRegisterDeclarations(o,p,context,indent,firstRegister);
         o<<structured.str();
