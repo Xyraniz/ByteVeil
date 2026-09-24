@@ -23,7 +23,7 @@ grep -q 'CLOSURE' "$TMP/dis"
 grep -q '^digraph lua51_cfg' "$TMP/graph.dot"
 "$BIN" --bytecode "$ROOT/tests/fixtures/lua51-sample.luac" --format lua >"$TMP/diag.lua"
 grep -q '^-- ByteVeil Lua 5.1 lifted' "$TMP/diag.lua"
-"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" "$TMP/shared-else-join.luac" "$TMP/shared-body-guards.luac" "$TMP/guarded-boolean-returns.luac" "$TMP/shared-continuation-after-else.luac" "$TMP/shared-loop-external-tail.luac" <<'PY'
+"$BYTEVEIL_PYTHON" - "$TMP/binary-strings.luac" "$TMP/setlist-extra.luac" "$TMP/bad-jump.luac" "$TMP/bad-constant.luac" "$TMP/bad-register.luac" "$TMP/missing-extra.luac" "$TMP/generic-for.luac" "$TMP/cyclic-jump.luac" "$TMP/infinite-loop.luac" "$TMP/test-repeat.luac" "$TMP/readable-coverage.luac" "$TMP/closure-local.luac" "$TMP/closure-nested.luac" "$TMP/closure-truncated.luac" "$TMP/closure-invalid-kind.luac" "$TMP/closure-invalid-source.luac" "$TMP/closure-jump-into-binding.luac" "$TMP/testset-and.luac" "$TMP/testset-or.luac" "$TMP/move-overwritten-source.luac" "$TMP/eq-a1.luac" "$TMP/eq-a0.luac" "$TMP/branch-range-escape.luac" "$TMP/open-call-chain.luac" "$TMP/open-vararg-call.luac" "$TMP/open-return-call.luac" "$TMP/open-tailcall.luac" "$TMP/colon-self-call.luac" "$TMP/colon-open-call.luac" "$TMP/nested-branch-exit.luac" "$TMP/colon-flow-entry.luac" "$TMP/open-setlist.luac" "$TMP/open-setlist-vararg.luac" "$TMP/open-branch-entry.luac" "$TMP/close-captured-register.luac" "$TMP/jump-a-ignored-captured-register.luac" "$TMP/conditional-jump-a-ignored-captured-register.luac" "$TMP/bad-jump-a-register.luac" "$TMP/multi-latch-loop.luac" "$TMP/generic-for-continue.luac" "$TMP/numeric-for-continue.luac" "$TMP/generic-for-nested-if.luac" "$TMP/single-latch-loop.luac" "$TMP/guarded-short-circuit.luac" "$TMP/guarded-single-short-circuit.luac" "$TMP/nested-shared-else.luac" "$TMP/nested-loops.luac" "$TMP/shared-return-guards.luac" "$TMP/shared-else-join.luac" "$TMP/shared-body-guards.luac" "$TMP/guarded-boolean-returns.luac" "$TMP/shared-continuation-after-else.luac" "$TMP/shared-loop-external-tail.luac" "$TMP/terminal-return-tail-escape.luac" <<'PY'
 import struct, sys
 
 def u32(value):
@@ -203,13 +203,12 @@ for path_index, polarity in ((21, 1), (22, 0)):
          jmp(3, 5), loadk_else_r2, return_r2],
         [(4, b"then"), (4, b"else")], maxstack=3))
 
-# A nested conditional jump leaves the current then-range and reaches the
-# shared tail.  The renderer must leave that edge visible instead of expanding
-# the shared tail inside the nested branch and then printing it a second time.
+# A nested conditional jump leaves the current then-range and reaches a shared
+# return. The bounded return is safe to inline so the outer range can continue.
 open(sys.argv[23], "wb").write(build(
-    [comparison_with_polarity(0), jmp(1, 5), comparison_with_polarity(0),
-     jmp(3, 7), loadk_then_r2, loadk_else_r2, return_r2, return_r2],
-    [(4, b"inside-range"), (4, b"range-tail")], maxstack=3))
+    [5 | (2 << 14), 5 | (1 << 6) | (3 << 14), comparison_with_polarity(0), jmp(3, 7),
+     23 | (256 << 14), jmp(5, 9), loadk_then_r2, loadk_else_r2, return_r2, return_r2],
+    [(4, b"inside-range"), (4, b"range-tail"), (4, b"left"), (4, b"right")], maxstack=3))
 
 # Open CALL results become the final argument expression of the next CALL.
 # This is equivalent to consume("fixed", produce("payload")), including all
@@ -569,6 +568,20 @@ open(sys.argv[53], "wb").write(build(
     shared_loop_external_tail,
     [(4, name) for name in (b"pre", b"loopGate", b"body", b"latch", b"extra", b"fallback")],
     maxstack=1))
+
+# A nested branch may jump beyond its local range to a short tail whose every
+# path returns. Copying that bounded tail into the branch keeps it structured.
+terminal_return_tail_escape = [
+    getglobal(0, 5), 23 | (256 << 14), jmp(2, 9),
+    getglobal(1, 1), 26 | (1 << 6), jmp(5, 12),
+    getglobal(1, 2), call(1, 1, 2), ret(1, 2),
+    getglobal(1, 3), call(1, 1, 2), ret(1, 2),
+    getglobal(1, 4), call(1, 1, 2), ret(1, 2),
+]
+open(sys.argv[54], "wb").write(build(
+    terminal_return_tail_escape,
+    [(4, name) for name in (b"match", b"inner", b"local", b"other", b"tail", b"mode")],
+    maxstack=2))
 PY
 "$BIN" --bytecode "$TMP/binary-strings.luac" --format json >"$TMP/binary-strings.json"
 "$BIN" --bytecode "$TMP/binary-strings.luac" --dump-constants >"$TMP/binary-strings.txt"
@@ -776,10 +789,22 @@ fi
 grep -Fq 'if not (r0 == r1) then' "$TMP/eq-a1.lua"
 grep -Fq 'if (r0 == r1) then' "$TMP/eq-a0.lua"
 "$BIN" --bytecode "$TMP/branch-range-escape.luac" --format lua >"$TMP/branch-range-escape.lua"
-grep -q 'PC dispatcher preserves Lua 5.1 control flow in function 0' "$TMP/branch-range-escape.lua"
-if grep -Fq 'branch at pc ' "$TMP/branch-range-escape.lua"; then
-    echo "PC dispatcher retained a lost structured-branch marker" >&2
+if grep -q 'PC dispatcher preserves Lua 5.1 control flow\|branch at pc ' "$TMP/branch-range-escape.lua"; then
+    echo "bounded nested return edge was not reconstructed structurally" >&2
     exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/branch-range-escape.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    BRANCH_RANGE_BYTECODE="$TMP/branch-range-escape.luac"
+    BRANCH_RANGE_LUA="$TMP/branch-range-escape.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        BRANCH_RANGE_BYTECODE="$(cygpath -m "$BRANCH_RANGE_BYTECODE")"
+        BRANCH_RANGE_LUA="$(cygpath -m "$BRANCH_RANGE_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_branch_range_tail_runtime.lua" \
+        "$BRANCH_RANGE_BYTECODE" "$BRANCH_RANGE_LUA"
 fi
 "$BIN" --bytecode "$TMP/open-call-chain.luac" --format lua >"$TMP/open-call-chain.lua"
 grep -Fq 'r0("fixed", r2("payload"))' "$TMP/open-call-chain.lua"
@@ -972,6 +997,24 @@ if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
     fi
     "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_shared_loop_external_tail_runtime.lua" \
         "$SHARED_LOOP_EXTERNAL_TAIL_BYTECODE" "$SHARED_LOOP_EXTERNAL_TAIL_LUA"
+fi
+"$BIN" --bytecode "$TMP/terminal-return-tail-escape.luac" --format lua >"$TMP/terminal-return-tail-escape.lua"
+if grep -Fq 'PC dispatcher preserves Lua 5.1 control flow' "$TMP/terminal-return-tail-escape.lua"; then
+    echo "bounded external return tail still requires a PC dispatcher" >&2
+    exit 1
+fi
+if [[ -n "${BYTEVEIL_LUAC51:-}" ]]; then
+    "$BYTEVEIL_LUAC51" -p "$TMP/terminal-return-tail-escape.lua"
+fi
+if [[ -n "${BYTEVEIL_LUA51:-}" ]]; then
+    TERMINAL_RETURN_TAIL_BYTECODE="$TMP/terminal-return-tail-escape.luac"
+    TERMINAL_RETURN_TAIL_LUA="$TMP/terminal-return-tail-escape.lua"
+    if command -v cygpath >/dev/null 2>&1; then
+        TERMINAL_RETURN_TAIL_BYTECODE="$(cygpath -m "$TERMINAL_RETURN_TAIL_BYTECODE")"
+        TERMINAL_RETURN_TAIL_LUA="$(cygpath -m "$TERMINAL_RETURN_TAIL_LUA")"
+    fi
+    "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_terminal_return_tail_escape_runtime.lua" \
+        "$TERMINAL_RETURN_TAIL_BYTECODE" "$TERMINAL_RETURN_TAIL_LUA"
 fi
 "$BIN" --bytecode "$TMP/colon-flow-entry.luac" --format lua >"$TMP/colon-flow-entry.lua"
 if grep -Fq ':ping(' "$TMP/colon-flow-entry.lua"; then

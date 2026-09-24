@@ -684,6 +684,38 @@ static bool straightLineConditionGap(const Instr& instruction){
     if(instruction.op==37) return instruction.b>0;
     return false;
 }
+static bool allPathsReturn(const Proto& p,int begin,int end){
+    if(begin<0||begin>=end||end>int(p.code.size())||end-begin>32) return false;
+    std::vector<unsigned char> state(size_t(end-begin),0);
+    std::function<bool(int)> visit=[&](int pc){
+        if(pc<begin||pc>=end) return false;
+        unsigned char& current=state[size_t(pc-begin)];
+        if(current==2) return true;
+        if(current==1||current==3) return false;
+        current=1;
+        const Instr& instruction=p.code[size_t(pc)];
+        bool returns=false;
+        if(instruction.op==29||instruction.op==30){
+            returns=true;
+        }else if(instruction.op==22){
+            returns=visit(instruction.target);
+        }else if(isCondition(instruction.op)||instruction.op==27){
+            if(pc+1<end&&p.code[size_t(pc+1)].op==22)
+                returns=visit(pc+2)&&visit(p.code[size_t(pc+1)].target);
+            else
+                returns=visit(pc+1)&&visit(pc+2);
+        }else if(instruction.op==2&&instruction.c){
+            returns=visit(pc+2);
+        }else if(instruction.op==31||instruction.op==32||instruction.op==33){
+            returns=false;
+        }else{
+            returns=visit(pc+1);
+        }
+        current=returns?2:3;
+        return returns;
+    };
+    return visit(begin);
+}
 static bool separatedConditionGap(const Instr& instruction){
     if(instruction.op==2&&instruction.c!=0) return false;
     return straightLineConditionGap(instruction)||instruction.op==28;
@@ -1963,12 +1995,17 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
            (i.op==27 || isCondition(i.op))){
             const int target=p.code[pc+1].target;
             const int fallthrough=pc+2;
+            const bool terminalTail=target>=end&&target<int(p.code.size())&&
+                allPathsReturn(p,target,int(p.code.size()));
             if(i.op==27){
                 const std::string tested=renderedLocal(p,i.b,i.pc,context);
                 const std::string condition=i.c ? tested : "not ("+tested+")";
                 o<<pad<<"if "<<condition<<" then\n";
                 o<<std::string(size_t(indent+4),' ')<<renderedLocal(p,i.a,i.pc,context)<<" = "<<tested<<"\n";
-                o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
+                if(terminalTail)
+                    emitRange(o,p,target,int(p.code.size()),indent+4,context,false,loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                else
+                    o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
                 o<<pad<<"else\n";
                 if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget,loopContinueTarget,loopBreakFlag);
                 o<<pad<<"end\n";
@@ -1976,7 +2013,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
                 o<<pad<<"if "<<conditionExpr(p,i,context)<<" then\n";
                 if(fallthrough<end) emitRange(o,p,fallthrough,end,indent+4,context,false,loopBreakTarget,loopContinueTarget,loopBreakFlag);
                 o<<pad<<"else\n";
-                o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
+                if(terminalTail)
+                    emitRange(o,p,target,int(p.code.size()),indent+4,context,false,loopBreakTarget,loopContinueTarget,loopBreakFlag);
+                else
+                    o<<std::string(size_t(indent+4),' ')<<"-- ByteVeil: branch at pc "<<i.pc<<" exits current structured range to pc "<<target<<"\n";
                 o<<pad<<"end\n";
             }
             return;
