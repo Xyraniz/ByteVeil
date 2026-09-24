@@ -469,6 +469,40 @@ static bool writesRegister(const Instr& instruction,int registerIndex,int maxsta
         return false;
     }
 }
+static bool readsRegister(const Instr& instruction,int registerIndex,int maxstack){
+    if(instruction.extraWord) return false;
+    if(instruction.closureBindingFor>=0) return instruction.op==0&&instruction.b==registerIndex;
+    auto rk=[&](int operand){return !(operand&256)&&operand==registerIndex;};
+    auto contains=[&](int first,int last){return registerIndex>=first&&registerIndex<=last;};
+    switch(instruction.op){
+    case 0: return instruction.b==registerIndex;
+    case 1: case 2: case 3: case 4: case 5: case 10: case 36: case 37: return false;
+    case 6: return instruction.b==registerIndex||rk(instruction.c);
+    case 7: case 8: return instruction.a==registerIndex;
+    case 9: return instruction.a==registerIndex||rk(instruction.b)||rk(instruction.c);
+    case 11: return instruction.b==registerIndex||rk(instruction.c);
+    case 12: case 13: case 14: case 15: case 16: case 17:
+        return rk(instruction.b)||rk(instruction.c);
+    case 18: case 19: case 20: return instruction.b==registerIndex;
+    case 21: return contains(instruction.b,instruction.c);
+    case 23: case 24: case 25: return rk(instruction.b)||rk(instruction.c);
+    case 26: return instruction.a==registerIndex;
+    case 27: return instruction.a==registerIndex||instruction.b==registerIndex;
+    case 28: case 29:
+        return instruction.b==0?registerIndex>=instruction.a:
+            contains(instruction.a,instruction.a+instruction.b-1);
+    case 30:
+        return instruction.b==0?registerIndex>=instruction.a:
+            instruction.b>1&&contains(instruction.a,instruction.a+instruction.b-2);
+    case 31: case 32: return contains(instruction.a,instruction.a+2);
+    case 33: return contains(instruction.a,instruction.a+2);
+    case 34:
+        return instruction.b==0?registerIndex>=instruction.a:
+            contains(instruction.a,instruction.a+instruction.b);
+    case 35: return false;
+    default: (void)maxstack; return true;
+    }
+}
 
 static std::string renderedValueAt(const Proto& p,int registerIndex,int pc,const RenderContext& context){
     if(context.stateMachine) return renderedLocal(p,registerIndex,pc,context);
@@ -716,6 +750,57 @@ static int inlineCallTargetProducerFor(const Proto& p,int callPc){
         if(hasControlEntryAt(p,pc)||!safeArgumentSetup(instruction,firstArgument,lastArgument)) return -1;
     }
     return -1;
+}
+static bool registerMayBeReadAfterCall(const Proto& p,int callPc,int registerIndex){
+    for(int pc=callPc+1;pc<int(p.code.size());++pc){
+        if(hasControlEntryAt(p,pc)) return true;
+        const Instr& instruction=p.code[size_t(pc)];
+        if(readsRegister(instruction,registerIndex,p.maxstack)) return true;
+        if(instruction.op==29||instruction.op==30) return false;
+        if(instruction.op==22||(instruction.op>=23&&instruction.op<=27)||
+           (instruction.op>=31&&instruction.op<=33)||(instruction.op==2&&instruction.c)) return true;
+        if(writesRegister(instruction,registerIndex,p.maxstack)) return false;
+        if(instruction.op<0||instruction.op>37) return true;
+    }
+    return false;
+}
+static int argumentCallAfter(const Proto& p,int setupPc,int end){
+    if(setupPc<0||setupPc>=end||setupPc>=int(p.code.size())) return -1;
+    const int op=p.code[size_t(setupPc)].op;
+    if(op!=0&&op!=1&&op!=2&&op!=3) return -1;
+    const int searchEnd=std::min(end,setupPc+34);
+    for(int pc=setupPc+1;pc<searchEnd;++pc){
+        const int nextOp=p.code[size_t(pc)].op;
+        if(nextOp==28||nextOp==29) return p.code[size_t(pc)].b>0?pc:-1;
+        if(nextOp!=0&&nextOp!=1&&nextOp!=2&&nextOp!=3) return -1;
+    }
+    return -1;
+}
+static bool canOmitArgumentSetup(const Proto& p,int setupPc,int end,const RenderContext& context){
+    if(context.stateMachine) return false;
+    const int callPc=argumentCallAfter(p,setupPc,end);
+    if(callPc<0||hasControlEntryAt(p,callPc)) return false;
+    const Instr& setup=p.code[size_t(setupPc)];
+    const Instr& call=p.code[size_t(callPc)];
+    const int selfPc=colonMethodSelfForCall(p,callPc);
+    const int firstArgument=call.a+(selfPc>=0?2:1);
+    const int lastArgument=call.a+call.b-1;
+    if(!safeArgumentSetup(setup,firstArgument,lastArgument)) return false;
+    for(int pc=setupPc;pc<callPc;++pc){
+        if(hasControlEntryAt(p,pc)) return false;
+        if(pc!=setupPc&&!safeArgumentSetup(p.code[size_t(pc)],firstArgument,lastArgument)) return false;
+    }
+    const int lastWritten=setup.op==3?setup.b:setup.a;
+    for(int regIndex=setup.a;regIndex<=lastWritten;++regIndex){
+        if(managedCapturedLocal(p,regIndex)||registerMayBeReadAfterCall(p,callPc,regIndex)) return false;
+        if(renderedValueAt(p,regIndex,callPc,context)==renderedLocal(p,regIndex,callPc,context)) return false;
+        for(int pc=setupPc+1;pc<callPc;++pc){
+            const Instr& later=p.code[size_t(pc)];
+            if(readsRegister(later,regIndex,p.maxstack)) return false;
+            if(writesRegister(later,regIndex,p.maxstack)) break;
+        }
+    }
+    return true;
 }
 static bool canInlineCallTargetProducer(const Proto& p,int producerPc,int end,const RenderContext& context,int& callPc){
     callPc=-1;
@@ -2380,6 +2465,10 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             ?inlineCallTargetProducerFor(p,pc):-1;
         const bool inlineCallTarget=callTargetProducer>=begin;
         if(inlineCallTargetProducer){
+            ++pc;
+            continue;
+        }
+        if(!context.stateMachine&&i.op>=0&&i.op<=3&&canOmitArgumentSetup(p,pc,end,context)){
             ++pc;
             continue;
         }

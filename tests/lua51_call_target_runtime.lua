@@ -1,6 +1,6 @@
 local originalPath, reconstructedPath = unpack(arg)
-local originalCreate, originalComputed = assert(loadfile(originalPath))()
-local reconstructedCreate, reconstructedComputed = assert(loadfile(reconstructedPath))()
+local originalCreate, originalComputed, originalFixed = assert(loadfile(originalPath))()
+local reconstructedCreate, reconstructedComputed, reconstructedFixed = assert(loadfile(reconstructedPath))()
 
 local events
 Factory = setmetatable({}, {
@@ -43,3 +43,10 @@ assert(expectedComputed == "created:value" and actualComputed == expectedCompute
 assert(expectedComputedTrace == "lookup:new,evaluate,call:value" and
        actualComputedTrace == expectedComputedTrace,
     "call target fusion moved a lookup across an effectful argument")
+
+local expectedFixed, expectedFixedTrace = run(originalFixed, false)
+local actualFixed, actualFixedTrace = run(reconstructedFixed, false)
+assert(expectedFixed == "created:literal" and actualFixed == expectedFixed,
+    "omitting an unused constant argument register changed its result")
+assert(expectedFixedTrace == "lookup:new,call:literal" and actualFixedTrace == expectedFixedTrace,
+    "omitting an unused constant argument register changed call order")

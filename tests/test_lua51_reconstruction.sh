@@ -84,11 +84,16 @@ end
 local function createComputed(evaluate)
     return Factory.new(evaluate())
 end
-return create, createComputed
+local function createFixed()
+    return Factory.new("literal")
+end
+return create, createComputed, createFixed
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/call-target.luac" "$TMP/call-target.lua"
 "$BIN" --bytecode "$TMP/call-target.luac" --format lua > "$TMP/call-target.reconstructed.lua"
-test "$(grep -Fc '_G.Factory.new(' "$TMP/call-target.reconstructed.lua")" -eq 1
+test "$(grep -Fc '_G.Factory.new(' "$TMP/call-target.reconstructed.lua")" -eq 2
+grep -Fq 'return _G.Factory.new("literal")' "$TMP/call-target.reconstructed.lua"
+! grep -Fq '= "literal"' "$TMP/call-target.reconstructed.lua"
 "$BYTEVEIL_LUAC51" -p "$TMP/call-target.reconstructed.lua"
 CALL_TARGET_ORIGINAL_PATH="$TMP/call-target.lua"
 CALL_TARGET_RECONSTRUCTED_PATH="$TMP/call-target.reconstructed.lua"

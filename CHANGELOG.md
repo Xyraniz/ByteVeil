@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased - Omit dead Lua 5.1 argument setup registers
+
+### Changed
+
+- Simple `MOVE`, `LOADK`, and `LOADNIL` instructions used only to prepare call
+  arguments can now disappear from structured output when their values can be
+  rendered in the call and the registers are not captured, read before being
+  overwritten, or reached by a control-flow entry. Unsafe and effectful setup
+  stays explicit.
+
+### Validation
+
+- Extended runtime differentials to cover a literal argument, a register
+  argument, and an effectful argument whose evaluation must follow function
+  lookup. All nine CTest suites pass.
+- On the 21 MoonSec V3 samples, aggregate output fell by 309,753 bytes to
+  3,972,666 bytes. All outputs parse with `luaparse` and compile with Lua 5.1;
+  no unsupported markers remain and two bounded dispatchers remain. The
+  obfuscated samples were not executed.
+
 ## Unreleased - Inline Lua 5.1 table lookup call targets
 
 ### Changed
