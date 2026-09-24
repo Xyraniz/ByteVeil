@@ -45,7 +45,7 @@ return read
 LUA
 "$BYTEVEIL_LUAC51" -o "$TMP/read-chain.luac" "$TMP/read-chain.lua"
 "$BIN" --bytecode "$TMP/read-chain.luac" --format lua > "$TMP/read-chain.reconstructed.lua"
-grep -Eq '= r0\["branch"\]\["leaf"\]' "$TMP/read-chain.reconstructed.lua"
+grep -Eq '= r0\.branch\.leaf' "$TMP/read-chain.reconstructed.lua"
 "$BYTEVEIL_LUAC51" -p "$TMP/read-chain.reconstructed.lua"
 READ_CHAIN_ORIGINAL_PATH="$TMP/read-chain.lua"
 READ_CHAIN_RECONSTRUCTED_PATH="$TMP/read-chain.reconstructed.lua"
@@ -77,6 +77,27 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 "$BYTEVEIL_LUA51" "$ROOT/tests/lua51_method_argument_runtime.lua" \
     "$METHOD_ARGUMENT_ORIGINAL_PATH" "$METHOD_ARGUMENT_RECONSTRUCTED_PATH"
+cat >"$TMP/call-target.lua" <<'LUA'
+local function create(argument)
+    return Factory.new(argument)
+end
+local function createComputed(evaluate)
+    return Factory.new(evaluate())
+end
+return create, createComputed
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/call-target.luac" "$TMP/call-target.lua"
+"$BIN" --bytecode "$TMP/call-target.luac" --format lua > "$TMP/call-target.reconstructed.lua"
+test "$(grep -Fc '_G.Factory.new(' "$TMP/call-target.reconstructed.lua")" -eq 1
+"$BYTEVEIL_LUAC51" -p "$TMP/call-target.reconstructed.lua"
+CALL_TARGET_ORIGINAL_PATH="$TMP/call-target.lua"
+CALL_TARGET_RECONSTRUCTED_PATH="$TMP/call-target.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    CALL_TARGET_ORIGINAL_PATH="$(cygpath -m "$CALL_TARGET_ORIGINAL_PATH")"
+    CALL_TARGET_RECONSTRUCTED_PATH="$(cygpath -m "$CALL_TARGET_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_call_target_runtime.lua" \
+    "$CALL_TARGET_ORIGINAL_PATH" "$CALL_TARGET_RECONSTRUCTED_PATH"
 ISOLATED_DISPATCH_FIXTURE="$ROOT/tests/fixtures/lua51-isolated-dispatch.luac"
 "$BIN" --bytecode "$ISOLATED_DISPATCH_FIXTURE" --format lua > "$TMP/isolated-dispatch.reconstructed.lua"
 grep -q 'isolated PC dispatcher preserves Lua 5.1 control flow' "$TMP/isolated-dispatch.reconstructed.lua"

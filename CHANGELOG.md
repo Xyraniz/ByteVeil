@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased - Inline Lua 5.1 table lookup call targets
+
+### Changed
+
+- Calls whose function comes from a global or table lookup can now use that
+  lookup directly when the intervening argument instructions are simple,
+  side-effect-free loads or moves. Captured call registers, changed lookup
+  dependencies, branch entries, open calls, and effectful argument setup stay
+  explicit. Fused identifier keys use Lua property syntax where valid.
+
+### Validation
+
+- Added a Lua 5.1 runtime differential regression for `Factory.new(value)` and
+  for an effectful argument, checking lookup, evaluation, and call order. The
+  existing MOVE-overwritten-register regression also passes on the new output.
+- On the 21 MoonSec V3 samples, aggregate output fell by 118,734 bytes to
+  4,282,419 bytes and 1,824 global/table calls use a fused target expression.
+  All outputs parse with `luaparse` and compile with Lua 5.1; there are no
+  unsupported markers and two bounded dispatchers remain. The obfuscated
+  samples were not executed.
+
 ## Unreleased - Reconstruct Lua 5.1 method calls with simple arguments
 
 ### Changed

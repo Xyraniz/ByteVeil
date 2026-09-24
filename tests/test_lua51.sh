@@ -793,8 +793,8 @@ for case in testset-and testset-or; do
     fi
 done
 "$BIN" --bytecode "$TMP/move-overwritten-source.luac" --format lua >"$TMP/move-overwritten-source.lua"
-grep -Fq 'r0(r1)' "$TMP/move-overwritten-source.lua"
-if grep -Fq 'r0(r0)' "$TMP/move-overwritten-source.lua"; then
+grep -Fq 'r0 = _G.callback(r1)' "$TMP/move-overwritten-source.lua"
+if grep -Fq '_G.callback(r0)' "$TMP/move-overwritten-source.lua"; then
     echo "MOVE copy was rewritten after its source register changed" >&2
     exit 1
 fi

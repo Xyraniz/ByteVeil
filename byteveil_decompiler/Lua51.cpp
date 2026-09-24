@@ -535,9 +535,12 @@ static std::string renderedOpenArgs(const Proto& p,const Instr& consumer,const R
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc);
 static int colonMethodCallAfter(const Proto& p,int selfPc);
 static int colonMethodSelfForCall(const Proto& p,int callPc);
+static int inlineCallTargetProducerFor(const Proto& p,int callPc);
+static bool canInlineCallTargetProducer(const Proto& p,int producerPc,int end,const RenderContext& context,int& callPc);
 static bool hasControlEntryAt(const Proto& p,int targetPc);
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context);
 static std::string colonMethodArguments(const Proto& p,const Instr& call,const RenderContext& context);
+static std::string renderedCallTarget(const Proto& p,const Instr& call,const RenderContext& context);
 static std::string openProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
     if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return {};
     const Instr& producer=p.code[size_t(producerPc)];
@@ -560,6 +563,19 @@ static bool openProducerConsumedInRange(const Proto& p,int producerPc,int end){
     return ((consumer.op==28||consumer.op==29)&&consumer.b==0)||
            (consumer.op==30&&consumer.b==0)||(consumer.op==34&&consumer.b==0);
 }
+static bool safeArgumentSetup(const Instr& setup,int firstArgument,int lastArgument){
+    if(firstArgument>lastArgument) return false;
+    int firstWritten=setup.a,lastWritten=setup.a;
+    if(setup.op==3){
+        if(setup.b<setup.a) return false;
+        lastWritten=setup.b;
+    }else if(setup.op==2){
+        if(setup.c!=0) return false;
+    }else if(setup.op!=0&&setup.op!=1){
+        return false;
+    }
+    return firstWritten>=firstArgument&&lastWritten<=lastArgument;
+}
 static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
     if(selfPc<0||callPc<=selfPc||callPc>=int(p.code.size())||callPc-selfPc>33) return false;
     const Instr& self=p.code[size_t(selfPc)];
@@ -574,11 +590,8 @@ static bool colonMethodCall(const Proto& p,int selfPc,int callPc){
     for(int pc=selfPc+1;pc<callPc;++pc){
         if(hasControlEntryAt(p,pc)) return false;
         const Instr& setup=p.code[size_t(pc)];
-        int firstWritten=setup.a,lastWritten=setup.a;
-        if(setup.op==3) lastWritten=setup.b;
-        else if(setup.op==2&&setup.c!=0) return false;
-        else if(setup.op!=0&&setup.op!=1&&setup.op!=2) return false;
-        if(firstArgument>lastArgument||firstWritten<firstArgument||lastWritten>lastArgument) return false;
+        if(!safeArgumentSetup(setup,firstArgument,lastArgument)) return false;
+        if(setup.op==0&&(setup.b==self.a||setup.b==self.a+1)) return false;
     }
     return true;
 }
@@ -624,16 +637,107 @@ static bool canInlineReadProducer(const Proto& p,int producerPc,int end,const Re
         producer.a==consumer.a&&consumer.b==producer.a&&
         !hasControlEntryAt(p,consumer.pc);
 }
+static std::string renderedGlobalRead(const Proto& p,int constantIndex){
+    if(size_t(constantIndex)<p.constantTable.size()&&p.constantTable[size_t(constantIndex)].type=="string"&&
+       validIdentifier(p.constantTable[size_t(constantIndex)].value))
+        return "_G."+p.constantTable[size_t(constantIndex)].value;
+    return "_G["+(size_t(constantIndex)<p.constants.size()?p.constants[size_t(constantIndex)]:"nil")+"]";
+}
+static std::string renderedTableRead(const Proto& p,const std::string& base,int key,int pc,const RenderContext& context){
+    if(key&256){
+        const int constantIndex=key&255;
+        if(size_t(constantIndex)<p.constantTable.size()&&p.constantTable[size_t(constantIndex)].type=="string"&&
+           validIdentifier(p.constantTable[size_t(constantIndex)].value))
+            return base+"."+p.constantTable[size_t(constantIndex)].value;
+    }
+    return base+"["+renderedValue(p,key,pc,context)+"]";
+}
 static std::string renderedInlineReadBase(const Proto& p,int registerIndex,int consumerPc,const RenderContext& context){
     if(!canInlineReadProducer(p,consumerPc-1,consumerPc+1,context))
         return renderedLocal(p,registerIndex,consumerPc,context);
     const Instr& producer=p.code[size_t(consumerPc-1)];
-    if(producer.op==5)
-        return "_G["+(size_t(producer.bx)<p.constants.size()?p.constants[producer.bx]:"nil")+"]";
+    if(producer.op==5) return renderedGlobalRead(p,producer.bx);
     std::string base=renderedLocal(p,producer.b,producer.pc,context);
     if(producer.a==producer.b)
         base=renderedInlineReadBase(p,producer.b,producer.pc,context);
-    return base+"["+renderedValue(p,producer.c,producer.pc,context)+"]";
+    return renderedTableRead(p,base,producer.c,producer.pc,context);
+}
+static bool inlineReadUsesRegister(const Proto& p,int producerPc,int registerIndex,int depth){
+    if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return true;
+    const Instr& producer=p.code[size_t(producerPc)];
+    if(producer.op==5) return false;
+    if(producer.op!=6) return true;
+    if(!(producer.c&256)&&producer.c==registerIndex) return true;
+    bool inlinedBase=false;
+    if(producer.a==producer.b&&producerPc>0&&!hasControlEntryAt(p,producer.pc)){
+        const Instr& previous=p.code[size_t(producerPc-1)];
+        inlinedBase=(previous.op==5||previous.op==6)&&previous.a==producer.a;
+        if(inlinedBase&&inlineReadUsesRegister(p,producerPc-1,registerIndex,depth+1)) return true;
+    }
+    return !inlinedBase&&producer.b==registerIndex;
+}
+static std::string renderedReadProducerExpression(const Proto& p,int producerPc,const RenderContext& context,int depth){
+    if(depth>32||producerPc<0||producerPc>=int(p.code.size())) return "nil";
+    const Instr& producer=p.code[size_t(producerPc)];
+    if(producer.op==5) return renderedGlobalRead(p,producer.bx);
+    if(producer.op!=6) return renderedLocal(p,producer.a,producer.pc,context);
+    std::string base=renderedLocal(p,producer.b,producer.pc,context);
+    if(producer.a==producer.b&&producerPc>0&&!hasControlEntryAt(p,producer.pc)){
+        const Instr& previous=p.code[size_t(producerPc-1)];
+        if((previous.op==5||previous.op==6)&&previous.a==producer.a)
+            base=renderedReadProducerExpression(p,producerPc-1,context,depth+1);
+    }
+    return renderedTableRead(p,base,producer.c,producer.pc,context);
+}
+static int inlineCallTargetProducerFor(const Proto& p,int callPc){
+    if(callPc<0||callPc>=int(p.code.size())) return -1;
+    const Instr& call=p.code[size_t(callPc)];
+    if((call.op!=28&&call.op!=29)||call.b==0||(call.op==28&&call.c<2)||
+       managedCapturedLocal(p,call.a)||hasControlEntryAt(p,callPc)) return -1;
+    const int firstArgument=call.a+1;
+    const int lastArgument=call.a+call.b-1;
+    if(lastArgument>=p.maxstack) return -1;
+    const int begin=std::max(0,callPc-33);
+    for(int pc=callPc-1;pc>=begin;--pc){
+        const Instr& instruction=p.code[size_t(pc)];
+        if(instruction.op==5||instruction.op==6){
+            if(instruction.a!=call.a) return -1;
+            for(int setupPc=pc+1;setupPc<callPc;++setupPc){
+                if(hasControlEntryAt(p,setupPc)) return -1;
+                const Instr& setup=p.code[size_t(setupPc)];
+                if(!safeArgumentSetup(setup,firstArgument,lastArgument)) return -1;
+                if(setup.op==0&&setup.b==call.a) return -1;
+                const int lastWritten=setup.op==3?setup.b:setup.a;
+                for(int written=setup.a;written<=lastWritten;++written)
+                    if(inlineReadUsesRegister(p,pc,written,0)) return -1;
+            }
+            return pc;
+        }
+        if(hasControlEntryAt(p,pc)||!safeArgumentSetup(instruction,firstArgument,lastArgument)) return -1;
+    }
+    return -1;
+}
+static bool canInlineCallTargetProducer(const Proto& p,int producerPc,int end,const RenderContext& context,int& callPc){
+    callPc=-1;
+    if(context.stateMachine||producerPc<0||producerPc>=end||producerPc>=int(p.code.size())) return false;
+    const Instr& producer=p.code[size_t(producerPc)];
+    if(producer.op!=5&&producer.op!=6) return false;
+    const int searchEnd=std::min(end,producerPc+34);
+    for(int pc=producerPc+1;pc<searchEnd;++pc){
+        const int op=p.code[size_t(pc)].op;
+        if(op==28||op==29){
+            if(inlineCallTargetProducerFor(p,pc)!=producerPc) return false;
+            callPc=pc;
+            return true;
+        }
+        if(op!=0&&op!=1&&op!=2&&op!=3) return false;
+    }
+    return false;
+}
+static std::string renderedCallTarget(const Proto& p,const Instr& call,const RenderContext& context){
+    const int producerPc=inlineCallTargetProducerFor(p,call.pc);
+    if(producerPc<0) return renderedLocal(p,call.a,call.pc,context);
+    return renderedReadProducerExpression(p,producerPc,context,0);
 }
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context){
     const int selfPc=colonMethodSelfForCall(p,call.pc);
@@ -896,7 +1000,7 @@ static bool emitOpenSetList(std::ostringstream& o,const Proto& p,const Instr& se
     o<<", "<<tail<<")\n";
     return true;
 }
-static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false,bool inlineReadBase=false){
+static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false,bool inlineReadBase=false,bool inlineCallTarget=false){
     std::string pad(indent,' ');
     if(i.closureBindingFor>=0) return;
     switch(i.op){
@@ -906,7 +1010,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 3:for(int r=i.a;r<=i.b;r++)o<<pad<<renderedLocal(p,r,i.pc,context)<<" = nil\n";break;
     case 4:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedUpvalue(p,i.b,context)<<"\n";break;
     case 5:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = _G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
-    case 6:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<(inlineReadBase?renderedInlineReadBase(p,i.b,i.pc,context):renderedLocal(p,i.b,i.pc,context))<<"["<<renderedValue(p,i.c,i.pc,context)<<"]\n";break;
+    case 6:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<(inlineReadBase?renderedTableRead(p,renderedInlineReadBase(p,i.b,i.pc,context),i.c,i.pc,context):renderedLocal(p,i.b,i.pc,context)+"["+renderedValue(p,i.c,i.pc,context)+"]")<<"\n";break;
     case 7:o<<pad<<"_G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
     case 8:o<<pad<<renderedUpvalue(p,i.b,context)<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
     case 9:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<renderedValue(p,i.b,i.pc,context)<<"] = "<<renderedValue(p,i.c,i.pc,context)<<"\n";break;
@@ -921,7 +1025,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 27:o<<pad<<"-- ByteVeil: TESTSET at pc "<<i.pc<<" conditionally assigns "<<renderedLocal(p,i.a,i.pc,context)<<" from "<<renderedLocal(p,i.b,i.pc,context)<<" (C="<<i.c<<")\n";break;
     case 28:{
         const std::string callArgs=colonCall?colonMethodArguments(p,i,context):i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
-        const std::string target=colonCall?colonMethodTarget(p,i,context):renderedLocal(p,i.a,i.pc,context);
+        const std::string target=colonCall?colonMethodTarget(p,i,context):inlineCallTarget?renderedCallTarget(p,i,context):renderedLocal(p,i.a,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has unresolved open arguments\n";
         if(i.c==0)o<<pad<<"-- ByteVeil: CALL at pc "<<i.pc<<" has open results not consumed by a supported open operation\n";
         if(i.c==1)o<<pad<<target<<"("<<callArgs<<")\n";
@@ -936,7 +1040,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 29:{
         const std::string callArgs=colonCall?colonMethodArguments(p,i,context):i.b==0?renderedOpenArgs(p,i,context,0):renderedArgs(p,i.a,i.b,i.pc,context);
         if(i.b==0&&callArgs.empty())o<<pad<<"-- ByteVeil: TAILCALL at pc "<<i.pc<<" has unresolved open arguments\n";
-        const std::string target=colonCall?colonMethodTarget(p,i,context):renderedValueAt(p,i.a,i.pc,context);
+        const std::string target=colonCall?colonMethodTarget(p,i,context):inlineCallTarget?renderedCallTarget(p,i,context):renderedValueAt(p,i.a,i.pc,context);
         o<<pad<<"return "<<target<<"("<<callArgs<<")\n";break;
     }
     case 30:{
@@ -2269,6 +2373,16 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         const int methodSelfPc=!context.stateMachine&&pc>begin&&(i.op==28||i.op==29)
             ?colonMethodSelfForCall(p,pc):-1;
         const bool colonCall=methodSelfPc>=begin&&!hasControlEntryAt(p,pc);
+        int callTargetPc=-1;
+        const bool inlineCallTargetProducer=!context.stateMachine&&(i.op==5||i.op==6)&&
+            canInlineCallTargetProducer(p,pc,end,context,callTargetPc);
+        const int callTargetProducer=!context.stateMachine&&(i.op==28||i.op==29)
+            ?inlineCallTargetProducerFor(p,pc):-1;
+        const bool inlineCallTarget=callTargetProducer>=begin;
+        if(inlineCallTargetProducer){
+            ++pc;
+            continue;
+        }
         if(!context.stateMachine&&canInlineReadProducer(p,pc,end,context)){
             ++pc;
             continue;
@@ -2276,7 +2390,7 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
         const bool inlineReadBase=!context.stateMachine&&pc>begin&&
             canInlineReadProducer(p,pc-1,end,context);
         if(!loopSetup && !returnSetup && !inlineOpenResults && !inlineSelf)
-            emitSimple(o,p,i,indent,context,colonCall,inlineReadBase);
+            emitSimple(o,p,i,indent,context,colonCall,inlineReadBase,inlineCallTarget);
         if(i.op==29 || i.op==30) break;
         if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;
