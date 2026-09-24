@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased - Inline adjacent Lua 5.1 table reads
+
+### Changed
+
+- Structured output now folds adjacent `GETGLOBAL` and `GETTABLE` reads into
+  one source expression when no branch can enter the consuming instruction.
+  PC-dispatcher output stays instruction-by-instruction.
+
+### Validation
+
+- Added a Lua 5.1 runtime differential regression that checks the lookup
+  result, order, and count of `__index` calls. All nine CTest suites pass.
+- On the 21 MoonSec V3 samples, all outputs parse with `luaparse` and compile
+  with Lua 5.1. Aggregate output fell by 254,848 bytes to 4,714,434 bytes;
+  whole-function dispatchers remain at zero and two bounded dispatchers remain
+  in root functions. The obfuscated samples were not executed.
+
 ## Unreleased - Isolate Lua 5.1 dispatchers to single-exit regions
 
 ### Changed

@@ -571,6 +571,7 @@ static bool hasControlEntryAt(const Proto& p,int targetPc){
         if((instruction.op==22||instruction.op==31||instruction.op==32)&&instruction.target==targetPc)
             return true;
         if((instruction.op>=23&&instruction.op<=27)||instruction.op==33){
+            if(instruction.target==targetPc) return true;
             const int jumpPc=instruction.pc+1;
             if(jumpPc>=0&&jumpPc<int(p.code.size())&&p.code[size_t(jumpPc)].op==22&&
                p.code[size_t(jumpPc)].target==targetPc) return true;
@@ -578,6 +579,25 @@ static bool hasControlEntryAt(const Proto& p,int targetPc){
         if(instruction.op==2&&instruction.c&&instruction.target==targetPc) return true;
     }
     return false;
+}
+static bool canInlineReadProducer(const Proto& p,int producerPc,int end,const RenderContext& context){
+    if(context.stateMachine||producerPc<0||producerPc+1>=end||producerPc+1>=int(p.code.size())) return false;
+    const Instr& producer=p.code[size_t(producerPc)];
+    const Instr& consumer=p.code[size_t(producerPc+1)];
+    return (producer.op==5||producer.op==6)&&consumer.op==6&&
+        producer.a==consumer.a&&consumer.b==producer.a&&
+        !hasControlEntryAt(p,consumer.pc);
+}
+static std::string renderedInlineReadBase(const Proto& p,int registerIndex,int consumerPc,const RenderContext& context){
+    if(!canInlineReadProducer(p,consumerPc-1,consumerPc+1,context))
+        return renderedLocal(p,registerIndex,consumerPc,context);
+    const Instr& producer=p.code[size_t(consumerPc-1)];
+    if(producer.op==5)
+        return "_G["+(size_t(producer.bx)<p.constants.size()?p.constants[producer.bx]:"nil")+"]";
+    std::string base=renderedLocal(p,producer.b,producer.pc,context);
+    if(producer.a==producer.b)
+        base=renderedInlineReadBase(p,producer.b,producer.pc,context);
+    return base+"["+renderedValue(p,producer.c,producer.pc,context)+"]";
 }
 static std::string colonMethodTarget(const Proto& p,const Instr& call,const RenderContext& context){
     const Instr& self=p.code[size_t(call.pc-1)];
@@ -830,7 +850,7 @@ static bool emitOpenSetList(std::ostringstream& o,const Proto& p,const Instr& se
     o<<", "<<tail<<")\n";
     return true;
 }
-static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false){
+static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int indent,const RenderContext& context,bool colonCall=false,bool inlineReadBase=false){
     std::string pad(indent,' ');
     if(i.closureBindingFor>=0) return;
     switch(i.op){
@@ -840,7 +860,7 @@ static void emitSimple(std::ostringstream& o,const Proto& p,const Instr& i,int i
     case 3:for(int r=i.a;r<=i.b;r++)o<<pad<<renderedLocal(p,r,i.pc,context)<<" = nil\n";break;
     case 4:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedUpvalue(p,i.b,context)<<"\n";break;
     case 5:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = _G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"]\n";break;
-    case 6:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<renderedLocal(p,i.b,i.pc,context)<<"["<<renderedValue(p,i.c,i.pc,context)<<"]\n";break;
+    case 6:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<" = "<<(inlineReadBase?renderedInlineReadBase(p,i.b,i.pc,context):renderedLocal(p,i.b,i.pc,context))<<"["<<renderedValue(p,i.c,i.pc,context)<<"]\n";break;
     case 7:o<<pad<<"_G["<<(size_t(i.bx)<p.constants.size()?p.constants[i.bx]:"nil")<<"] = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
     case 8:o<<pad<<renderedUpvalue(p,i.b,context)<<" = "<<renderedLocal(p,i.a,i.pc,context)<<"\n";break;
     case 9:o<<pad<<renderedLocal(p,i.a,i.pc,context)<<"["<<renderedValue(p,i.b,i.pc,context)<<"] = "<<renderedValue(p,i.c,i.pc,context)<<"\n";break;
@@ -2201,8 +2221,14 @@ static void emitRange(std::ostringstream& o,const Proto& p,int begin,int end,int
             !hasControlEntryAt(p,pc+1);
         const bool colonCall=pc>begin&&colonMethodCall(p,pc-1,pc)&&
             !hasControlEntryAt(p,pc);
+        if(!context.stateMachine&&canInlineReadProducer(p,pc,end,context)){
+            ++pc;
+            continue;
+        }
+        const bool inlineReadBase=!context.stateMachine&&pc>begin&&
+            canInlineReadProducer(p,pc-1,end,context);
         if(!loopSetup && !returnSetup && !inlineOpenResults && !inlineSelf)
-            emitSimple(o,p,i,indent,context,colonCall);
+            emitSimple(o,p,i,indent,context,colonCall,inlineReadBase);
         if(i.op==29 || i.op==30) break;
         if(i.op==2&&i.c){pc=i.target>=0?i.target:pc+2;continue;}
         pc++;

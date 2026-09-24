@@ -37,6 +37,24 @@ grep -q '^repeat$' "$TMP/reconstructed.lua"
 grep -q 'if ' "$TMP/reconstructed.lua"
 grep -q 'elseif\|else' "$TMP/reconstructed.lua"
 ! grep -q 'unsupported opcode retained' "$TMP/reconstructed.lua"
+cat >"$TMP/read-chain.lua" <<'LUA'
+local function read(root)
+    return root.branch.leaf
+end
+return read
+LUA
+"$BYTEVEIL_LUAC51" -o "$TMP/read-chain.luac" "$TMP/read-chain.lua"
+"$BIN" --bytecode "$TMP/read-chain.luac" --format lua > "$TMP/read-chain.reconstructed.lua"
+grep -Eq '= r0\["branch"\]\["leaf"\]' "$TMP/read-chain.reconstructed.lua"
+"$BYTEVEIL_LUAC51" -p "$TMP/read-chain.reconstructed.lua"
+READ_CHAIN_ORIGINAL_PATH="$TMP/read-chain.lua"
+READ_CHAIN_RECONSTRUCTED_PATH="$TMP/read-chain.reconstructed.lua"
+if command -v cygpath >/dev/null 2>&1; then
+    READ_CHAIN_ORIGINAL_PATH="$(cygpath -m "$READ_CHAIN_ORIGINAL_PATH")"
+    READ_CHAIN_RECONSTRUCTED_PATH="$(cygpath -m "$READ_CHAIN_RECONSTRUCTED_PATH")"
+fi
+"$BYTEVEIL_LUA51" "$ROOT/tests/lua51_read_chain_runtime.lua" \
+    "$READ_CHAIN_ORIGINAL_PATH" "$READ_CHAIN_RECONSTRUCTED_PATH"
 ISOLATED_DISPATCH_FIXTURE="$ROOT/tests/fixtures/lua51-isolated-dispatch.luac"
 "$BIN" --bytecode "$ISOLATED_DISPATCH_FIXTURE" --format lua > "$TMP/isolated-dispatch.reconstructed.lua"
 grep -q 'isolated PC dispatcher preserves Lua 5.1 control flow' "$TMP/isolated-dispatch.reconstructed.lua"
