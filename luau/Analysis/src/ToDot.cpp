@@ -3,7 +3,8 @@
 
 #include "Luau/ToString.h"
 #include "Luau/TypePack.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/TypeFunction.h"
 #include "Luau/StringUtils.h"
 
 #include <unordered_map>
@@ -34,7 +35,7 @@ struct StateDot
     bool canDuplicatePrimitive(TypeId ty);
 
     void visitChildren(TypeId ty, int index);
-    void visitChildren(TypePackId ty, int index);
+    void visitChildren(TypePackId tp, int index);
 
     void visitChild(TypeId ty, int parentIndex, const char* linkName = nullptr);
     void visitChild(TypePackId tp, int parentIndex, const char* linkName = nullptr);
@@ -49,10 +50,10 @@ struct StateDot
 
 bool StateDot::canDuplicatePrimitive(TypeId ty)
 {
-    if (get<BoundTypeVar>(ty))
+    if (get<BoundType>(ty))
         return false;
 
-    return get<PrimitiveTypeVar>(ty) || get<AnyTypeVar>(ty);
+    return get<PrimitiveType>(ty) || get<AnyType>(ty) || get<UnknownType>(ty) || get<NeverType>(ty);
 }
 
 void StateDot::visitChild(TypeId ty, int parentIndex, const char* linkName)
@@ -72,10 +73,14 @@ void StateDot::visitChild(TypeId ty, int parentIndex, const char* linkName)
 
     if (opts.duplicatePrimitives && canDuplicatePrimitive(ty))
     {
-        if (get<PrimitiveTypeVar>(ty))
-            formatAppend(result, "n%d [label=\"%s\"];\n", index, toStringDetailed(ty, {}).name.c_str());
-        else if (get<AnyTypeVar>(ty))
+        if (get<PrimitiveType>(ty))
+            formatAppend(result, "n%d [label=\"%s\"];\n", index, toString(ty).c_str());
+        else if (get<AnyType>(ty))
             formatAppend(result, "n%d [label=\"any\"];\n", index);
+        else if (get<UnknownType>(ty))
+            formatAppend(result, "n%d [label=\"unknown\"];\n", index);
+        else if (get<NeverType>(ty))
+            formatAppend(result, "n%d [label=\"never\"];\n", index);
     }
     else
     {
@@ -139,162 +144,258 @@ void StateDot::visitChildren(TypeId ty, int index)
     startNode(index);
     startNodeLabel();
 
-    if (const BoundTypeVar* btv = get<BoundTypeVar>(ty))
+    auto go = [&](auto&& t)
     {
-        formatAppend(result, "BoundTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
+        using T = std::decay_t<decltype(t)>;
 
-        visitChild(btv->boundTo, index);
-    }
-    else if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(ty))
-    {
-        formatAppend(result, "FunctionTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        visitChild(ftv->argTypes, index, "arg");
-        visitChild(ftv->retType, index, "ret");
-    }
-    else if (const TableTypeVar* ttv = get<TableTypeVar>(ty))
-    {
-        if (ttv->name)
-            formatAppend(result, "TableTypeVar %s", ttv->name->c_str());
-        else if (ttv->syntheticName)
-            formatAppend(result, "TableTypeVar %s", ttv->syntheticName->c_str());
-        else
-            formatAppend(result, "TableTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        if (ttv->boundTo)
-            return visitChild(*ttv->boundTo, index, "boundTo");
-
-        for (const auto& [name, prop] : ttv->props)
-            visitChild(prop.type, index, name.c_str());
-        if (ttv->indexer)
+        if constexpr (std::is_same_v<T, BoundType>)
         {
-            visitChild(ttv->indexer->indexType, index, "[index]");
-            visitChild(ttv->indexer->indexResultType, index, "[value]");
+            formatAppend(result, "BoundType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            visitChild(t.boundTo, index);
         }
-        for (TypeId itp : ttv->instantiatedTypeParams)
-            visitChild(itp, index, "typeParam");
-
-        for (TypePackId itp : ttv->instantiatedTypePackParams)
-            visitChild(itp, index, "typePackParam");
-    }
-    else if (const MetatableTypeVar* mtv = get<MetatableTypeVar>(ty))
-    {
-        formatAppend(result, "MetatableTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        visitChild(mtv->table, index, "table");
-        visitChild(mtv->metatable, index, "metatable");
-    }
-    else if (const UnionTypeVar* utv = get<UnionTypeVar>(ty))
-    {
-        formatAppend(result, "UnionTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        for (TypeId opt : utv->options)
-            visitChild(opt, index);
-    }
-    else if (const IntersectionTypeVar* itv = get<IntersectionTypeVar>(ty))
-    {
-        formatAppend(result, "IntersectionTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        for (TypeId part : itv->parts)
-            visitChild(part, index);
-    }
-    else if (const GenericTypeVar* gtv = get<GenericTypeVar>(ty))
-    {
-        if (gtv->explicitName)
-            formatAppend(result, "GenericTypeVar %s", gtv->name.c_str());
-        else
-            formatAppend(result, "GenericTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else if (const FreeTypeVar* ftv = get<FreeTypeVar>(ty))
-    {
-        formatAppend(result, "FreeTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else if (get<AnyTypeVar>(ty))
-    {
-        formatAppend(result, "AnyTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else if (get<PrimitiveTypeVar>(ty))
-    {
-        formatAppend(result, "PrimitiveTypeVar %s", toStringDetailed(ty, {}).name.c_str());
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else if (const ConstrainedTypeVar* ctv = get<ConstrainedTypeVar>(ty))
-    {
-        formatAppend(result, "ConstrainedTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-
-        for (TypeId part : ctv->parts)
-            visitChild(part, index);
-    }
-    else if (get<ErrorTypeVar>(ty))
-    {
-        formatAppend(result, "ErrorTypeVar %d", index);
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else if (const ClassTypeVar* ctv = get<ClassTypeVar>(ty))
-    {
-        formatAppend(result, "ClassTypeVar %s", ctv->name.c_str());
-        finishNodeLabel(ty);
-        finishNode();
-
-        for (const auto& [name, prop] : ctv->props)
-            visitChild(prop.type, index, name.c_str());
-
-        if (ctv->parent)
-            visitChild(*ctv->parent, index, "[parent]");
-
-        if (ctv->metatable)
-            visitChild(*ctv->metatable, index, "[metatable]");
-    }
-    else if (const SingletonTypeVar* stv = get<SingletonTypeVar>(ty))
-    {
-        std::string res;
-
-        if (const StringSingleton* ss = get<StringSingleton>(stv))
+        else if constexpr (std::is_same_v<T, BlockedType>)
         {
-            // Don't put in quotes anywhere. If it's outside of the call to escape,
-            // then it's invalid syntax. If it's inside, then escaping is super noisy.
-            res = "string: " + escape(ss->value);
+            formatAppend(result, "BlockedType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
         }
-        else if (const BooleanSingleton* bs = get<BooleanSingleton>(stv))
+        else if constexpr (std::is_same_v<T, FunctionType>)
         {
-            res = "boolean: ";
-            res += bs->value ? "true" : "false";
+            formatAppend(result, "FunctionType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            visitChild(t.argTypes, index, "arg");
+            visitChild(t.retTypes, index, "ret");
+        }
+        else if constexpr (std::is_same_v<T, TableType>)
+        {
+            if (t.name)
+                formatAppend(result, "TableType %s", t.name->c_str());
+            else if (t.syntheticName)
+                formatAppend(result, "TableType %s", t.syntheticName->c_str());
+            else
+                formatAppend(result, "TableType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            if (t.boundTo)
+                return visitChild(*t.boundTo, index, "boundTo");
+
+            for (const auto& [name, prop] : t.props)
+            {
+                if (prop.isShared())
+                    visitChild(*prop.readTy, index, name.c_str());
+                else
+                {
+                    if (prop.readTy)
+                    {
+                        std::string readName = "read " + name;
+                        visitChild(*prop.readTy, index, readName.c_str());
+                    }
+
+                    if (prop.writeTy)
+                    {
+                        std::string writeName = "write " + name;
+                        visitChild(*prop.writeTy, index, writeName.c_str());
+                    }
+                }
+            }
+            if (t.indexer)
+            {
+                visitChild(t.indexer->indexType, index, "[index]");
+                visitChild(t.indexer->indexResultType, index, "[value]");
+            }
+            for (TypeId itp : t.instantiatedTypeParams)
+                visitChild(itp, index, "typeParam");
+
+            for (TypePackId itp : t.instantiatedTypePackParams)
+                visitChild(itp, index, "typePackParam");
+        }
+        else if constexpr (std::is_same_v<T, MetatableType>)
+        {
+            formatAppend(result, "MetatableType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            visitChild(t.table, index, "table");
+            visitChild(t.metatable, index, "metatable");
+        }
+        else if constexpr (std::is_same_v<T, UnionType>)
+        {
+            formatAppend(result, "UnionType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            for (TypeId opt : t.options)
+                visitChild(opt, index);
+        }
+        else if constexpr (std::is_same_v<T, IntersectionType>)
+        {
+            formatAppend(result, "IntersectionType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            for (TypeId part : t.parts)
+                visitChild(part, index);
+        }
+        else if constexpr (std::is_same_v<T, LazyType>)
+        {
+            formatAppend(result, "LazyType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, PendingExpansionType>)
+        {
+            formatAppend(result, "PendingExpansionType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, GenericType>)
+        {
+            if (t.explicitName)
+                formatAppend(result, "GenericType %s", t.name.c_str());
+            else
+                formatAppend(result, "GenericType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, FreeType>)
+        {
+            formatAppend(result, "FreeType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            if (t.lowerBound && !get<NeverType>(t.lowerBound))
+                visitChild(t.lowerBound, index, "[lowerBound]");
+
+            if (t.upperBound && !get<UnknownType>(t.upperBound))
+                visitChild(t.upperBound, index, "[upperBound]");
+        }
+        else if constexpr (std::is_same_v<T, AnyType>)
+        {
+            formatAppend(result, "AnyType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, NoRefineType>)
+        {
+            formatAppend(result, "NoRefineType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, UnknownType>)
+        {
+            formatAppend(result, "UnknownType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, NeverType>)
+        {
+            formatAppend(result, "NeverType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, PrimitiveType>)
+        {
+            formatAppend(result, "PrimitiveType %s", toString(ty).c_str());
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, ErrorType>)
+        {
+            formatAppend(result, "ErrorType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, ExternType>)
+        {
+            formatAppend(result, "ExternType %s", t.name.c_str());
+            finishNodeLabel(ty);
+            finishNode();
+
+            for (const auto& [name, prop] : t.props)
+            {
+                if (prop.isShared())
+                    visitChild(*prop.readTy, index, name.c_str());
+                else
+                {
+                    if (prop.readTy)
+                    {
+                        std::string readName = "read " + name;
+                        visitChild(*prop.readTy, index, readName.c_str());
+                    }
+
+                    if (prop.writeTy)
+                    {
+                        std::string writeName = "write " + name;
+                        visitChild(*prop.writeTy, index, writeName.c_str());
+                    }
+                }
+            }
+
+            if (t.parent)
+                visitChild(*t.parent, index, "[parent]");
+
+            if (t.metatable)
+                visitChild(*t.metatable, index, "[metatable]");
+
+            if (t.indexer)
+            {
+                visitChild(t.indexer->indexType, index, "[index]");
+                visitChild(t.indexer->indexResultType, index, "[value]");
+            }
+        }
+        else if constexpr (std::is_same_v<T, SingletonType>)
+        {
+            std::string res;
+
+            if (const StringSingleton* ss = get<StringSingleton>(&t))
+            {
+                // Don't put in quotes anywhere. If it's outside of the call to escape,
+                // then it's invalid syntax. If it's inside, then escaping is super noisy.
+                res = "string: " + escape(ss->value);
+            }
+            else if (const BooleanSingleton* bs = get<BooleanSingleton>(&t))
+            {
+                res = "boolean: ";
+                res += bs->value ? "true" : "false";
+            }
+            else
+                LUAU_ASSERT(!"unknown singleton type");
+
+            formatAppend(result, "SingletonType %s", res.c_str());
+            finishNodeLabel(ty);
+            finishNode();
+        }
+        else if constexpr (std::is_same_v<T, NegationType>)
+        {
+            formatAppend(result, "NegationType %d", index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            visitChild(t.ty, index, "[negated]");
+        }
+        else if constexpr (std::is_same_v<T, TypeFunctionInstanceType>)
+        {
+            formatAppend(result, "TypeFunctionInstanceType %s %d", t.function->name.c_str(), index);
+            finishNodeLabel(ty);
+            finishNode();
+
+            for (TypeId tyParam : t.typeArguments)
+                visitChild(tyParam, index);
+
+            for (TypePackId tpParam : t.packArguments)
+                visitChild(tpParam, index);
         }
         else
-            LUAU_ASSERT(!"unknown singleton type");
+            static_assert(always_false_v<T>, "unknown type kind");
+    };
 
-        formatAppend(result, "SingletonTypeVar %s", res.c_str());
-        finishNodeLabel(ty);
-        finishNode();
-    }
-    else
-    {
-        LUAU_ASSERT(!"unknown type kind");
-        finishNodeLabel(ty);
-        finishNode();
-    }
+    visit(go, ty->ty);
 }
 
 void StateDot::visitChildren(TypePackId tp, int index)
@@ -333,7 +434,7 @@ void StateDot::visitChildren(TypePackId tp, int index)
 
         visitChild(vtp->ty, index);
     }
-    else if (const FreeTypePack* ftp = get<FreeTypePack>(tp))
+    else if (get<FreeTypePack>(tp))
     {
         formatAppend(result, "FreeTypePack %d", index);
         finishNodeLabel(tp);
@@ -348,7 +449,7 @@ void StateDot::visitChildren(TypePackId tp, int index)
         finishNodeLabel(tp);
         finishNode();
     }
-    else if (get<Unifiable::Error>(tp))
+    else if (get<ErrorTypePack>(tp))
     {
         formatAppend(result, "ErrorTypePack %d", index);
         finishNodeLabel(tp);

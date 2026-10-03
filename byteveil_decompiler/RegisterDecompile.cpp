@@ -1,9 +1,11 @@
 #include "RegisterDecompile.h"
 
 #include "IR.h"
+#include "Luau/BytecodeUtils.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -100,21 +102,61 @@ private:
         return out.str();
     }
 
-    std::string constant(const Proto* proto, int index) const
+    std::string constantValue(const TValue& value, int depth = 0) const
     {
-        if (!proto || index < 0 || index >= proto->sizek) return "nil --[[ invalid constant index ]]";
-        const TValue& value = proto->k[index];
         switch (value.tt)
         {
         case LUA_TNIL: return "nil";
         case LUA_TBOOLEAN: return value.value.b ? "true" : "false";
         case LUA_TNUMBER: return number(value.value.n);
+        case LUA_TINTEGER: return std::to_string(value.value.l);
         case LUA_TSTRING:
             return value.value.gc ? luaString(value.value.gc->ts.data, value.value.gc->ts.len) : "nil --[[ null string ]]";
         case LUA_TFUNCTION: return "nil --[[ closure constant ]]";
-        case LUA_TTABLE: return "{} --[[ duplicated table template ]]";
+        case LUA_TTABLE:
+            if (depth >= 16) return "{} --[[ nested table depth limit ]]";
+            return tableConstant(value.value.gc ? &value.value.gc->h : nullptr, depth + 1);
         default: return "nil --[[ unsupported constant type ]]";
         }
+    }
+
+    std::string tableConstant(const LuaTable* table, int depth) const
+    {
+        if (!table) return "{}";
+
+        std::vector<std::string> fields;
+        fields.reserve(size_t(std::max(0, table->sizearray)) + size_t(sizenode(table)));
+        for (int index = 0; index < table->sizearray; ++index)
+        {
+            const TValue& item = table->array[index];
+            if (!ttisnil(&item))
+                fields.push_back("[" + std::to_string(index + 1) + "] = " + constantValue(item, depth));
+        }
+        for (int index = 0; index < sizenode(table); ++index)
+        {
+            const LuaNode* node = gnode(table, index);
+            if (ttisnil(gval(node))) continue;
+
+            TValue key{};
+            key.value = node->key.value;
+            std::memcpy(key.extra, node->key.extra, sizeof(key.extra));
+            key.tt = int(node->key.tt);
+            fields.push_back("[" + constantValue(key, depth) + "] = " + constantValue(*gval(node), depth));
+        }
+
+        std::ostringstream result;
+        result << "{";
+        for (size_t index = 0; index < fields.size(); ++index)
+            result << (index ? ", " : " ") << fields[index];
+        if (!fields.empty()) result << ' ';
+        result << '}';
+        return result.str();
+    }
+
+    std::string constant(const Proto* proto, int index) const
+    {
+        if (!proto || index < 0 || index >= proto->sizek) return "nil --[[ invalid constant index ]]";
+        return constantValue(proto->k[index]);
     }
 
     std::string importExpression(const Proto* proto, uint32_t aux) const
@@ -142,42 +184,17 @@ private:
 
     static int instructionLength(LuauOpcode op)
     {
-        switch (op)
-        {
-        case LOP_GETGLOBAL: case LOP_SETGLOBAL: case LOP_GETIMPORT: case LOP_GETTABLEKS:
-        case LOP_SETTABLEKS: case LOP_NAMECALL: case LOP_JUMPIFEQ: case LOP_JUMPIFLE:
-        case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
-        case LOP_NEWTABLE: case LOP_SETLIST: case LOP_FORGLOOP: case LOP_LOADKX:
-        case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FASTCALL2: case LOP_FASTCALL2K:
-            return 2;
-        default:
-            return 1;
-        }
+        return Luau::getOpLength(op);
     }
 
     static bool jumpOpcode(LuauOpcode op)
     {
-        switch (op)
-        {
-        case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPX: case LOP_JUMPIF: case LOP_JUMPIFNOT:
-        case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
-        case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK:
-        case LOP_FORNPREP: case LOP_FORNLOOP: case LOP_FORGPREP: case LOP_FORGLOOP:
-        case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT: case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT:
-            return true;
-        default:
-            return false;
-        }
+        return Luau::isJumpD(op) || op == LOP_JUMPX;
     }
 
     static int jumpTarget(uint32_t raw, int pc)
     {
-        const LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
-        if (op == LOP_JUMPX) return pc + LUAU_INSN_E(raw) + 1;
-        if (jumpOpcode(op)) return pc + LUAU_INSN_D(raw) + 1;
-        if ((op == LOP_LOADB || op == LOP_FASTCALL || op == LOP_FASTCALL1 || op == LOP_FASTCALL2 || op == LOP_FASTCALL2K) && LUAU_INSN_C(raw))
-            return pc + LUAU_INSN_C(raw) + 1;
-        return -1;
+        return Luau::getJumpTarget(raw, uint32_t(pc));
     }
 
     static std::vector<std::pair<int, int>> blocks(const Proto* proto)
@@ -220,18 +237,19 @@ private:
 
     void emitCall(std::ostringstream& out, int depth, int pc, int a, int b, int c) const
     {
-        line(out, depth, "local call_args_" + std::to_string(pc) + " = range(" + std::to_string(a + 1) + ", " + (b == 0 ? "top" : std::to_string(a + b - 1)) + ")");
-        line(out, depth, "local call_results_" + std::to_string(pc) + " = table.pack(" + get(a) + "(table.unpack(call_args_" + std::to_string(pc) + ", 1, call_args_" + std::to_string(pc) + ".n)))");
+        (void)pc;
+        line(out, depth, "call_args = range(" + std::to_string(a + 1) + ", " + (b == 0 ? "top" : std::to_string(a + b - 1)) + ")");
+        line(out, depth, "call_results = table.pack(" + get(a) + "(table.unpack(call_args, 1, call_args.n)))");
         if (c == 0)
         {
-            line(out, depth, "for result_index = 1, call_results_" + std::to_string(pc) + ".n do");
-            line(out, depth + 1, "set(" + std::to_string(a) + " + result_index - 1, call_results_" + std::to_string(pc) + "[result_index])");
+            line(out, depth, "for result_index = 1, call_results.n do");
+            line(out, depth + 1, "set(" + std::to_string(a) + " + result_index - 1, call_results[result_index])");
             line(out, depth, "end");
-            line(out, depth, "top = " + std::to_string(a) + " + call_results_" + std::to_string(pc) + ".n - 1");
+            line(out, depth, "top = " + std::to_string(a) + " + call_results.n - 1");
         }
         else
             for (int result = 0; result < c - 1; ++result)
-                line(out, depth, set(a + result, "call_results_" + std::to_string(pc) + "[" + std::to_string(result + 1) + "]"));
+                line(out, depth, set(a + result, "call_results[" + std::to_string(result + 1) + "]"));
     }
 
     void renderFunction(std::ostringstream& out, const FunctionInfo& function)
@@ -239,6 +257,7 @@ private:
         const Proto* proto = function.proto;
         out << "byteveil_functions[" << function.id << "] = function(upvalues, ...)\n";
         line(out, 1, "local registers, cells = {}, {}");
+        line(out, 1, "local captures, call_args, call_results, iterator_results, return_values, vararg_count = {}, nil, nil, nil, nil, nil");
         line(out, 1, "local top = -1");
         line(out, 1, "local function get(index)");
         line(out, 2, "local cell = cells[index]");
@@ -313,24 +332,24 @@ private:
                     case LOP_GETIMPORT: line(out, 3, set(a, importExpression(proto, aux))); break;
                     case LOP_GETTABLE: line(out, 3, set(a, get(b) + "[" + get(c) + "]")); break;
                     case LOP_SETTABLE: line(out, 3, get(b) + "[" + get(c) + "] = " + get(a)); break;
-                    case LOP_GETTABLEKS: line(out, 3, set(a, get(b) + "[" + constant(proto, int(aux)) + "]")); break;
-                    case LOP_SETTABLEKS: line(out, 3, get(b) + "[" + constant(proto, int(aux)) + "] = " + get(a)); break;
+                    case LOP_GETTABLEKS: case LOP_GETUDATAKS: line(out, 3, set(a, get(b) + "[" + constant(proto, int(aux & 0xffff)) + "]")); break;
+                    case LOP_SETTABLEKS: case LOP_SETUDATAKS: line(out, 3, get(b) + "[" + constant(proto, int(aux & 0xffff)) + "] = " + get(a)); break;
                     case LOP_GETTABLEN: line(out, 3, set(a, get(b) + "[" + std::to_string(c + 1) + "]")); break;
                     case LOP_SETTABLEN: line(out, 3, get(b) + "[" + std::to_string(c + 1) + "] = " + get(a)); break;
                     case LOP_NEWCLOSURE: {
                         const int child = d >= 0 && d < int(function.childIds.size()) ? function.childIds[d] : -1;
-                        captureName = "capture_" + std::to_string(pc);
+                        captureName = "captures[" + std::to_string(pc) + "]";
                         captureIndex = 0;
-                        line(out, 3, "local " + captureName + " = {}");
+                        line(out, 3, captureName + " = {}");
                         if (child >= 0) line(out, 3, set(a, "function(...) return byteveil_functions[" + std::to_string(child) + "](" + captureName + ", ...) end"));
                         else line(out, 3, set(a, "nil --[[ unresolved child prototype ]]"));
                         break;
                     }
                     case LOP_DUPCLOSURE: {
                         const int child = closureId(proto, d);
-                        captureName = "capture_" + std::to_string(pc);
+                        captureName = "captures[" + std::to_string(pc) + "]";
                         captureIndex = 0;
-                        line(out, 3, "local " + captureName + " = {}");
+                        line(out, 3, captureName + " = {}");
                         if (child >= 0) line(out, 3, set(a, "function(...) return byteveil_functions[" + std::to_string(child) + "](" + captureName + ", ...) end"));
                         else line(out, 3, set(a, "nil --[[ unresolved duplicated closure ]]"));
                         break;
@@ -346,16 +365,16 @@ private:
                         else if (a == LCT_UPVAL) line(out, 3, captureName + "[" + std::to_string(captureIndex++) + "] = upvalue(" + std::to_string(b) + ")");
                         else line(out, 3, "-- unknown capture type " + std::to_string(a));
                         break;
-                    case LOP_NAMECALL:
-                        line(out, 3, set(a, get(b) + "[" + constant(proto, int(aux)) + "]"));
+                    case LOP_NAMECALL: case LOP_NAMECALLUDATA:
+                        line(out, 3, set(a, get(b) + "[" + constant(proto, int(aux & 0xffff)) + "]"));
                         line(out, 3, set(a + 1, get(b)));
                         break;
-                    case LOP_CALL: emitCall(out, 3, pc, a, b, c); break;
+                    case LOP_CALL: case LOP_CALLFB: emitCall(out, 3, pc, a, b, c); break;
                     case LOP_RETURN: {
                         if (b == 1) line(out, 3, "return");
                         else
                         {
-                            line(out, 3, "local return_values = range(" + std::to_string(a) + ", " + (b == 0 ? "top" : std::to_string(a + b - 2)) + ")");
+                            line(out, 3, "return_values = range(" + std::to_string(a) + ", " + (b == 0 ? "top" : std::to_string(a + b - 2)) + ")");
                             line(out, 3, "return table.unpack(return_values, 1, return_values.n)");
                         }
                         terminated = true;
@@ -380,15 +399,26 @@ private:
                         line(out, 3, "if " + comparison + " then pc = " + std::to_string(target) + " else pc = " + next + " end");
                         terminated = true; break;
                     }
-                    case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK:
-                        line(out, 3, "if " + get(a) + (op == LOP_JUMPIFEQK ? " == " : " ~= ") + constant(proto, int(aux)) + " then pc = " + std::to_string(target) + " else pc = " + next + " end");
+                    case LOP_JUMPXEQKNIL: case LOP_JUMPXEQKB: case LOP_JUMPXEQKN: case LOP_JUMPXEQKS: {
+                        const std::string value = op == LOP_JUMPXEQKNIL ? "nil" :
+                            op == LOP_JUMPXEQKB ? ((aux & 1) ? "true" : "false") :
+                            constant(proto, int(aux & 0x00ffffff));
+                        const bool negate = (aux & 0x80000000u) != 0;
+                        line(out, 3, "if " + get(a) + (negate ? " ~= " : " == ") + value + " then pc = " + std::to_string(target) + " else pc = " + next + " end");
                         terminated = true; break;
+                    }
                     case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
                     case LOP_AND: case LOP_OR:
                         line(out, 3, set(a, "(" + get(b) + " " + binary(op) + " " + get(c) + ")")); break;
                     case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
                     case LOP_ANDK: case LOP_ORK:
                         line(out, 3, set(a, "(" + get(b) + " " + binary(op) + " " + constant(proto, c) + ")")); break;
+                    case LOP_SUBRK: case LOP_DIVRK:
+                        line(out, 3, set(a, "(" + constant(proto, b) + (op == LOP_SUBRK ? " - " : " / ") + get(c) + ")")); break;
+                    case LOP_IDIV:
+                        line(out, 3, set(a, "(" + get(b) + " // " + get(c) + ")")); break;
+                    case LOP_IDIVK:
+                        line(out, 3, set(a, "(" + get(b) + " // " + constant(proto, c) + ")")); break;
                     case LOP_CONCAT: {
                         std::string expression;
                         for (int reg = b; reg <= c; ++reg) expression += (expression.empty() ? "" : " .. ") + get(reg);
@@ -416,18 +446,18 @@ private:
                         terminated = true; break;
                     }
                     case LOP_FORGLOOP: case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT: {
-                        const int variables = op == LOP_FORGLOOP ? int(aux) : 2;
-                        line(out, 3, "local iterator_results_" + std::to_string(pc) + " = table.pack(" + get(a) + "(" + get(a + 1) + ", " + get(a + 2) + "))");
+                        const int variables = op == LOP_FORGLOOP ? int(aux & 0xff) : 2;
+                        line(out, 3, "iterator_results = table.pack(" + get(a) + "(" + get(a + 1) + ", " + get(a + 2) + "))");
                         for (int variable = 0; variable < variables; ++variable)
-                            line(out, 3, set(a + 3 + variable, "iterator_results_" + std::to_string(pc) + "[" + std::to_string(variable + 1) + "]"));
-                        line(out, 3, set(a + 2, "iterator_results_" + std::to_string(pc) + "[1]"));
-                        line(out, 3, "if iterator_results_" + std::to_string(pc) + "[1] ~= nil then pc = " + std::to_string(target) + " else pc = " + next + " end");
+                            line(out, 3, set(a + 3 + variable, "iterator_results[" + std::to_string(variable + 1) + "]"));
+                        line(out, 3, set(a + 2, "iterator_results[1]"));
+                        line(out, 3, "if iterator_results[1] ~= nil then pc = " + std::to_string(target) + " else pc = " + next + " end");
                         terminated = true; break;
                     }
                     case LOP_GETVARARGS:
                         if (b == 0)
                         {
-                            line(out, 3, "local vararg_count = math.max(0, select(\"#\", ...) - " + std::to_string(proto->numparams) + ")");
+                            line(out, 3, "vararg_count = math.max(0, select(\"#\", ...) - " + std::to_string(proto->numparams) + ")");
                             line(out, 3, "for vararg_index = 1, vararg_count do set(" + std::to_string(a) + " + vararg_index - 1, select(" + std::to_string(proto->numparams) + " + vararg_index, ...)) end");
                             line(out, 3, "top = " + std::to_string(a) + " + vararg_count - 1");
                         }
@@ -436,6 +466,7 @@ private:
                                 line(out, 3, set(a + variable, "select(" + std::to_string(proto->numparams + variable + 1) + ", ...)"));
                         break;
                     case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+                    case LOP_FASTCALL3: case LOP_FASTPCALL:
                         line(out, 3, "-- FASTCALL optimization omitted; execute its ordinary fallback sequence");
                         if (target >= 0) { line(out, 3, "pc = " + next); terminated = true; }
                         break;
@@ -471,33 +502,13 @@ bool treeNeedsRegisterRenderer(const Proto* proto)
     for (int pc = 0; pc < proto->sizecode;)
     {
         const LuauOpcode op = LuauOpcode(LUAU_INSN_OP(proto->code[pc]));
-        switch (op)
-        {
-        case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPX: case LOP_JUMPIF: case LOP_JUMPIFNOT:
-        case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
-        case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK:
-        case LOP_FORNPREP: case LOP_FORNLOOP: case LOP_FORGPREP: case LOP_FORGLOOP:
-        case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT: case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT:
-        case LOP_LOADB: case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
-        case LOP_SETUPVAL: case LOP_GETTABLE: case LOP_SETTABLEKS: case LOP_SETTABLEN:
-        case LOP_NEWCLOSURE: case LOP_DUPCLOSURE: case LOP_CAPTURE:
+        if (Luau::isJumpD(op) || Luau::isFastCall(op) || Luau::isSkipC(op) || op == LOP_JUMPX ||
+            op == LOP_SETUPVAL || op == LOP_GETTABLE || op == LOP_SETTABLEKS || op == LOP_SETTABLEN ||
+            op == LOP_NEWCLOSURE || op == LOP_DUPCLOSURE || op == LOP_CAPTURE || op == LOP_CALLFB ||
+            op == LOP_SUBRK || op == LOP_DIVRK || op == LOP_IDIV || op == LOP_IDIVK ||
+            op == LOP_GETUDATAKS || op == LOP_SETUDATAKS || op == LOP_NAMECALLUDATA)
             return true;
-        default:
-            break;
-        }
-        switch (op)
-        {
-        case LOP_GETGLOBAL: case LOP_SETGLOBAL: case LOP_GETIMPORT: case LOP_GETTABLEKS:
-        case LOP_SETTABLEKS: case LOP_NAMECALL: case LOP_JUMPIFEQ: case LOP_JUMPIFLE:
-        case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
-        case LOP_NEWTABLE: case LOP_SETLIST: case LOP_FORGLOOP: case LOP_LOADKX:
-        case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FASTCALL2: case LOP_FASTCALL2K:
-            pc += 2;
-            break;
-        default:
-            pc += 1;
-            break;
-        }
+        pc += Luau::getOpLength(op);
     }
     for (int child = 0; child < proto->sizep; ++child)
         if (treeNeedsRegisterRenderer(proto->p[child])) return true;

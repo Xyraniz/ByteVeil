@@ -3,8 +3,7 @@
 
 #include "Luau/DenseHash.h"
 #include "Luau/Error.h"
-#include "Luau/TypeVar.h"
-#include "Luau/TypePack.h"
+#include "Luau/TypeFwd.h"
 
 #include <utility>
 
@@ -35,21 +34,41 @@ struct UnifierCounters
 
 struct UnifierSharedState
 {
-    UnifierSharedState(InternalErrorReporter* iceHandler)
+    explicit UnifierSharedState(InternalErrorReporter* iceHandler)
         : iceHandler(iceHandler)
     {
     }
 
     InternalErrorReporter* iceHandler;
 
-    DenseHashMap<TypeId, bool> skipCacheForType{nullptr};
-    DenseHashSet<std::pair<TypeId, TypeId>, TypeIdPairHash> cachedUnify{{nullptr, nullptr}};
-    DenseHashMap<std::pair<TypeId, TypeId>, TypeErrorData, TypeIdPairHash> cachedUnifyError{{nullptr, nullptr}};
+    DenseHashMap<TypeId, bool> skipCacheForType;
+    DenseHashSet<std::pair<TypeId, TypeId>, TypeIdPairHash> cachedUnify;
+    DenseHashMap<std::pair<TypeId, TypeId>, TypeErrorData, TypeIdPairHash> cachedUnifyError;
 
-    DenseHashSet<TypeId> tempSeenTy{nullptr};
-    DenseHashSet<TypePackId> tempSeenTp{nullptr};
+    DenseHashSet<TypeId> tempSeenTy;
+    DenseHashSet<TypePackId> tempSeenTp;
 
     UnifierCounters counters;
+
+    bool reentrantTypeReduction = false;
+};
+
+struct TypeReductionReentrancyGuard final
+{
+    explicit TypeReductionReentrancyGuard(NotNull<UnifierSharedState> sharedState)
+        : sharedState{sharedState}
+    {
+        sharedState->reentrantTypeReduction = true;
+    }
+    ~TypeReductionReentrancyGuard()
+    {
+        sharedState->reentrantTypeReduction = false;
+    }
+    TypeReductionReentrancyGuard(const TypeReductionReentrancyGuard&) = delete;
+    TypeReductionReentrancyGuard(TypeReductionReentrancyGuard&&) = delete;
+
+private:
+    NotNull<UnifierSharedState> sharedState;
 };
 
 } // namespace Luau

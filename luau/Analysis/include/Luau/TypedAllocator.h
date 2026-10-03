@@ -10,7 +10,7 @@ namespace Luau
 {
 
 void* pagedAllocate(size_t size);
-void pagedDeallocate(void* ptr);
+void pagedDeallocate(void* ptr, size_t size);
 void pagedFreeze(void* ptr, size_t size);
 void pagedUnfreeze(void* ptr, size_t size);
 
@@ -49,7 +49,7 @@ public:
 
         T* block = stuff.back();
         T* res = block + currentBlockSize;
-        new (res) T(std::forward<Args&&...>(args...));
+        new (res) T(std::forward<Args>(args)...);
         ++currentBlockSize;
         return res;
     }
@@ -113,7 +113,7 @@ private:
             for (size_t i = 0; i < blockSize; ++i)
                 block[i].~T();
 
-            pagedDeallocate(block);
+            pagedDeallocate(block, kBlockSizeBytes);
         }
 
         stuff.clear();

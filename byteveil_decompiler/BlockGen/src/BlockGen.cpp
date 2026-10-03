@@ -52,7 +52,7 @@ namespace Luau::Decompiler::BlockGen {
             static char placeholder[] = "--[[ byteveil: body not structurally recovered ]]";
             auto* stats = new std::vector<AstStat*>{
                 new AstStatExpr{Location(), new AstExprConstantString{Location(),
-                    AstArray<char>{placeholder, sizeof(placeholder) - 1}}}};
+                    AstArray<char>{placeholder, sizeof(placeholder) - 1}, AstExprConstantString::QuoteStyle::QuotedSimple}}};
             ret = new AstStatBlock{Location(), AstArray<AstStat*>{stats->data(), stats->size()}};
         }
         return ret;
@@ -76,13 +76,13 @@ namespace Luau::Decompiler::BlockGen {
         }
         generateFunctionArgs();
         AstStatBlock* block = handleAllInstructions();
-        auto name = AstName(proto->debugname ? proto->debugname->data : "");
-        auto func = new AstExprFunction{AstExprFunction {Location(), AstArray<AstGenericType>{}, AstArray<AstGenericTypePack>{},
+        auto name = AstName(proto->debugname ? getstr(proto->debugname) : "");
+        auto func = new AstExprFunction{Location(), AstArray<AstAttr*>{}, AstArray<AstGenericType*>{}, AstArray<AstGenericTypePack*>{},
                                                          new AstLocal(name, Location(), nullptr, 1, 1, nullptr),
                                                          AstArray<AstLocal*>{functionArgs->data(), functionArgs->size()},
-                                                         proto->is_vararg ? std::make_optional(Location()) : std::nullopt, block, 1, AstName(name), {}}};
+                                                         proto->is_vararg, Location(), block, 1, AstName(name), nullptr};
         if (!proto->debugname) {
-            return new AstExprGroup {Location(), func};
+            return new AstExprGroup(Location(), func);
         }
         return func;
     }
@@ -223,7 +223,8 @@ namespace Luau::Decompiler::BlockGen {
                 } else {
                     static char placeholder[] = "--[[ byteveil: unresolved nested closure ]]";
                     virtualStack.set(LUAU_INSN_A(*insn),
-                        new AstExprConstantString{Location(), AstArray<char>{placeholder, sizeof(placeholder) - 1}});
+                        new AstExprConstantString{Location(), AstArray<char>{placeholder, sizeof(placeholder) - 1},
+                            AstExprConstantString::QuoteStyle::QuotedSimple});
                 }
                 materialize(LUAU_INSN_A(*insn));
                 break;

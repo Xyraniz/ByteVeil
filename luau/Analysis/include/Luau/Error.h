@@ -1,25 +1,43 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/FileResolver.h"
+#include "Luau/Ast.h"
 #include "Luau/Location.h"
-#include "Luau/TypeVar.h"
+#include "Luau/NotNull.h"
+#include "Luau/Type.h"
+#include "Luau/TypeFunctionError.h"
+#include "Luau/TypeIds.h"
 #include "Luau/Variant.h"
-#include "Luau/TypeArena.h"
+
+#include <set>
 
 namespace Luau
 {
+
+struct FileResolver;
+struct TypeArena;
 struct TypeError;
 
 struct TypeMismatch
 {
+    enum Context
+    {
+        CovariantContext,
+        InvariantContext
+    };
+
     TypeMismatch() = default;
     TypeMismatch(TypeId wantedType, TypeId givenType);
     TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason);
-    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, TypeError error);
+    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error);
+
+    TypeMismatch(TypeId wantedType, TypeId givenType, Context context);
+    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, Context context);
+    TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error, Context context);
 
     TypeId wantedType = nullptr;
     TypeId givenType = nullptr;
+    Context context = CovariantContext;
 
     std::string reason;
     std::shared_ptr<TypeError> error;
@@ -33,7 +51,6 @@ struct UnknownSymbol
     {
         Binding,
         Type,
-        Generic
     };
     Name name;
     Context context;
@@ -71,6 +88,15 @@ struct CannotExtendTable
     bool operator==(const CannotExtendTable& rhs) const;
 };
 
+struct CannotCompareUnrelatedTypes
+{
+    TypeId left;
+    TypeId right;
+    AstExprBinary::Op op;
+
+    bool operator==(const CannotCompareUnrelatedTypes& rhs) const;
+};
+
 struct OnlyTablesCanHaveMethods
 {
     TypeId tableType;
@@ -81,7 +107,7 @@ struct OnlyTablesCanHaveMethods
 struct DuplicateTypeDefinition
 {
     Name name;
-    Location previousLocation;
+    std::optional<Location> previousLocation;
 
     bool operator==(const DuplicateTypeDefinition& rhs) const;
 };
@@ -91,13 +117,16 @@ struct CountMismatch
     enum Context
     {
         Arg,
-        Result,
+        FunctionResult,
+        ExprListResult,
         Return,
     };
     size_t expected;
+    std::optional<size_t> maximum;
     size_t actual;
     Context context = Arg;
     bool isVariadic = false;
+    std::string function;
 
     bool operator==(const CountMismatch& rhs) const;
 };
@@ -169,6 +198,18 @@ struct GenericError
     bool operator==(const GenericError& rhs) const;
 };
 
+struct InternalError
+{
+    std::string message;
+
+    bool operator==(const InternalError& rhs) const;
+};
+
+struct ConstraintSolvingIncompleteError
+{
+    bool operator==(const ConstraintSolvingIncompleteError& rhs) const;
+};
+
 struct CannotCallNonFunction
 {
     TypeId ty;
@@ -193,6 +234,14 @@ struct ModuleHasCyclicDependency
 {
     std::vector<ModuleName> cycle;
     bool operator==(const ModuleHasCyclicDependency& rhs) const;
+};
+
+struct CyclicModuleTopLevelAccess
+{
+    ModuleName cyclicModuleName;
+    Name localName;
+    Name propName;
+    bool operator==(const CyclicModuleTopLevelAccess& rhs) const;
 };
 
 struct FunctionExitsWithoutReturning
@@ -293,12 +342,414 @@ struct NormalizationTooComplex
     }
 };
 
-using TypeErrorData =
-    Variant<TypeMismatch, UnknownSymbol, UnknownProperty, NotATable, CannotExtendTable, OnlyTablesCanHaveMethods, DuplicateTypeDefinition,
-        CountMismatch, FunctionDoesNotTakeSelf, FunctionRequiresSelf, OccursCheckFailed, UnknownRequire, IncorrectGenericParameterCount, SyntaxError,
-        CodeTooComplex, UnificationTooComplex, UnknownPropButFoundLikeProp, GenericError, CannotCallNonFunction, ExtraInformation, DeprecatedApiUsed,
-        ModuleHasCyclicDependency, IllegalRequire, FunctionExitsWithoutReturning, DuplicateGenericParameter, CannotInferBinaryOperation,
-        MissingProperties, SwappedGenericTypeParameter, OptionalValueAccess, MissingUnionProperty, TypesAreUnrelated, NormalizationTooComplex>;
+struct TypePackMismatch
+{
+    TypePackId wantedTp;
+    TypePackId givenTp;
+    std::string reason;
+
+    bool operator==(const TypePackMismatch& rhs) const;
+};
+
+struct DynamicPropertyLookupOnExternTypesUnsafe
+{
+    TypeId ty;
+
+    bool operator==(const DynamicPropertyLookupOnExternTypesUnsafe& rhs) const;
+};
+
+struct UninhabitedTypeFunction
+{
+    TypeId ty;
+
+    bool operator==(const UninhabitedTypeFunction& rhs) const;
+};
+
+struct ExplicitFunctionAnnotationRecommended
+{
+    std::vector<std::pair<std::string, TypeId>> recommendedArgs;
+    TypeId recommendedReturn;
+    bool operator==(const ExplicitFunctionAnnotationRecommended& rhs) const;
+};
+
+struct UninhabitedTypePackFunction
+{
+    TypePackId tp;
+
+    bool operator==(const UninhabitedTypePackFunction& rhs) const;
+};
+
+struct WhereClauseNeeded
+{
+    TypeId ty;
+
+    bool operator==(const WhereClauseNeeded& rhs) const;
+};
+
+struct PackWhereClauseNeeded
+{
+    TypePackId tp;
+
+    bool operator==(const PackWhereClauseNeeded& rhs) const;
+};
+
+struct CheckedFunctionCallError
+{
+    TypeId expected;
+    TypeId passed;
+    std::string checkedFunctionName;
+    // TODO: make this a vector<argumentIndices>
+    size_t argumentIndex;
+    bool operator==(const CheckedFunctionCallError& rhs) const;
+};
+
+struct NonStrictFunctionDefinitionError
+{
+    std::string functionName;
+    std::string argument;
+    TypeId argumentType;
+    bool operator==(const NonStrictFunctionDefinitionError& rhs) const;
+};
+
+struct PropertyAccessViolation
+{
+    TypeId table;
+    Name key;
+
+    enum
+    {
+        CannotRead,
+        CannotWrite
+    } context;
+
+    bool operator==(const PropertyAccessViolation& rhs) const;
+};
+
+struct CheckedFunctionIncorrectArgs
+{
+    std::string functionName;
+    size_t expected;
+    size_t actual;
+    bool operator==(const CheckedFunctionIncorrectArgs& rhs) const;
+};
+
+struct CannotAssignToNever
+{
+    // type of the rvalue being assigned
+    TypeId rhsType;
+
+    // Originating type.
+    std::vector<TypeId> cause;
+
+    enum class Reason
+    {
+        // when assigning to a property in a union of tables, the properties type
+        // is narrowed to the intersection of its type in each variant.
+        PropertyNarrowed,
+    };
+
+    Reason reason;
+
+    bool operator==(const CannotAssignToNever& rhs) const;
+};
+
+struct UnexpectedTypeInSubtyping
+{
+    TypeId ty;
+
+    bool operator==(const UnexpectedTypeInSubtyping& rhs) const;
+};
+
+struct UnexpectedTypePackInSubtyping
+{
+    TypePackId tp;
+
+    bool operator==(const UnexpectedTypePackInSubtyping& rhs) const;
+};
+
+struct UserDefinedTypeFunctionError
+{
+    std::string message;
+
+    bool operator==(const UserDefinedTypeFunctionError& rhs) const;
+};
+
+struct BuiltInTypeFunctionError
+{
+    TypeFunctionError error;
+
+    bool operator==(const BuiltInTypeFunctionError& rhs) const;
+};
+
+struct ReservedIdentifier
+{
+    std::string name;
+
+    bool operator==(const ReservedIdentifier& rhs) const;
+};
+
+struct UnexpectedArrayLikeTableItem
+{
+    bool operator==(const UnexpectedArrayLikeTableItem&) const
+    {
+        return true;
+    }
+};
+
+struct CannotCheckDynamicStringFormatCalls
+{
+    bool operator==(const CannotCheckDynamicStringFormatCalls&) const
+    {
+        return true;
+    }
+};
+
+// Error during subtyping when the number of generic types between compared types does not match
+struct GenericTypeCountMismatch
+{
+    size_t subTyGenericCount;
+    size_t superTyGenericCount;
+
+    bool operator==(const GenericTypeCountMismatch& rhs) const;
+};
+
+// Error during subtyping when the number of generic type packs between compared types does not match
+struct GenericTypePackCountMismatch
+{
+    size_t subTyGenericPackCount;
+    size_t superTyGenericPackCount;
+
+    bool operator==(const GenericTypePackCountMismatch& rhs) const;
+};
+
+// Error during subtyping when the number of generic type packs between compared types does not match
+struct MultipleNonviableOverloads
+{
+    size_t attemptedArgCount;
+
+    bool operator==(const MultipleNonviableOverloads& rhs) const;
+};
+
+// Error where a type alias violates the recursive restraint, ie when a type alias T<A> has T with different arguments on the RHS.
+struct RecursiveRestraintViolation
+{
+    bool operator==(const RecursiveRestraintViolation& rhs) const
+    {
+        return true;
+    }
+};
+
+// Error during subtyping when the inferred bounds of a generic type are incompatible
+struct GenericBoundsMismatch
+{
+    std::string_view genericName;
+    std::vector<TypeId> lowerBounds;
+    std::vector<TypeId> upperBounds;
+
+    GenericBoundsMismatch(std::string_view genericName, TypeIds lowerBoundSet, TypeIds upperBoundSet);
+
+    bool operator==(const GenericBoundsMismatch& rhs) const;
+};
+
+// Used `f<<T>>` where f is not a function
+struct InstantiateGenericsOnNonFunction
+{
+    enum class InterestingEdgeCase
+    {
+        None,
+        MetatableCall,
+        Intersection,
+    };
+
+    InterestingEdgeCase interestingEdgeCase;
+
+    bool operator==(const InstantiateGenericsOnNonFunction&) const;
+};
+
+// Provided too many generics inside `f<<T>>`
+struct TypeInstantiationCountMismatch
+{
+    std::optional<std::string> functionName;
+    TypeId functionType;
+
+    size_t providedTypes = 0;
+    size_t maximumTypes = 0;
+
+    size_t providedTypePacks = 0;
+    size_t maximumTypePacks = 0;
+
+    bool operator==(const TypeInstantiationCountMismatch&) const;
+};
+
+// Error when referencing a type function without providing explicit generics.
+//
+//  type function create_table_with_key()
+//      local tbl = types.newtable()
+//      tbl:setproperty(types.singleton "key", types.unionof(types.string, types.singleton(nil)))
+//      return tbl
+//  end
+//  local a: create_table_with_key = {}
+//           ^^^^^^^^^^^^^^^^^^^^^ This should have `<>` at the end.
+//
+struct UnappliedTypeFunction
+{
+    bool operator==(const UnappliedTypeFunction& rhs) const;
+};
+
+// Error when we have an ambiguous overload and cannot determine the correct
+// function call.
+//
+//  local f: ((number | string) -> "one") & ((number | boolean) -> "two")
+//  local g = f(42)
+//            ^^^^^ We cannot determine the correct call here
+struct AmbiguousFunctionCall
+{
+    TypeId function;
+    TypePackId arguments;
+
+    bool operator==(const AmbiguousFunctionCall& rhs) const;
+};
+
+// Error when we access an uninitialized field within a class constructor.
+// If fieldName is absent, then `self` was used in an r-value context before all its non nilable fields were initialized.
+struct UninitializedFieldAccess
+{
+    std::optional<std::string> fieldName;
+
+    bool operator==(const UninitializedFieldAccess& rhs) const;
+};
+
+struct TypeAnnotationRequired
+{
+    TypeId inferredTy;
+
+    bool operator==(const TypeAnnotationRequired& rhs) const;
+};
+
+struct ConstructorsShouldNotReturnAnything
+{
+    bool operator==(const ConstructorsShouldNotReturnAnything&) const
+    {
+        return true;
+    }
+};
+
+struct CyclicClassInheritance
+{
+    std::vector<Name> cycle;
+
+    bool operator==(const CyclicClassInheritance& rhs) const;
+};
+
+struct InvalidClassExtension
+{
+    enum Context
+    {
+        ClassIsNotOpen,
+        NotAClass,
+        BaseIsClassInstance,
+    };
+
+    Context context;
+    TypeId baseClass;
+
+    bool operator==(const InvalidClassExtension& rhs) const;
+};
+
+struct IncompatibleClassMethodOverride
+{
+    Name method;
+    Name className;
+    Name superName;
+
+    bool operator==(const IncompatibleClassMethodOverride& rhs) const;
+};
+
+using TypeErrorData = Variant<
+    TypeMismatch,
+    UnknownSymbol,
+    UnknownProperty,
+    NotATable,
+    CannotExtendTable,
+    CannotCompareUnrelatedTypes,
+    OnlyTablesCanHaveMethods,
+    DuplicateTypeDefinition,
+    CountMismatch,
+    FunctionDoesNotTakeSelf,
+    FunctionRequiresSelf,
+    OccursCheckFailed,
+    UnknownRequire,
+    IncorrectGenericParameterCount,
+    SyntaxError,
+    CodeTooComplex,
+    UnificationTooComplex,
+    UnknownPropButFoundLikeProp,
+    GenericError,
+    InternalError,
+    ConstraintSolvingIncompleteError,
+    CannotCallNonFunction,
+    ExtraInformation,
+    DeprecatedApiUsed,
+    ModuleHasCyclicDependency,
+    CyclicModuleTopLevelAccess,
+    IllegalRequire,
+    FunctionExitsWithoutReturning,
+    DuplicateGenericParameter,
+    CannotAssignToNever,
+    CannotInferBinaryOperation,
+    MissingProperties,
+    SwappedGenericTypeParameter,
+    OptionalValueAccess,
+    MissingUnionProperty,
+    TypesAreUnrelated,
+    NormalizationTooComplex,
+    TypePackMismatch,
+    DynamicPropertyLookupOnExternTypesUnsafe,
+    UninhabitedTypeFunction,
+    UninhabitedTypePackFunction,
+    WhereClauseNeeded,
+    PackWhereClauseNeeded,
+    CheckedFunctionCallError,
+    NonStrictFunctionDefinitionError,
+    PropertyAccessViolation,
+    CheckedFunctionIncorrectArgs,
+    UnexpectedTypeInSubtyping,
+    UnexpectedTypePackInSubtyping,
+    ExplicitFunctionAnnotationRecommended,
+    UserDefinedTypeFunctionError,
+    BuiltInTypeFunctionError,
+    ReservedIdentifier,
+    UnexpectedArrayLikeTableItem,
+    CannotCheckDynamicStringFormatCalls,
+    GenericTypeCountMismatch,
+    GenericTypePackCountMismatch,
+    MultipleNonviableOverloads,
+    RecursiveRestraintViolation,
+    GenericBoundsMismatch,
+    UnappliedTypeFunction,
+    InstantiateGenericsOnNonFunction,
+    TypeInstantiationCountMismatch,
+    AmbiguousFunctionCall,
+    UninitializedFieldAccess,
+    TypeAnnotationRequired,
+    ConstructorsShouldNotReturnAnything,
+    CyclicClassInheritance,
+    InvalidClassExtension,
+    IncompatibleClassMethodOverride>;
+
+struct TypeErrorSummary
+{
+    Location location;
+    ModuleName moduleName;
+    int code;
+
+    TypeErrorSummary(const Location& location, const ModuleName& moduleName, int code)
+        : location(location)
+        , moduleName(moduleName)
+        , code(code)
+    {
+    }
+};
 
 struct TypeError
 {
@@ -306,6 +757,7 @@ struct TypeError
     ModuleName moduleName;
     TypeErrorData data;
 
+    static int minCode();
     int code() const;
 
     TypeError() = default;
@@ -323,6 +775,8 @@ struct TypeError
     }
 
     bool operator==(const TypeError& rhs) const;
+
+    TypeErrorSummary summary() const;
 };
 
 template<typename T>
@@ -339,12 +793,18 @@ T* get(TypeError& e)
 
 using ErrorVec = std::vector<TypeError>;
 
+struct TypeErrorToStringOptions
+{
+    FileResolver* fileResolver = nullptr;
+};
+
 std::string toString(const TypeError& error);
+std::string toString(const TypeError& error, TypeErrorToStringOptions options);
 
 bool containsParseErrorName(const TypeError& error);
 
 // Copy any types named in the error into destArena.
-void copyErrors(ErrorVec& errors, struct TypeArena& destArena);
+void copyErrors(ErrorVec& errors, struct TypeArena& destArena, NotNull<BuiltinTypes> builtinTypes);
 
 // Internal Compiler Error
 struct InternalErrorReporter
@@ -352,8 +812,33 @@ struct InternalErrorReporter
     std::function<void(const char*)> onInternalError;
     std::string moduleName;
 
-    [[noreturn]] void ice(const std::string& message, const Location& location);
-    [[noreturn]] void ice(const std::string& message);
+    [[noreturn]] void ice(const std::string& message, const Location& location) const;
+    [[noreturn]] void ice(const std::string& message) const;
+};
+
+class InternalCompilerError : public std::exception
+{
+public:
+    explicit InternalCompilerError(const std::string& message)
+        : message(message)
+    {
+    }
+    explicit InternalCompilerError(const std::string& message, const std::string& moduleName)
+        : message(message)
+        , moduleName(moduleName)
+    {
+    }
+    explicit InternalCompilerError(const std::string& message, const std::string& moduleName, const Location& location)
+        : message(message)
+        , moduleName(moduleName)
+        , location(location)
+    {
+    }
+    const char* what() const throw() override;
+
+    const std::string message;
+    const std::optional<std::string> moduleName;
+    const std::optional<Location> location;
 };
 
 } // namespace Luau

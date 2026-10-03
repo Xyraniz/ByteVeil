@@ -3,6 +3,7 @@
 
 #include "Luau/Variant.h"
 #include "Luau/Symbol.h"
+#include "Luau/TypeFwd.h"
 
 #include <memory>
 #include <unordered_map>
@@ -10,10 +11,9 @@
 namespace Luau
 {
 
-struct TypeVar;
-using TypeId = const TypeVar*;
-
 struct Field;
+
+// Deprecated. Do not use in new work.
 using LValue = Variant<Symbol, Field>;
 
 struct Field
@@ -32,7 +32,7 @@ struct LValueHasher
 
 const LValue* baseof(const LValue& lvalue);
 
-std::optional<LValue> tryGetLValue(const class AstExpr& expr);
+std::optional<LValue> tryGetLValue(const class AstExpr& node);
 
 // Utility function: breaks down an LValue to get at the Symbol
 Symbol getBaseSymbol(const LValue& lvalue);

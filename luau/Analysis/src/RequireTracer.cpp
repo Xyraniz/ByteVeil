@@ -13,7 +13,7 @@ struct RequireTracer : AstVisitor
         : result(result)
         , fileResolver(fileResolver)
         , currentModuleName(currentModuleName)
-        , locals(nullptr)
+        , locals{}
     {
     }
 
@@ -28,7 +28,7 @@ struct RequireTracer : AstVisitor
         AstExprGlobal* global = expr->func->as<AstExprGlobal>();
 
         if (global && global->name == "require" && expr->args.size >= 1)
-            requires.push_back(expr);
+            requireCalls.push_back(expr);
 
         return true;
     }
@@ -65,7 +65,13 @@ struct RequireTracer : AstVisitor
         return true;
     }
 
-    AstExpr* getDependent(AstExpr* node)
+    bool visit(AstTypePack* node) override
+    {
+        // allow resolving require inside `typeof` annotations
+        return true;
+    }
+
+    AstNode* getDependent(AstNode* node)
     {
         if (AstExprLocal* expr = node->as<AstExprLocal>())
             return locals[expr->local];
@@ -75,29 +81,39 @@ struct RequireTracer : AstVisitor
             return expr->expr;
         else if (AstExprCall* expr = node->as<AstExprCall>(); expr && expr->self)
             return expr->func->as<AstExprIndexName>()->expr;
+        else if (AstExprGroup* expr = node->as<AstExprGroup>())
+            return expr->expr;
+        else if (AstExprTypeAssertion* expr = node->as<AstExprTypeAssertion>())
+            return expr->annotation;
+        else if (AstTypeGroup* expr = node->as<AstTypeGroup>())
+            return expr->type;
+        else if (AstTypeTypeof* expr = node->as<AstTypeTypeof>())
+            return expr->expr;
         else
             return nullptr;
     }
 
-    void process()
+    void process(const TypeCheckLimits& limits)
     {
         ModuleInfo moduleContext{currentModuleName};
 
         // seed worklist with require arguments
-        work.reserve(requires.size());
+        work.reserve(requireCalls.size());
 
-        for (AstExprCall* require : requires)
+        for (AstExprCall* require : requireCalls)
             work.push_back(require->args.data[0]);
 
         // push all dependent expressions to the work stack; note that the vector is modified during traversal
         for (size_t i = 0; i < work.size(); ++i)
-            if (AstExpr* dep = getDependent(work[i]))
+        {
+            if (AstNode* dep = getDependent(work[i]))
                 work.push_back(dep);
+        }
 
         // resolve all expressions to a module info
         for (size_t i = work.size(); i > 0; --i)
         {
-            AstExpr* expr = work[i - 1];
+            AstNode* expr = work[i - 1];
 
             // when multiple expressions depend on the same one we push it to work queue multiple times
             if (result.exprs.contains(expr))
@@ -105,19 +121,22 @@ struct RequireTracer : AstVisitor
 
             std::optional<ModuleInfo> info;
 
-            if (AstExpr* dep = getDependent(expr))
+            if (AstNode* dep = getDependent(expr))
             {
                 const ModuleInfo* context = result.exprs.find(dep);
 
-                // locals just inherit their dependent context, no resolution required
-                if (expr->is<AstExprLocal>())
-                    info = context ? std::optional<ModuleInfo>(*context) : std::nullopt;
-                else
-                    info = fileResolver->resolveModule(context, expr);
+                if (context && expr->is<AstExprLocal>())
+                    info = *context; // locals just inherit their dependent context, no resolution required
+                else if (context && (expr->is<AstExprGroup>() || expr->is<AstTypeGroup>()))
+                    info = *context; // simple group nodes propagate their value
+                else if (context && (expr->is<AstTypeTypeof>() || expr->is<AstExprTypeAssertion>()))
+                    info = *context; // typeof type annotations will resolve to the typeof content
+                else if (AstExpr* asExpr = expr->asExpr())
+                    info = fileResolver->resolveModule(context, asExpr, limits);
             }
-            else
+            else if (AstExpr* asExpr = expr->asExpr())
             {
-                info = fileResolver->resolveModule(&moduleContext, expr);
+                info = fileResolver->resolveModule(&moduleContext, asExpr, limits);
             }
 
             if (info)
@@ -125,15 +144,15 @@ struct RequireTracer : AstVisitor
         }
 
         // resolve all requires according to their argument
-        result.requires.reserve(requires.size());
+        result.requireList.reserve(requireCalls.size());
 
-        for (AstExprCall* require : requires)
+        for (AstExprCall* require : requireCalls)
         {
             AstExpr* arg = require->args.data[0];
 
             if (const ModuleInfo* info = result.exprs.find(arg))
             {
-                result.requires.push_back({info->name, require->location});
+                result.requireList.push_back({info->name, require->location});
 
                 ModuleInfo infoCopy = *info; // copy *info out since next line invalidates info!
                 result.exprs[require] = std::move(infoCopy);
@@ -150,16 +169,16 @@ struct RequireTracer : AstVisitor
     ModuleName currentModuleName;
 
     DenseHashMap<AstLocal*, AstExpr*> locals;
-    std::vector<AstExpr*> work;
-    std::vector<AstExprCall*> requires;
+    std::vector<AstNode*> work;
+    std::vector<AstExprCall*> requireCalls;
 };
 
-RequireTraceResult traceRequires(FileResolver* fileResolver, AstStatBlock* root, const ModuleName& currentModuleName)
+RequireTraceResult traceRequires(FileResolver* fileResolver, AstStatBlock* root, const ModuleName& currentModuleName, const TypeCheckLimits& limits)
 {
     RequireTraceResult result;
     RequireTracer tracer{result, fileResolver, currentModuleName};
     root->visit(&tracer);
-    tracer.process();
+    tracer.process(limits);
     return result;
 }
 

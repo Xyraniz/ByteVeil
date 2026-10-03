@@ -1,47 +1,16 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Allocator.h"
 #include "Luau/Ast.h"
 #include "Luau/Location.h"
 #include "Luau/DenseHash.h"
 #include "Luau/Common.h"
 
+#include <vector>
+
 namespace Luau
 {
-
-class Allocator
-{
-public:
-    Allocator();
-    Allocator(Allocator&&);
-
-    Allocator& operator=(Allocator&&) = delete;
-
-    ~Allocator();
-
-    void* allocate(size_t size);
-
-    template<typename T, typename... Args>
-    T* alloc(Args&&... args)
-    {
-        static_assert(std::is_trivially_destructible<T>::value, "Objects allocated with this allocator will never have their destructors run!");
-
-        T* t = static_cast<T*>(allocate(sizeof(T)));
-        new (t) T(std::forward<Args>(args)...);
-        return t;
-    }
-
-private:
-    struct Page
-    {
-        Page* next;
-
-        char data[8192];
-    };
-
-    Page* root;
-    size_t offset;
-};
 
 struct Lexeme
 {
@@ -60,11 +29,19 @@ struct Lexeme
         Dot3,
         SkinnyArrow,
         DoubleColon,
+        FloorDiv,
+
+        InterpStringBegin,
+        InterpStringMid,
+        InterpStringEnd,
+        // An interpolated string with no expressions (like `x`)
+        InterpStringSimple,
 
         AddAssign,
         SubAssign,
         MulAssign,
         DivAssign,
+        FloorDivAssign,
         ModAssign,
         PowAssign,
         ConcatAssign,
@@ -77,9 +54,13 @@ struct Lexeme
         Comment,
         BlockComment,
 
+        Attribute,
+        AttributeOpen,
+
         BrokenString,
         BrokenComment,
         BrokenUnicode,
+        BrokenInterpDoubleBrace,
         Error,
 
         Reserved_BEGIN,
@@ -107,10 +88,23 @@ struct Lexeme
         Reserved_END
     };
 
+    enum struct QuoteStyle
+    {
+        Single,
+        Double,
+    };
+
     Type type;
     Location location;
+
+    // Field declared here, before the union, to ensure that Lexeme size is 32 bytes.
+private:
+    // length is used to extract a slice from the input buffer.
+    // This field is only valid for certain lexeme types which don't duplicate portions of input
+    // but instead store a pointer to a location in the input buffer and the length of lexeme.
     unsigned int length;
 
+public:
     union
     {
         const char* data;       // String, Number, Comment
@@ -123,8 +117,14 @@ struct Lexeme
     Lexeme(const Location& location, Type type, const char* data, size_t size);
     Lexeme(const Location& location, Type type, const char* name);
 
+    unsigned int getLength() const;
+    unsigned int getBlockDepth() const;
+    QuoteStyle getQuoteStyle() const;
+
     std::string toString() const;
 };
+
+static_assert(sizeof(Lexeme) <= 32, "Size of `Lexeme` struct should be up to 32 bytes.");
 
 class AstNameTable
 {
@@ -136,6 +136,7 @@ public:
     std::pair<AstName, Lexeme::Type> getOrAddWithType(const char* name, size_t length);
     std::pair<AstName, Lexeme::Type> getWithType(const char* name, size_t length) const;
 
+    AstName getOrAdd(const char* name, size_t len);
     AstName getOrAdd(const char* name);
     AstName get(const char* name) const;
 
@@ -162,7 +163,7 @@ private:
 class Lexer
 {
 public:
-    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names);
+    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names, Position startPosition = {0, 0});
 
     void setSkipComments(bool skip);
     void setReadNames(bool read);
@@ -188,13 +189,28 @@ public:
     static bool fixupQuotedString(std::string& data);
     static void fixupMultilineString(std::string& data);
 
+    unsigned int getOffset() const
+    {
+        return offset;
+    }
+
+    enum class BraceType
+    {
+        InterpolatedString,
+        Normal
+    };
+
+    std::optional<Lexer::BraceType> peekBraceStackTop();
+
 private:
     char peekch() const;
     char peekch(unsigned int lookahead) const;
 
     Position position() const;
 
+    // consume() assumes current character is not a newline for performance; when that is not known, consumeAny() should be used instead.
     void consume();
+    void consumeAny();
 
     Lexeme readCommentBody();
 
@@ -207,6 +223,11 @@ private:
 
     Lexeme readLongString(const Position& start, int sep, Lexeme::Type ok, Lexeme::Type broken);
     Lexeme readQuotedString();
+
+    Lexeme readInterpolatedStringBegin();
+    Lexeme readInterpolatedStringSection(Position start, Lexeme::Type formatType, Lexeme::Type endType);
+
+    void readBackslashInString();
 
     std::pair<AstName, Lexeme::Type> readName();
 
@@ -231,6 +252,8 @@ private:
 
     bool skipComments;
     bool readNames;
+
+    std::vector<BraceType> braceStack;
 };
 
 inline bool isSpace(char ch)

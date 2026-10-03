@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 
+#include <Luau/BytecodeUtils.h>
 #include <Luau/Compiler.h>
 #include <Luau/BytecodeBuilder.h>
 #include <lua.h>
@@ -12,7 +13,23 @@
 
 namespace {
 struct IdentityEncoder final : Luau::BytecodeEncoder {
-    uint8_t encodeOp(uint8_t opcode) override { return opcode; }
+    explicit IdentityEncoder(bool robloxOpcodeEncoding) : robloxOpcodeEncoding(robloxOpcodeEncoding) {}
+
+    void encode(uint32_t* code, size_t count) override
+    {
+        if (!robloxOpcodeEncoding)
+            return;
+
+        for (size_t pc = 0; pc < count;)
+        {
+            const uint8_t opcode = uint8_t(code[pc] & 0xff);
+            code[pc] = (code[pc] & 0xffffff00u) | ((uint32_t(opcode) * 227u) & 0xffu);
+            pc += size_t(Luau::getOpLength(LuauOpcode(opcode)));
+        }
+    }
+
+private:
+    bool robloxOpcodeEncoding;
 };
 
 bool readFile(const char* path, std::string& contents)
@@ -30,11 +47,14 @@ int main(int argc, char** argv)
 {
     if (argc != 2 && argc != 5) {
         std::cerr << "usage: byteveil_luau_runner FILE\n"
-                     "       byteveil_luau_runner --compile LEVEL SOURCE OUTPUT\n";
+                     "       byteveil_luau_runner --compile LEVEL SOURCE OUTPUT\n"
+                     "       byteveil_luau_runner --compile-roblox LEVEL SOURCE OUTPUT\n";
         return 2;
     }
 
-    const bool compileOnly = argc == 5 && std::string(argv[1]) == "--compile";
+    const bool compileStandard = argc == 5 && std::string(argv[1]) == "--compile";
+    const bool compileRoblox = argc == 5 && std::string(argv[1]) == "--compile-roblox";
+    const bool compileOnly = compileStandard || compileRoblox;
     const char* sourcePath = compileOnly ? argv[3] : argv[1];
     std::string source;
     if (!readFile(sourcePath, source)) {
@@ -42,7 +62,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    IdentityEncoder encoder;
+    IdentityEncoder encoder(compileRoblox);
     Luau::CompileOptions options;
     if (compileOnly)
     {

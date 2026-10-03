@@ -1,5 +1,7 @@
 #include "IR.h"
 #include "Restructure.h"
+#include "RobloxBytecode.h"
+#include "Luau/BytecodeUtils.h"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -14,34 +16,14 @@ namespace {
 
 static int opLength(LuauOpcode op)
 {
-    switch (op)
-    {
-    case LOP_GETGLOBAL: case LOP_SETGLOBAL: case LOP_GETIMPORT: case LOP_GETTABLEKS:
-    case LOP_SETTABLEKS: case LOP_NAMECALL: case LOP_JUMPIFEQ: case LOP_JUMPIFLE:
-    case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
-    case LOP_NEWTABLE: case LOP_SETLIST: case LOP_FORGLOOP: case LOP_LOADKX:
-    case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FASTCALL2: case LOP_FASTCALL2K:
-        return 2;
-    default: return 1;
-    }
+    return Luau::getOpLength(op);
 }
 
 static bool hasAux(LuauOpcode op) { return opLength(op) == 2; }
 
 static bool isJump(LuauOpcode op)
 {
-    switch (op)
-    {
-    case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPIF: case LOP_JUMPIFNOT:
-    case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
-    case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT: case LOP_FORNPREP: case LOP_FORNLOOP:
-    case LOP_FORGLOOP: case LOP_FORGPREP_INEXT: case LOP_FORGLOOP_INEXT:
-    case LOP_FORGPREP_NEXT: case LOP_FORGLOOP_NEXT: case LOP_JUMPX:
-    case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FORGPREP:
-    case LOP_LOADB: case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
-        return true;
-    default: return false;
-    }
+    return Luau::isJumpD(op) || Luau::isFastCall(op) || Luau::isSkipC(op) || op == LOP_JUMPX;
 }
 
 static bool isConditional(LuauOpcode op)
@@ -50,9 +32,10 @@ static bool isConditional(LuauOpcode op)
     {
     case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQ:
     case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ: case LOP_JUMPIFNOTLE:
-    case LOP_JUMPIFNOTLT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK: case LOP_FORNPREP:
-    case LOP_FORNLOOP: case LOP_FORGLOOP: case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT:
+    case LOP_JUMPIFNOTLT: case LOP_JUMPXEQKNIL: case LOP_JUMPXEQKB: case LOP_JUMPXEQKN:
+    case LOP_JUMPXEQKS: case LOP_CMPPROTO: case LOP_FORNPREP: case LOP_FORNLOOP: case LOP_FORGLOOP:
     case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+    case LOP_FASTCALL3: case LOP_FASTPCALL: case LOP_LOADB:
         return true;
     default: return false;
     }
@@ -66,6 +49,7 @@ static bool hasRegisterA(LuauOpcode op)
     {
     case LOP_NOP: case LOP_BREAK: case LOP_JUMP: case LOP_JUMPBACK: case LOP_JUMPX:
     case LOP_FASTCALL: case LOP_FASTCALL1: case LOP_FASTCALL2: case LOP_FASTCALL2K:
+    case LOP_FASTCALL3: case LOP_FASTPCALL: case LOP_NATIVECALL:
     case LOP_COVERAGE: case LOP_CAPTURE: case LOP_PREPVARARGS:
         return false;
     default:
@@ -75,12 +59,7 @@ static bool hasRegisterA(LuauOpcode op)
 
 static int jumpTarget(const uint32_t raw, int pc)
 {
-    LuauOpcode op = LuauOpcode(LUAU_INSN_OP(raw));
-    if (op == LOP_JUMPX) return pc + LUAU_INSN_E(raw) + 1;
-    if (isJump(op)) return pc + LUAU_INSN_D(raw) + 1;
-    if ((op == LOP_LOADB || op == LOP_FASTCALL || op == LOP_FASTCALL1 || op == LOP_FASTCALL2 || op == LOP_FASTCALL2K) && LUAU_INSN_C(raw))
-        return pc + LUAU_INSN_C(raw) + 1;
-    return -1;
+    return Luau::getJumpTarget(raw, uint32_t(pc));
 }
 
 static std::string esc(const std::string& s)
@@ -184,6 +163,10 @@ static ConstantInfo describeConstant(const Proto* proto, int index)
         info.type = "number";
         info.value = numberText(value.value.n);
         break;
+    case LUA_TINTEGER:
+        info.type = "integer";
+        info.value = std::to_string(value.value.l);
+        break;
     case LUA_TVECTOR: {
         info.type = "vector";
         std::ostringstream vector;
@@ -232,18 +215,19 @@ static std::string tag(LuauOpcode op)
         return "load";
     case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
     case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
+    case LOP_SUBRK: case LOP_DIVRK: case LOP_IDIV: case LOP_IDIVK:
     case LOP_AND: case LOP_OR: case LOP_ANDK: case LOP_ORK: case LOP_CONCAT:
         return "binary";
     case LOP_NOT: case LOP_MINUS: case LOP_LENGTH:
         return "unary";
-    case LOP_GETTABLE: case LOP_GETTABLEKS: case LOP_GETTABLEN:
+    case LOP_GETTABLE: case LOP_GETTABLEKS: case LOP_GETTABLEN: case LOP_GETUDATAKS:
         return "table-read";
-    case LOP_SETTABLE: case LOP_SETTABLEKS: case LOP_SETTABLEN: case LOP_NEWTABLE:
+    case LOP_SETTABLE: case LOP_SETTABLEKS: case LOP_SETTABLEN: case LOP_SETUDATAKS: case LOP_NEWTABLE:
     case LOP_DUPTABLE: case LOP_SETLIST:
         return "table-write";
     case LOP_SETGLOBAL: case LOP_SETUPVAL: case LOP_CLOSEUPVALS:
         return "store";
-    case LOP_CALL: case LOP_NAMECALL:
+    case LOP_CALL: case LOP_CALLFB: case LOP_NAMECALL: case LOP_NAMECALLUDATA:
         return "call";
     case LOP_NEWCLOSURE: case LOP_DUPCLOSURE: case LOP_CAPTURE:
         return "closure";
@@ -260,10 +244,13 @@ static void annotateInstruction(Instruction& i, int registerCount)
     i.isAuxiliary = i.hasAux;
     if (op == LOP_LOADK || op == LOP_DUPCLOSURE || op == LOP_DUPTABLE || op == LOP_GETIMPORT) i.constantIndex = i.d;
     else if (op == LOP_GETGLOBAL || op == LOP_SETGLOBAL || op == LOP_GETTABLEKS || op == LOP_SETTABLEKS ||
-             op == LOP_NAMECALL || op == LOP_LOADKX || op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK ||
-             op == LOP_FASTCALL2K) i.constantIndex = int(i.aux);
+             op == LOP_NAMECALL || op == LOP_LOADKX || op == LOP_FASTCALL2K ||
+             op == LOP_NEWCLASSMEMBER || op == LOP_NEWCLASS) i.constantIndex = int(i.aux);
+    else if (op == LOP_GETUDATAKS || op == LOP_SETUDATAKS || op == LOP_NAMECALLUDATA) i.constantIndex = int(i.aux & 0xffff);
+    else if (op == LOP_JUMPXEQKN || op == LOP_JUMPXEQKS) i.constantIndex = int(i.aux & 0x00ffffff);
     else if (op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
-             op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK) i.constantIndex = i.c;
+             op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK || op == LOP_IDIVK) i.constantIndex = i.c;
+    else if (op == LOP_SUBRK || op == LOP_DIVRK) i.constantIndex = i.b;
     else i.constantIndex = -1;
 
     auto addUse = [&](int r) {
@@ -284,21 +271,23 @@ static void annotateInstruction(Instruction& i, int registerCount)
     case LOP_GETTABLE: addUse(i.b); addUse(i.c); addDef(i.a); break;
     case LOP_SETTABLE: addUse(i.a); addUse(i.b); addUse(i.c); break;
     case LOP_ADD: case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
-    case LOP_AND: case LOP_OR:
+    case LOP_AND: case LOP_OR: case LOP_IDIV:
         addUse(i.b); addUse(i.c); addDef(i.a); break;
+    case LOP_SUBRK: case LOP_DIVRK:
+        addUse(i.c); addDef(i.a); break;
     case LOP_CONCAT:
         if (i.b <= i.c) addRange(addUse, i.b, i.c - i.b + 1);
         addDef(i.a); break;
-    case LOP_GETTABLEKS: case LOP_GETTABLEN:
+    case LOP_GETTABLEKS: case LOP_GETTABLEN: case LOP_GETUDATAKS:
         addUse(i.b); addDef(i.a); break;
-    case LOP_SETTABLEKS: case LOP_SETTABLEN:
+    case LOP_SETTABLEKS: case LOP_SETTABLEN: case LOP_SETUDATAKS:
         addUse(i.a); addUse(i.b); break;
     case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: addUse(i.b); addDef(i.a); break;
     case LOP_ADDK: case LOP_SUBK: case LOP_MULK: case LOP_DIVK: case LOP_MODK: case LOP_POWK:
-    case LOP_ANDK: case LOP_ORK: addUse(i.b); addDef(i.a); break;
-    case LOP_NAMECALL:
+    case LOP_ANDK: case LOP_ORK: case LOP_IDIVK: addUse(i.b); addDef(i.a); break;
+    case LOP_NAMECALL: case LOP_NAMECALLUDATA:
         addUse(i.b); addDef(i.a); addDef(i.a + 1); break;
-    case LOP_CALL:
+    case LOP_CALL: case LOP_CALLFB:
         addRange(addUse, i.a, i.b == 0 ? registerCount - i.a : i.b);
         if (i.c == 0) addRange(addDef, i.a, registerCount - i.a);
         else if (i.c > 1) addRange(addDef, i.a, i.c - 1);
@@ -306,7 +295,8 @@ static void annotateInstruction(Instruction& i, int registerCount)
     case LOP_RETURN:
         addRange(addUse, i.a, i.b == 0 ? registerCount - i.a : std::max(0, i.b - 1));
         break;
-    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPIFEQK: case LOP_JUMPIFNOTEQK:
+    case LOP_JUMPIF: case LOP_JUMPIFNOT: case LOP_JUMPXEQKNIL: case LOP_JUMPXEQKB:
+    case LOP_JUMPXEQKN: case LOP_JUMPXEQKS: case LOP_CMPPROTO:
         addUse(i.a); break;
     case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
     case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
@@ -336,6 +326,7 @@ static void annotateInstruction(Instruction& i, int registerCount)
         break;
     case LOP_FASTCALL1: case LOP_FASTCALL2K: addUse(i.b); break;
     case LOP_FASTCALL2: addUse(i.b); addUse(int(i.aux & 0xff)); break;
+    case LOP_FASTCALL3: addUse(i.b); addUse(int(i.aux & 0xff)); addUse(int((i.aux >> 8) & 0xff)); break;
     case LOP_GETVARARGS:
         addRange(addDef, i.a, i.b == 0 ? registerCount - i.a : std::max(0, i.b - 1)); break;
     case LOP_GETGLOBAL: case LOP_GETIMPORT: case LOP_GETUPVAL: case LOP_LOADNIL: case LOP_LOADB:
@@ -351,11 +342,11 @@ static void annotateInstruction(Instruction& i, int registerCount)
         break;
     }
     if (!i.definitions.empty()) i.destinationRegister = i.definitions.front();
-    if (op == LOP_CALL || op == LOP_NAMECALL || op == LOP_RETURN || op == LOP_SETGLOBAL || op == LOP_SETUPVAL ||
+    if (op == LOP_CALL || op == LOP_CALLFB || op == LOP_NAMECALL || op == LOP_NAMECALLUDATA || op == LOP_RETURN || op == LOP_SETGLOBAL || op == LOP_SETUPVAL ||
         op == LOP_SETTABLE || op == LOP_SETTABLEKS || op == LOP_SETTABLEN || op == LOP_SETLIST ||
-        op == LOP_CLOSEUPVALS || isJump(op))
+        op == LOP_SETUDATAKS || op == LOP_CLOSEUPVALS || isJump(op))
         i.hasSideEffects = true;
-    i.isPure = !i.hasSideEffects && op != LOP_GETTABLE && op != LOP_GETTABLEKS;
+    i.isPure = !i.hasSideEffects && op != LOP_GETTABLE && op != LOP_GETTABLEKS && op != LOP_GETUDATAKS;
 }
 
 static bool validateOne(const Proto* p, std::string& error, int depth, int& total, int maxDepth, int maxInstructions, int functionId)
@@ -364,7 +355,7 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
     if (depth > maxDepth) { error = "function " + std::to_string(functionId) + ": prototype nesting exceeds limit"; return false; }
     if (p->sizecode < 0 || p->sizecode > maxInstructions || p->sizep < 0 || p->sizep > 100000 || p->sizek < 0 || p->sizek > 1000000)
     { error = "function " + std::to_string(functionId) + ": prototype size exceeds safe limits"; return false; }
-    if (p->maxstacksize == 0 || p->numparams > p->maxstacksize)
+    if (p->numparams > p->maxstacksize)
     { error = "function " + std::to_string(functionId) + ": invalid register or parameter metadata"; return false; }
     if (!p->code && p->sizecode) { error = "function " + std::to_string(functionId) + " offset 0: missing instruction storage"; return false; }
     if (!p->p && p->sizep) { error = "function " + std::to_string(functionId) + ": missing child prototype storage"; return false; }
@@ -385,23 +376,30 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         if (op < 0 || op >= LOP__COUNT) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": unknown opcode " + std::to_string(op); return false; }
         int len = opLength(LuauOpcode(op));
         if (pc + len > p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": missing AUX instruction"; return false; }
-        if (hasRegisterA(LuauOpcode(op)) && LUAU_INSN_A(raw) >= p->maxstacksize)
-        { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": register A out of range"; return false; }
+        bool zeroValueReturn = op == LOP_RETURN && LUAU_INSN_B(raw) == 1;
+        if (hasRegisterA(LuauOpcode(op)) && !zeroValueReturn && LUAU_INSN_A(raw) >= p->maxstacksize)
+        { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": register A out of range (" + std::to_string(LUAU_INSN_A(raw)) + " >= " + std::to_string(p->maxstacksize) + ", opcode " + std::to_string(op) + ")"; return false; }
         bool directConstant = op == LOP_LOADK || op == LOP_DUPCLOSURE || op == LOP_DUPTABLE || op == LOP_GETIMPORT;
         bool cConstant = op == LOP_ADDK || op == LOP_SUBK || op == LOP_MULK || op == LOP_DIVK ||
-                         op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK;
-        if ((directConstant && int(LUAU_INSN_D(raw)) >= p->sizek) || (cConstant && int(LUAU_INSN_C(raw)) >= p->sizek))
+                         op == LOP_MODK || op == LOP_POWK || op == LOP_ANDK || op == LOP_ORK || op == LOP_IDIVK;
+        bool bConstant = op == LOP_SUBRK || op == LOP_DIVRK;
+        if ((directConstant && (int(LUAU_INSN_D(raw)) < 0 || int(LUAU_INSN_D(raw)) >= p->sizek)) ||
+            (cConstant && int(LUAU_INSN_C(raw)) >= p->sizek) || (bConstant && int(LUAU_INSN_B(raw)) >= p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": constant index out of range"; return false; }
         bool auxConstant = op == LOP_GETGLOBAL || op == LOP_SETGLOBAL || op == LOP_GETTABLEKS ||
-                           op == LOP_SETTABLEKS || op == LOP_NAMECALL || op == LOP_LOADKX ||
-                           op == LOP_JUMPIFEQK || op == LOP_JUMPIFNOTEQK || op == LOP_FASTCALL2K;
-        if (auxConstant && p->code[pc + 1] >= uint32_t(p->sizek))
+                           op == LOP_SETTABLEKS || op == LOP_NAMECALL || op == LOP_LOADKX || op == LOP_FASTCALL2K ||
+                           op == LOP_NEWCLASSMEMBER || op == LOP_NEWCLASS;
+        bool low16Constant = op == LOP_GETUDATAKS || op == LOP_SETUDATAKS || op == LOP_NAMECALLUDATA;
+        bool low24Constant = op == LOP_JUMPXEQKN || op == LOP_JUMPXEQKS;
+        uint32_t auxIndex = p->code[pc + 1];
+        if (low16Constant) auxIndex &= 0xffff;
+        if (low24Constant) auxIndex &= 0x00ffffff;
+        if ((auxConstant || low16Constant || low24Constant) && auxIndex >= uint32_t(p->sizek))
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": auxiliary constant index out of range"; return false; }
         if ((op == LOP_NEWCLOSURE) && LUAU_INSN_D(raw) >= p->sizep)
         { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": prototype index out of range"; return false; }
         int target = jumpTarget(raw, pc);
-        bool optionalSkip = (op == LOP_LOADB || op == LOP_FASTCALL || op == LOP_FASTCALL1 ||
-                             op == LOP_FASTCALL2 || op == LOP_FASTCALL2K) && LUAU_INSN_C(raw) == 0;
+        bool optionalSkip = op == LOP_LOADB && LUAU_INSN_C(raw) == 0;
         if (isJump(LuauOpcode(op)) && !optionalSkip) {
             if (target < 0 || target >= p->sizecode) { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": jump target out of range"; return false; }
             jumpTargets.emplace_back(pc, target);
@@ -419,12 +417,16 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
         {
         case LOP_MOVE: case LOP_GETTABLE: case LOP_SETTABLE: case LOP_ADD:
         case LOP_SUB: case LOP_MUL: case LOP_DIV: case LOP_MOD: case LOP_POW:
-        case LOP_AND: case LOP_OR: case LOP_CONCAT:
+        case LOP_AND: case LOP_OR: case LOP_CONCAT: case LOP_IDIV:
             if (!checkReg(LUAU_INSN_B(raw), "B") || !checkReg(LUAU_INSN_C(raw), "C")) return false;
             break;
         case LOP_GETTABLEKS: case LOP_SETTABLEKS: case LOP_GETTABLEN: case LOP_SETTABLEN:
-        case LOP_NOT: case LOP_MINUS: case LOP_LENGTH:
+        case LOP_GETUDATAKS: case LOP_SETUDATAKS:
+        case LOP_NOT: case LOP_MINUS: case LOP_LENGTH: case LOP_IDIVK:
             if (!checkReg(LUAU_INSN_B(raw), "B")) return false;
+            break;
+        case LOP_SUBRK: case LOP_DIVRK:
+            if (!checkReg(LUAU_INSN_C(raw), "C")) return false;
             break;
         case LOP_JUMPIFEQ: case LOP_JUMPIFLE: case LOP_JUMPIFLT: case LOP_JUMPIFNOTEQ:
         case LOP_JUMPIFNOTLE: case LOP_JUMPIFNOTLT:
@@ -434,7 +436,11 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
             if (!checkReg(LUAU_INSN_B(raw), "B")) return false;
             if (op == LOP_FASTCALL2 && !checkReg(p->code[pc + 1] & 0xff, "AUX")) return false;
             break;
-        case LOP_NAMECALL:
+        case LOP_FASTCALL3:
+            if (!checkReg(LUAU_INSN_B(raw), "B") || !checkReg(p->code[pc + 1] & 0xff, "AUX1") ||
+                !checkReg((p->code[pc + 1] >> 8) & 0xff, "AUX2")) return false;
+            break;
+        case LOP_NAMECALL: case LOP_NAMECALLUDATA:
             if (!checkReg(LUAU_INSN_B(raw), "B") || LUAU_INSN_A(raw) + 1 >= p->maxstacksize)
             { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": NAMECALL result range out of range"; return false; }
             break;
@@ -446,10 +452,16 @@ static bool validateOne(const Proto* p, std::string& error, int depth, int& tota
             if (LUAU_INSN_A(raw) + 2 >= p->maxstacksize)
             { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": generic-for register range out of range"; return false; }
             break;
+        case LOP_NEWCLASSMEMBER:
+            if (!checkReg(LUAU_INSN_C(raw), "C")) return false;
+            break;
+        case LOP_NEWCLASS:
+            if (LUAU_INSN_B(raw) != 0xff && !checkReg(LUAU_INSN_B(raw), "B")) return false;
+            break;
         case LOP_FORGLOOP: {
-            unsigned int variables = p->code[pc + 1];
+            unsigned int variables = p->code[pc + 1] & 0xff;
             if (variables == 0 || variables > 255 || LUAU_INSN_A(raw) + 2 + variables >= p->maxstacksize)
-            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": generic-for result range out of range"; return false; }
+            { error = "function " + std::to_string(functionId) + " offset " + std::to_string(pc) + ": generic-for result range out of range (A=" + std::to_string(LUAU_INSN_A(raw)) + ", count=" + std::to_string(variables) + ", max=" + std::to_string(p->maxstacksize) + ")"; return false; }
             break;
         }
         case LOP_FORGLOOP_INEXT: case LOP_FORGLOOP_NEXT:
@@ -955,7 +967,9 @@ static void jsonFn(std::ostringstream& o, const Function& f)
 
 std::string opcodeName(int opcode)
 {
-    static const char* names[] = {"NOP","BREAK","LOADNIL","LOADB","LOADN","LOADK","MOVE","GETGLOBAL","SETGLOBAL","GETUPVAL","SETUPVAL","CLOSEUPVALS","GETIMPORT","GETTABLE","SETTABLE","GETTABLEKS","SETTABLEKS","GETTABLEN","SETTABLEN","NEWCLOSURE","NAMECALL","CALL","RETURN","JUMP","JUMPBACK","JUMPIF","JUMPIFNOT","JUMPIFEQ","JUMPIFLE","JUMPIFLT","JUMPIFNOTEQ","JUMPIFNOTLE","JUMPIFNOTLT","ADD","SUB","MUL","DIV","MOD","POW","ADDK","SUBK","MULK","DIVK","MODK","POWK","AND","OR","ANDK","ORK","CONCAT","NOT","MINUS","LENGTH","NEWTABLE","DUPTABLE","SETLIST","FORNPREP","FORNLOOP","FORGLOOP","FORGPREP_INEXT","FORGLOOP_INEXT","FORGPREP_NEXT","FORGLOOP_NEXT","GETVARARGS","DUPCLOSURE","PREPVARARGS","LOADKX","JUMPX","FASTCALL","COVERAGE","CAPTURE","JUMPIFEQK","JUMPIFNOTEQK","FASTCALL1","FASTCALL2","FASTCALL2K","FORGPREP"};
+    static const char* names[] = {
+#include "OpcodeNames.inc"
+    };
     return opcode >= 0 && opcode < LOP__COUNT ? names[opcode] : "UNKNOWN";
 }
 
@@ -1117,11 +1131,48 @@ std::string prototypesText(const Module& module)
 }
 
 namespace Luau::Decompiler {
+bool loadBytecode(lua_State* L, const std::string& input, Proto*& root, std::string& error)
+{
+    std::vector<std::string> variants;
+    if (!RobloxBytecode::opcodeVariants(input, variants, error)) return false;
+
+    const int stackTop = lua_gettop(L);
+    std::string lastError;
+    for (std::string& variant : variants) {
+        if (luau_load(L, "=", variant.data(), variant.size(), 0) != 0) {
+            const char* message = lua_tostring(L, -1);
+            lastError = message ? message : "bytecode loading failed";
+            lua_settop(L, stackTop);
+            continue;
+        }
+
+        auto* closure = const_cast<Closure*>(static_cast<const Closure*>(lua_topointer(L, -1)));
+        if (!closure || !closure->l.p) {
+            lastError = "loaded chunk has no Lua prototype";
+            lua_settop(L, stackTop);
+            continue;
+        }
+
+        IR::Module module;
+        if (!IR::buildModule(closure->l.p, module, lastError)) {
+            lua_settop(L, stackTop);
+            continue;
+        }
+
+        root = closure->l.p;
+        return true;
+    }
+
+    lua_settop(L, stackTop);
+    error = lastError.empty() ? "bytecode failed structural validation" : lastError;
+    return false;
+}
+
 std::string inspectBytecode(lua_State* L, std::string& bytecode, const std::string& mode, std::string& error)
 {
-    if (luau_load(L, "=", bytecode.data(), bytecode.size(), 0) != 0) { error = lua_tostring(L, -1) ? lua_tostring(L, -1) : "bytecode loading failed"; return {}; }
-    auto* c = (Closure*)lua_topointer(L, -1); if (!c || !c->l.p) { error = "loaded chunk has no Lua prototype"; return {}; }
-    IR::Module m; if (!IR::buildModule(c->l.p, m, error)) return {};
+    Proto* root = nullptr;
+    if (!loadBytecode(L, bytecode, root, error)) return {};
+    IR::Module m; if (!IR::buildModule(root, m, error)) return {};
     if (mode == "json" || mode == "ir") return IR::toJson(m);
     if (mode == "disassemble") return IR::disassemble(m);
     if (mode == "cfg") return IR::cfgDot(m);

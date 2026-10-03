@@ -1,7 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include <string>
+#include <climits>
 
 namespace Luau
 {
@@ -16,15 +16,20 @@ struct Position
     {
     }
 
+    static Position missing()
+    {
+        return {UINT_MAX, UINT_MAX};
+    }
+
     bool operator==(const Position& rhs) const
     {
         return this->column == rhs.column && this->line == rhs.line;
     }
+
     bool operator!=(const Position& rhs) const
     {
         return !(*this == rhs);
     }
-
     bool operator<(const Position& rhs) const
     {
         if (line == rhs.line)
@@ -32,7 +37,6 @@ struct Position
         else
             return line < rhs.line;
     }
-
     bool operator>(const Position& rhs) const
     {
         if (line == rhs.line)
@@ -40,15 +44,20 @@ struct Position
         else
             return line > rhs.line;
     }
-
     bool operator<=(const Position& rhs) const
     {
         return *this == rhs || *this < rhs;
     }
-
     bool operator>=(const Position& rhs) const
     {
         return *this == rhs || *this > rhs;
+    }
+
+    void shift(const Position& start, const Position& oldEnd, const Position& newEnd);
+
+    bool hasValue() const
+    {
+        return line != UINT_MAX || column != UINT_MAX;
     }
 };
 
@@ -89,21 +98,12 @@ struct Location
         return !(*this == rhs);
     }
 
-    bool encloses(const Location& l) const
-    {
-        return begin <= l.begin && end >= l.end;
-    }
-    bool contains(const Position& p) const
-    {
-        return begin <= p && p < end;
-    }
-    bool containsClosed(const Position& p) const
-    {
-        return begin <= p && p <= end;
-    }
+    bool encloses(const Location& l) const;
+    bool overlaps(const Location& l) const;
+    bool contains(const Position& p) const;
+    bool containsClosed(const Position& p) const;
+    void extend(const Location& other);
+    void shift(const Position& start, const Position& oldEnd, const Position& newEnd);
 };
-
-std::string toString(const Position& position);
-std::string toString(const Location& location);
 
 } // namespace Luau

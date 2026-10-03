@@ -36,7 +36,7 @@ namespace Luau::Decompiler::AstGen::Handlers {
 
         AstArray<AstExpr *> args {argVec->data(), argVec->size()};
         virtualStack.remove(LUAU_INSN_A(insn));
-        return new AstExprCall { Location(), function, args, isSelf, Location() };
+        return new AstExprCall { Location(), function, args, isSelf, AstArray<AstTypeOrPack>{}, Location() };
     }
 
     AstExprIndexName* genAstExprName(VirtualAstStack& virtualStack, Proto* proto, unsigned int insn, unsigned int aux, char symbol) {

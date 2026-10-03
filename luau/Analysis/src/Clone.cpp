@@ -1,14 +1,18 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #include "Luau/Clone.h"
-#include "Luau/RecursionCounter.h"
-#include "Luau/TxnLog.h"
+
+#include "Luau/Ast.h"
+#include "Luau/Common.h"
+#include "Luau/NotNull.h"
+#include "Luau/Type.h"
+#include "Luau/TypeOrPack.h"
 #include "Luau/TypePack.h"
+#include "Luau/TypeUtils.h"
 #include "Luau/Unifiable.h"
+#include "Luau/VisitType.h"
 
-LUAU_FASTFLAG(DebugLuauCopyBeforeNormalizing)
-
-LUAU_FASTINTVARIABLE(LuauTypeCloneRecursionLimit, 300)
+// For each `Luau::clone` call, we will clone only up to N amount of types _and_ packs, as controlled by this limit.
+LUAU_FASTINTVARIABLE(LuauTypeCloneIterationLimit, 100'000)
 
 namespace Luau
 {
@@ -16,312 +20,575 @@ namespace Luau
 namespace
 {
 
-struct TypePackCloner;
-
-/*
- * Both TypeCloner and TypePackCloner work by depositing the requested type variable into the appropriate 'seen' set.
- * They do not return anything because their sole consumer (the deepClone function) already has a pointer into this storage.
- */
-
-struct TypeCloner
+class TypeCloner
 {
-    TypeCloner(TypeArena& dest, TypeId typeId, CloneState& cloneState)
-        : dest(dest)
-        , typeId(typeId)
-        , seenTypes(cloneState.seenTypes)
-        , seenTypePacks(cloneState.seenTypePacks)
-        , cloneState(cloneState)
+
+protected:
+    NotNull<TypeArena> arena;
+    NotNull<BuiltinTypes> builtinTypes;
+
+    // A queue of kinds where we cloned it, but whose interior types hasn't
+    // been updated to point to new clones. Once all of its interior types
+    // has been updated, it gets removed from the queue.
+    std::vector<TypeOrPack> queue;
+
+    NotNull<SeenTypes> types;
+    NotNull<SeenTypePacks> packs;
+
+    TypeId forceTy = nullptr;
+    TypePackId forceTp = nullptr;
+
+    int steps = 0;
+
+public:
+    TypeCloner(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<SeenTypes> types,
+        NotNull<SeenTypePacks> packs,
+        TypeId forceTy,
+        TypePackId forceTp
+    )
+        : arena(arena)
+        , builtinTypes(builtinTypes)
+        , types(types)
+        , packs(packs)
+        , forceTy(forceTy)
+        , forceTp(forceTp)
     {
     }
 
-    TypeArena& dest;
-    TypeId typeId;
-    SeenTypes& seenTypes;
-    SeenTypePacks& seenTypePacks;
-    CloneState& cloneState;
+    virtual ~TypeCloner() = default;
 
-    template<typename T>
-    void defaultClone(const T& t);
+    TypeId clone(TypeId ty)
+    {
+        shallowClone(ty);
+        run();
 
-    void operator()(const Unifiable::Free& t);
-    void operator()(const Unifiable::Generic& t);
-    void operator()(const Unifiable::Bound<TypeId>& t);
-    void operator()(const Unifiable::Error& t);
-    void operator()(const PrimitiveTypeVar& t);
-    void operator()(const ConstrainedTypeVar& t);
-    void operator()(const SingletonTypeVar& t);
-    void operator()(const FunctionTypeVar& t);
-    void operator()(const TableTypeVar& t);
-    void operator()(const MetatableTypeVar& t);
-    void operator()(const ClassTypeVar& t);
-    void operator()(const AnyTypeVar& t);
-    void operator()(const UnionTypeVar& t);
-    void operator()(const IntersectionTypeVar& t);
-    void operator()(const LazyTypeVar& t);
+        if (hasExceededIterationLimit())
+        {
+            TypeId error = builtinTypes->errorType;
+            (*types)[ty] = error;
+            return error;
+        }
+
+        return find(ty).value_or(builtinTypes->errorType);
+    }
+
+    TypePackId clone(TypePackId tp)
+    {
+        shallowClone(tp);
+        run();
+
+        if (hasExceededIterationLimit())
+        {
+            TypePackId error = builtinTypes->errorTypePack;
+            (*packs)[tp] = error;
+            return error;
+        }
+
+        return find(tp).value_or(builtinTypes->errorTypePack);
+    }
+
+private:
+    bool hasExceededIterationLimit() const
+    {
+        if (FInt::LuauTypeCloneIterationLimit == 0)
+            return false;
+
+        return steps + queue.size() >= size_t(FInt::LuauTypeCloneIterationLimit);
+    }
+
+    void run()
+    {
+        while (!queue.empty())
+        {
+            ++steps;
+
+            if (hasExceededIterationLimit())
+                break;
+
+            TypeOrPack kind = queue.back();
+            queue.pop_back();
+
+            if (find(kind))
+                continue;
+
+            cloneChildren(kind);
+        }
+    }
+
+protected:
+    std::optional<TypeId> find(TypeId ty) const
+    {
+        ty = follow(ty, FollowOption::DisableLazyTypeThunks);
+        if (auto it = types->find(ty); it != types->end())
+            return it->second;
+        else if (ty->persistent && ty != forceTy)
+            return ty;
+        return std::nullopt;
+    }
+
+    std::optional<TypePackId> find(TypePackId tp) const
+    {
+        tp = follow(tp);
+        if (auto it = packs->find(tp); it != packs->end())
+            return it->second;
+        else if (tp->persistent && tp != forceTp)
+            return tp;
+        return std::nullopt;
+    }
+
+    std::optional<TypeOrPack> find(TypeOrPack kind) const
+    {
+        if (auto ty = get<TypeId>(kind))
+            return find(*ty);
+        else if (auto tp = get<TypePackId>(kind))
+            return find(*tp);
+        else
+        {
+            LUAU_ASSERT(!"Unknown kind?");
+            return std::nullopt;
+        }
+    }
+
+public:
+    virtual TypeId shallowClone(TypeId ty)
+    {
+        // We want to [`Luau::follow`] but without forcing the expansion of [`LazyType`]s.
+        ty = follow(ty, FollowOption::DisableLazyTypeThunks);
+
+        if (auto clone = find(ty))
+            return *clone;
+        else if (ty->persistent && ty != forceTy)
+            return ty;
+
+        TypeId target = arena->addType(ty->ty);
+        asMutable(target)->documentationSymbol = ty->documentationSymbol;
+
+        if (auto generic = getMutable<GenericType>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeType>(target))
+            free->scope = nullptr;
+        else if (auto table = getMutable<TableType>(target))
+            table->scope = nullptr;
+
+        (*types)[ty] = target;
+        queue.push_back(target);
+        return target;
+    }
+
+    virtual TypePackId shallowClone(TypePackId tp)
+    {
+        tp = follow(tp);
+
+        if (auto clone = find(tp))
+            return *clone;
+        else if (tp->persistent && tp != forceTp)
+            return tp;
+
+        TypePackId target = arena->addTypePack(tp->ty);
+
+        if (auto generic = getMutable<GenericTypePack>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeTypePack>(target))
+            free->scope = nullptr;
+
+        (*packs)[tp] = target;
+        queue.push_back(target);
+        return target;
+    }
+
+private:
+    Property shallowClone(const Property& p)
+    {
+        std::optional<TypeId> cloneReadTy;
+        if (auto ty = p.readTy)
+            cloneReadTy = shallowClone(*ty);
+
+        std::optional<TypeId> cloneWriteTy;
+        if (auto ty = p.writeTy)
+            cloneWriteTy = shallowClone(*ty);
+
+        Property cloned = Property::create(cloneReadTy, cloneWriteTy);
+        cloned.deprecated = p.deprecated;
+        cloned.deprecatedSuggestion = p.deprecatedSuggestion;
+        cloned.location = p.location;
+        cloned.tags = p.tags;
+        cloned.documentationSymbol = p.documentationSymbol;
+        cloned.typeLocation = p.typeLocation;
+        return cloned;
+    }
+
+    void cloneChildren(TypeId ty)
+    {
+        return visit(
+            [&](auto&& t)
+            {
+                return cloneChildren(&t);
+            },
+            asMutable(ty)->ty
+        );
+    }
+
+    void cloneChildren(TypePackId tp)
+    {
+        return visit(
+            [&](auto&& t)
+            {
+                return cloneChildren(&t);
+            },
+            asMutable(tp)->ty
+        );
+    }
+
+    void cloneChildren(TypeOrPack kind)
+    {
+        if (auto ty = get<TypeId>(kind))
+            return cloneChildren(*ty);
+        else if (auto tp = get<TypePackId>(kind))
+            return cloneChildren(*tp);
+        else
+            LUAU_ASSERT(!"Item holds neither TypeId nor TypePackId when enqueuing its children?");
+    }
+
+    void cloneChildren(ErrorType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(BoundType* t)
+    {
+        t->boundTo = shallowClone(t->boundTo);
+    }
+
+    void cloneChildren(FreeType* t)
+    {
+        if (t->lowerBound)
+            t->lowerBound = shallowClone(t->lowerBound);
+        if (t->upperBound)
+            t->upperBound = shallowClone(t->upperBound);
+
+        if (t->primitiveType)
+            t->primitiveType = shallowClone(*t->primitiveType);
+    }
+
+    void cloneChildren(GenericType* t)
+    {
+        // TODO: clone upper bounds.
+    }
+
+    void cloneChildren(PrimitiveType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(BlockedType* t)
+    {
+        // TODO: In the new solver, we should ice.
+    }
+
+    void cloneChildren(PendingExpansionType* t)
+    {
+        // TODO: In the new solver, we should ice.
+    }
+
+    void cloneChildren(SingletonType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(FunctionType* t)
+    {
+        for (TypeId& g : t->generics)
+            g = shallowClone(g);
+
+        for (TypePackId& gp : t->genericPacks)
+            gp = shallowClone(gp);
+
+        t->argTypes = shallowClone(t->argTypes);
+        t->retTypes = shallowClone(t->retTypes);
+    }
+
+    void cloneChildren(TableType* t)
+    {
+        if (t->indexer)
+        {
+            t->indexer->indexType = shallowClone(t->indexer->indexType);
+            t->indexer->indexResultType = shallowClone(t->indexer->indexResultType);
+        }
+
+        for (auto& [_, p] : t->props)
+            p = shallowClone(p);
+
+        for (TypeId& ty : t->instantiatedTypeParams)
+            ty = shallowClone(ty);
+
+        for (TypePackId& tp : t->instantiatedTypePackParams)
+            tp = shallowClone(tp);
+    }
+
+    void cloneChildren(MetatableType* t)
+    {
+        t->table = shallowClone(t->table);
+        t->metatable = shallowClone(t->metatable);
+    }
+
+    void cloneChildren(ExternType* t)
+    {
+        for (auto& [_, p] : t->props)
+            p = shallowClone(p);
+
+        if (t->parent)
+            t->parent = shallowClone(*t->parent);
+
+        if (t->metatable)
+            t->metatable = shallowClone(*t->metatable);
+
+        if (t->indexer)
+        {
+            t->indexer->indexType = shallowClone(t->indexer->indexType);
+            t->indexer->indexResultType = shallowClone(t->indexer->indexResultType);
+        }
+
+        if (FFlag::DebugLuauUserDefinedClasses && t->relation)
+        {
+            Luau::visit(
+                overloaded{
+                    [&](Obj& obj)
+                    {
+                        obj.ty = shallowClone(obj.ty);
+                    },
+                    [&](Klass& klass)
+                    {
+                        klass.ty = shallowClone(klass.ty);
+                    }
+                },
+                *t->relation
+            );
+        }
+    }
+
+    void cloneChildren(AnyType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(NoRefineType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(UnionType* t)
+    {
+        for (TypeId& ty : t->options)
+            ty = shallowClone(ty);
+    }
+
+    void cloneChildren(IntersectionType* t)
+    {
+        for (TypeId& ty : t->parts)
+            ty = shallowClone(ty);
+    }
+
+    virtual void cloneChildren(LazyType* t)
+    {
+        if (auto unwrapped = t->unwrapped.load())
+            t->unwrapped.store(shallowClone(unwrapped));
+    }
+
+    void cloneChildren(UnknownType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(NeverType* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(NegationType* t)
+    {
+        t->ty = shallowClone(t->ty);
+    }
+
+    void cloneChildren(TypeFunctionInstanceType* t)
+    {
+        for (TypeId& ty : t->typeArguments)
+            ty = shallowClone(ty);
+
+        for (TypePackId& tp : t->packArguments)
+            tp = shallowClone(tp);
+    }
+
+    void cloneChildren(FreeTypePack* t)
+    {
+        // TODO: clone lower and upper bounds.
+        // TODO: In the new solver, we should ice.
+    }
+
+    void cloneChildren(GenericTypePack* t)
+    {
+        // TODO: clone upper bounds.
+    }
+
+    void cloneChildren(BlockedTypePack* t)
+    {
+        // TODO: In the new solver, we should ice.
+    }
+
+    void cloneChildren(BoundTypePack* t)
+    {
+        t->boundTo = shallowClone(t->boundTo);
+    }
+
+    void cloneChildren(ErrorTypePack* t)
+    {
+        // noop.
+    }
+
+    void cloneChildren(VariadicTypePack* t)
+    {
+        t->ty = shallowClone(t->ty);
+    }
+
+    void cloneChildren(TypePack* t)
+    {
+        for (TypeId& ty : t->head)
+            ty = shallowClone(ty);
+
+        if (t->tail)
+            t->tail = shallowClone(*t->tail);
+    }
+
+    void cloneChildren(TypeFunctionInstanceTypePack* t)
+    {
+        for (TypeId& ty : t->typeArguments)
+            ty = shallowClone(ty);
+
+        for (TypePackId& tp : t->packArguments)
+            tp = shallowClone(tp);
+    }
 };
 
-struct TypePackCloner
+class FragmentAutocompleteTypeCloner final : public TypeCloner
 {
-    TypeArena& dest;
-    TypePackId typePackId;
-    SeenTypes& seenTypes;
-    SeenTypePacks& seenTypePacks;
-    CloneState& cloneState;
+    Scope* replacementForNullScope = nullptr;
 
-    TypePackCloner(TypeArena& dest, TypePackId typePackId, CloneState& cloneState)
-        : dest(dest)
-        , typePackId(typePackId)
-        , seenTypes(cloneState.seenTypes)
-        , seenTypePacks(cloneState.seenTypePacks)
-        , cloneState(cloneState)
+public:
+    FragmentAutocompleteTypeCloner(
+        NotNull<TypeArena> arena,
+        NotNull<BuiltinTypes> builtinTypes,
+        NotNull<SeenTypes> types,
+        NotNull<SeenTypePacks> packs,
+        TypeId forceTy,
+        TypePackId forceTp,
+        Scope* replacementForNullScope
+    )
+        : TypeCloner(arena, builtinTypes, types, packs, forceTy, forceTp)
+        , replacementForNullScope(replacementForNullScope)
     {
+        LUAU_ASSERT(replacementForNullScope);
     }
 
-    template<typename T>
-    void defaultClone(const T& t)
+    TypeId shallowClone(TypeId ty) override
     {
-        TypePackId cloned = dest.addTypePack(TypePackVar{t});
-        seenTypePacks[typePackId] = cloned;
+        // We want to [`Luau::follow`] but without forcing the expansion of [`LazyType`]s.
+        ty = follow(ty, FollowOption::DisableLazyTypeThunks);
+
+        if (auto clone = find(ty))
+            return *clone;
+        else if (ty->persistent && ty != forceTy)
+            return ty;
+
+        TypeId target = arena->addType(ty->ty);
+        asMutable(target)->documentationSymbol = ty->documentationSymbol;
+
+        if (auto generic = getMutable<GenericType>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeType>(target))
+        {
+            free->scope = replacementForNullScope;
+        }
+        else if (auto tt = getMutable<TableType>(target))
+            tt->scope = replacementForNullScope;
+
+        (*types)[ty] = target;
+        queue.emplace_back(target);
+        return target;
     }
 
-    void operator()(const Unifiable::Free& t)
+    TypePackId shallowClone(TypePackId tp) override
     {
-        defaultClone(t);
-    }
-    void operator()(const Unifiable::Generic& t)
-    {
-        defaultClone(t);
-    }
-    void operator()(const Unifiable::Error& t)
-    {
-        defaultClone(t);
-    }
+        tp = follow(tp);
 
-    // While we are a-cloning, we can flatten out bound TypeVars and make things a bit tighter.
-    // We just need to be sure that we rewrite pointers both to the binder and the bindee to the same pointer.
-    void operator()(const Unifiable::Bound<TypePackId>& t)
-    {
-        TypePackId cloned = clone(t.boundTo, dest, cloneState);
-        if (FFlag::DebugLuauCopyBeforeNormalizing)
-            cloned = dest.addTypePack(TypePackVar{BoundTypePack{cloned}});
-        seenTypePacks[typePackId] = cloned;
+        if (auto clone = find(tp))
+            return *clone;
+        else if (tp->persistent && tp != forceTp)
+            return tp;
+
+        TypePackId target = arena->addTypePack(tp->ty);
+
+        if (auto generic = getMutable<GenericTypePack>(target))
+            generic->scope = nullptr;
+        else if (auto free = getMutable<FreeTypePack>(target))
+            free->scope = replacementForNullScope;
+
+        (*packs)[tp] = target;
+        queue.emplace_back(target);
+        return target;
     }
 
-    void operator()(const VariadicTypePack& t)
+    void cloneChildren(LazyType* t) override
     {
-        TypePackId cloned = dest.addTypePack(TypePackVar{VariadicTypePack{clone(t.ty, dest, cloneState), /*hidden*/ t.hidden}});
-        seenTypePacks[typePackId] = cloned;
-    }
-
-    void operator()(const TypePack& t)
-    {
-        TypePackId cloned = dest.addTypePack(TypePack{});
-        TypePack* destTp = getMutable<TypePack>(cloned);
-        LUAU_ASSERT(destTp != nullptr);
-        seenTypePacks[typePackId] = cloned;
-
-        for (TypeId ty : t.head)
-            destTp->head.push_back(clone(ty, dest, cloneState));
-
-        if (t.tail)
-            destTp->tail = clone(*t.tail, dest, cloneState);
+        // Do not clone lazy types
     }
 };
 
-template<typename T>
-void TypeCloner::defaultClone(const T& t)
+
+} // namespace
+
+TypePackId shallowClone(TypePackId tp, TypeArena& dest, CloneState& cloneState, bool clonePersistentTypes)
 {
-    TypeId cloned = dest.addType(t);
-    seenTypes[typeId] = cloned;
+    if (tp->persistent && !clonePersistentTypes)
+        return tp;
+
+    TypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        clonePersistentTypes ? tp : nullptr
+    };
+
+    return cloner.shallowClone(tp);
 }
 
-void TypeCloner::operator()(const Unifiable::Free& t)
+TypeId shallowClone(TypeId typeId, TypeArena& dest, CloneState& cloneState, bool clonePersistentTypes)
 {
-    defaultClone(t);
+    if (typeId->persistent && !clonePersistentTypes)
+        return typeId;
+
+    TypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        clonePersistentTypes ? typeId : nullptr,
+        nullptr
+    };
+
+    return cloner.shallowClone(typeId);
 }
-
-void TypeCloner::operator()(const Unifiable::Generic& t)
-{
-    defaultClone(t);
-}
-
-void TypeCloner::operator()(const Unifiable::Bound<TypeId>& t)
-{
-    TypeId boundTo = clone(t.boundTo, dest, cloneState);
-    if (FFlag::DebugLuauCopyBeforeNormalizing)
-        boundTo = dest.addType(BoundTypeVar{boundTo});
-    seenTypes[typeId] = boundTo;
-}
-
-void TypeCloner::operator()(const Unifiable::Error& t)
-{
-    defaultClone(t);
-}
-
-void TypeCloner::operator()(const PrimitiveTypeVar& t)
-{
-    defaultClone(t);
-}
-
-void TypeCloner::operator()(const ConstrainedTypeVar& t)
-{
-    TypeId res = dest.addType(ConstrainedTypeVar{t.level});
-    ConstrainedTypeVar* ctv = getMutable<ConstrainedTypeVar>(res);
-    LUAU_ASSERT(ctv);
-
-    seenTypes[typeId] = res;
-
-    std::vector<TypeId> parts;
-    for (TypeId part : t.parts)
-        parts.push_back(clone(part, dest, cloneState));
-
-    ctv->parts = std::move(parts);
-}
-
-void TypeCloner::operator()(const SingletonTypeVar& t)
-{
-    defaultClone(t);
-}
-
-void TypeCloner::operator()(const FunctionTypeVar& t)
-{
-    TypeId result = dest.addType(FunctionTypeVar{TypeLevel{0, 0}, {}, {}, nullptr, nullptr, t.definition, t.hasSelf});
-    FunctionTypeVar* ftv = getMutable<FunctionTypeVar>(result);
-    LUAU_ASSERT(ftv != nullptr);
-
-    seenTypes[typeId] = result;
-
-    for (TypeId generic : t.generics)
-        ftv->generics.push_back(clone(generic, dest, cloneState));
-
-    for (TypePackId genericPack : t.genericPacks)
-        ftv->genericPacks.push_back(clone(genericPack, dest, cloneState));
-
-    ftv->tags = t.tags;
-    ftv->argTypes = clone(t.argTypes, dest, cloneState);
-    ftv->argNames = t.argNames;
-    ftv->retType = clone(t.retType, dest, cloneState);
-    ftv->hasNoGenerics = t.hasNoGenerics;
-}
-
-void TypeCloner::operator()(const TableTypeVar& t)
-{
-    // If table is now bound to another one, we ignore the content of the original
-    if (!FFlag::DebugLuauCopyBeforeNormalizing && t.boundTo)
-    {
-        TypeId boundTo = clone(*t.boundTo, dest, cloneState);
-        seenTypes[typeId] = boundTo;
-        return;
-    }
-
-    TypeId result = dest.addType(TableTypeVar{});
-    TableTypeVar* ttv = getMutable<TableTypeVar>(result);
-    LUAU_ASSERT(ttv != nullptr);
-
-    *ttv = t;
-
-    seenTypes[typeId] = result;
-
-    ttv->level = TypeLevel{0, 0};
-
-    if (FFlag::DebugLuauCopyBeforeNormalizing && t.boundTo)
-        ttv->boundTo = clone(*t.boundTo, dest, cloneState);
-
-    for (const auto& [name, prop] : t.props)
-        ttv->props[name] = {clone(prop.type, dest, cloneState), prop.deprecated, {}, prop.location, prop.tags};
-
-    if (t.indexer)
-        ttv->indexer = TableIndexer{clone(t.indexer->indexType, dest, cloneState), clone(t.indexer->indexResultType, dest, cloneState)};
-
-    for (TypeId& arg : ttv->instantiatedTypeParams)
-        arg = clone(arg, dest, cloneState);
-
-    for (TypePackId& arg : ttv->instantiatedTypePackParams)
-        arg = clone(arg, dest, cloneState);
-
-    ttv->definitionModuleName = t.definitionModuleName;
-    ttv->tags = t.tags;
-}
-
-void TypeCloner::operator()(const MetatableTypeVar& t)
-{
-    TypeId result = dest.addType(MetatableTypeVar{});
-    MetatableTypeVar* mtv = getMutable<MetatableTypeVar>(result);
-    seenTypes[typeId] = result;
-
-    mtv->table = clone(t.table, dest, cloneState);
-    mtv->metatable = clone(t.metatable, dest, cloneState);
-}
-
-void TypeCloner::operator()(const ClassTypeVar& t)
-{
-    TypeId result = dest.addType(ClassTypeVar{t.name, {}, std::nullopt, std::nullopt, t.tags, t.userData, t.definitionModuleName});
-    ClassTypeVar* ctv = getMutable<ClassTypeVar>(result);
-
-    seenTypes[typeId] = result;
-
-    for (const auto& [name, prop] : t.props)
-        ctv->props[name] = {clone(prop.type, dest, cloneState), prop.deprecated, {}, prop.location, prop.tags};
-
-    if (t.parent)
-        ctv->parent = clone(*t.parent, dest, cloneState);
-
-    if (t.metatable)
-        ctv->metatable = clone(*t.metatable, dest, cloneState);
-}
-
-void TypeCloner::operator()(const AnyTypeVar& t)
-{
-    defaultClone(t);
-}
-
-void TypeCloner::operator()(const UnionTypeVar& t)
-{
-    std::vector<TypeId> options;
-    options.reserve(t.options.size());
-
-    for (TypeId ty : t.options)
-        options.push_back(clone(ty, dest, cloneState));
-
-    TypeId result = dest.addType(UnionTypeVar{std::move(options)});
-    seenTypes[typeId] = result;
-}
-
-void TypeCloner::operator()(const IntersectionTypeVar& t)
-{
-    TypeId result = dest.addType(IntersectionTypeVar{});
-    seenTypes[typeId] = result;
-
-    IntersectionTypeVar* option = getMutable<IntersectionTypeVar>(result);
-    LUAU_ASSERT(option != nullptr);
-
-    for (TypeId ty : t.parts)
-        option->parts.push_back(clone(ty, dest, cloneState));
-}
-
-void TypeCloner::operator()(const LazyTypeVar& t)
-{
-    defaultClone(t);
-}
-
-} // anonymous namespace
 
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState)
 {
     if (tp->persistent)
         return tp;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypePackId");
-
-    TypePackId& res = cloneState.seenTypePacks[tp];
-
-    if (res == nullptr)
-    {
-        TypePackCloner cloner{dest, tp, cloneState};
-        Luau::visit(cloner, tp->ty); // Mutates the storage that 'res' points into.
-    }
-
-    return res;
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
+    return cloner.clone(tp);
 }
 
 TypeId clone(TypeId typeId, TypeArena& dest, CloneState& cloneState)
@@ -329,116 +596,141 @@ TypeId clone(TypeId typeId, TypeArena& dest, CloneState& cloneState)
     if (typeId->persistent)
         return typeId;
 
-    RecursionLimiter _ra(&cloneState.recursionCount, FInt::LuauTypeCloneRecursionLimit, "cloning TypeId");
-
-    TypeId& res = cloneState.seenTypes[typeId];
-
-    if (res == nullptr)
-    {
-        TypeCloner cloner{dest, typeId, cloneState};
-        Luau::visit(cloner, typeId->ty); // Mutates the storage that 'res' points into.
-
-        // Persistent types are not being cloned and we get the original type back which might be read-only
-        if (!res->persistent)
-        {
-            asMutable(res)->documentationSymbol = typeId->documentationSymbol;
-            asMutable(res)->normal = typeId->normal;
-        }
-    }
-
-    return res;
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
+    return cloner.clone(typeId);
 }
 
 TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState)
 {
-    TypeFun result;
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
 
-    for (auto param : typeFun.typeParams)
+    TypeFun copy = typeFun;
+
+    for (auto& param : copy.typeParams)
     {
-        TypeId ty = clone(param.ty, dest, cloneState);
-        std::optional<TypeId> defaultValue;
+        param.ty = cloner.clone(param.ty);
 
         if (param.defaultValue)
-            defaultValue = clone(*param.defaultValue, dest, cloneState);
-
-        result.typeParams.push_back({ty, defaultValue});
+            param.defaultValue = cloner.clone(*param.defaultValue);
     }
 
-    for (auto param : typeFun.typePackParams)
+    for (auto& param : copy.typePackParams)
     {
-        TypePackId tp = clone(param.tp, dest, cloneState);
-        std::optional<TypePackId> defaultValue;
+        param.tp = cloner.clone(param.tp);
 
         if (param.defaultValue)
-            defaultValue = clone(*param.defaultValue, dest, cloneState);
-
-        result.typePackParams.push_back({tp, defaultValue});
+            param.defaultValue = cloner.clone(*param.defaultValue);
     }
 
-    result.type = clone(typeFun.type, dest, cloneState);
+    copy.type = cloner.clone(copy.type);
 
-    return result;
+    return copy;
 }
 
-TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log)
+Binding clone(const Binding& binding, TypeArena& dest, CloneState& cloneState)
 {
-    ty = log->follow(ty);
+    TypeCloner cloner{NotNull{&dest}, cloneState.builtinTypes, NotNull{&cloneState.seenTypes}, NotNull{&cloneState.seenTypePacks}, nullptr, nullptr};
 
-    TypeId result = ty;
+    Binding b;
+    b.deprecated = binding.deprecated;
+    b.deprecatedSuggestion = binding.deprecatedSuggestion;
+    b.documentationSymbol = binding.documentationSymbol;
+    b.location = binding.location;
+    b.typeId = cloner.clone(binding.typeId);
 
-    if (auto pty = log->pending(ty))
-        ty = &pty->pending;
-
-    if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(ty))
-    {
-        FunctionTypeVar clone = FunctionTypeVar{ftv->level, ftv->argTypes, ftv->retType, ftv->definition, ftv->hasSelf};
-        clone.generics = ftv->generics;
-        clone.genericPacks = ftv->genericPacks;
-        clone.magicFunction = ftv->magicFunction;
-        clone.tags = ftv->tags;
-        clone.argNames = ftv->argNames;
-        result = dest.addType(std::move(clone));
-    }
-    else if (const TableTypeVar* ttv = get<TableTypeVar>(ty))
-    {
-        LUAU_ASSERT(!ttv->boundTo);
-        TableTypeVar clone = TableTypeVar{ttv->props, ttv->indexer, ttv->level, ttv->state};
-        clone.definitionModuleName = ttv->definitionModuleName;
-        clone.name = ttv->name;
-        clone.syntheticName = ttv->syntheticName;
-        clone.instantiatedTypeParams = ttv->instantiatedTypeParams;
-        clone.instantiatedTypePackParams = ttv->instantiatedTypePackParams;
-        clone.tags = ttv->tags;
-        result = dest.addType(std::move(clone));
-    }
-    else if (const MetatableTypeVar* mtv = get<MetatableTypeVar>(ty))
-    {
-        MetatableTypeVar clone = MetatableTypeVar{mtv->table, mtv->metatable};
-        clone.syntheticName = mtv->syntheticName;
-        result = dest.addType(std::move(clone));
-    }
-    else if (const UnionTypeVar* utv = get<UnionTypeVar>(ty))
-    {
-        UnionTypeVar clone;
-        clone.options = utv->options;
-        result = dest.addType(std::move(clone));
-    }
-    else if (const IntersectionTypeVar* itv = get<IntersectionTypeVar>(ty))
-    {
-        IntersectionTypeVar clone;
-        clone.parts = itv->parts;
-        result = dest.addType(std::move(clone));
-    }
-    else if (const ConstrainedTypeVar* ctv = get<ConstrainedTypeVar>(ty))
-    {
-        ConstrainedTypeVar clone{ctv->level, ctv->parts};
-        result = dest.addType(std::move(clone));
-    }
-    else
-        return result;
-
-    asMutable(result)->documentationSymbol = ty->documentationSymbol;
-    return result;
+    return b;
 }
+
+TypePackId cloneIncremental(TypePackId tp, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    if (tp->persistent)
+        return tp;
+
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+    return cloner.clone(tp);
+}
+
+TypeId cloneIncremental(TypeId typeId, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    if (typeId->persistent)
+        return typeId;
+
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+    return cloner.clone(typeId);
+}
+
+TypeFun cloneIncremental(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+
+    TypeFun copy = typeFun;
+
+    for (auto& param : copy.typeParams)
+    {
+        param.ty = cloner.clone(param.ty);
+
+        if (param.defaultValue)
+            param.defaultValue = cloner.clone(*param.defaultValue);
+    }
+
+    for (auto& param : copy.typePackParams)
+    {
+        param.tp = cloner.clone(param.tp);
+
+        if (param.defaultValue)
+            param.defaultValue = cloner.clone(*param.defaultValue);
+    }
+
+    copy.type = cloner.clone(copy.type);
+
+    return copy;
+}
+
+Binding cloneIncremental(const Binding& binding, TypeArena& dest, CloneState& cloneState, Scope* freshScopeForFreeTypes)
+{
+    FragmentAutocompleteTypeCloner cloner{
+        NotNull{&dest},
+        cloneState.builtinTypes,
+        NotNull{&cloneState.seenTypes},
+        NotNull{&cloneState.seenTypePacks},
+        nullptr,
+        nullptr,
+        freshScopeForFreeTypes
+    };
+
+    Binding b;
+    b.deprecated = binding.deprecated;
+    b.deprecatedSuggestion = binding.deprecatedSuggestion;
+    b.documentationSymbol = binding.documentationSymbol;
+    b.location = binding.location;
+    b.typeId = binding.typeId->persistent ? binding.typeId : cloner.clone(binding.typeId);
+
+    return b;
+}
+
 
 } // namespace Luau

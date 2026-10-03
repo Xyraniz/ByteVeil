@@ -26,10 +26,16 @@ static int db_info(lua_State* L)
 {
     int arg;
     lua_State* L1 = getthread(L, &arg);
+    int l1top = 0;
 
-    // If L1 != L, L1 can be in any state, and therefore there are no guarantees about its stack space
+    // if L1 != L, L1 can be in any state, and therefore there are no guarantees about its stack space
     if (L != L1)
-        lua_rawcheckstack(L1, 1); // for 'f' option
+    {
+        // for 'f' option, we reserve one slot and we also record the stack top
+        lua_rawcheckstack(L1, 1);
+
+        l1top = lua_gettop(L1);
+    }
 
     int level;
     if (lua_isnumber(L, arg + 1))
@@ -59,7 +65,13 @@ static int db_info(lua_State* L)
         if (unsigned(*it - 'a') < 26)
         {
             if (occurs[*it - 'a'])
+            {
+                // restore stack state of another thread as 'f' option might not have been visited yet
+                if (L != L1)
+                    lua_settop(L1, l1top);
+
                 luaL_argerror(L, arg + 2, "duplicate option");
+            }
             occurs[*it - 'a'] = true;
         }
 
@@ -82,9 +94,9 @@ static int db_info(lua_State* L)
 
         case 'f':
             if (L1 == L)
-                lua_pushvalue(L, -1 - results); /* function is right before results */
+                lua_pushvalue(L, -1 - results); // function is right before results
             else
-                lua_xmove(L1, L, 1); /* function is at top of L1 */
+                lua_xmove(L1, L, 1); // function is at top of L1
             results++;
             break;
 
@@ -95,6 +107,10 @@ static int db_info(lua_State* L)
             break;
 
         default:
+            // restore stack state of another thread as 'f' option might not have been visited yet
+            if (L != L1)
+                lua_settop(L1, l1top);
+
             luaL_argerror(L, arg + 2, "invalid option");
         }
     }
@@ -110,47 +126,8 @@ static int db_traceback(lua_State* L)
     int level = luaL_optinteger(L, arg + 2, (L == L1) ? 1 : 0);
     luaL_argcheck(L, level >= 0, arg + 2, "level can't be negative");
 
-    luaL_Buffer buf;
-    luaL_buffinit(L, &buf);
+    luaL_traceback(L, L1, msg, level);
 
-    if (msg)
-    {
-        luaL_addstring(&buf, msg);
-        luaL_addstring(&buf, "\n");
-    }
-
-    lua_Debug ar;
-    for (int i = level; lua_getinfo(L1, i, "sln", &ar); ++i)
-    {
-        if (strcmp(ar.what, "C") == 0)
-            continue;
-
-        if (ar.source)
-            luaL_addstring(&buf, ar.short_src);
-
-        if (ar.currentline > 0)
-        {
-            char line[32];
-#ifdef _MSC_VER
-            _itoa(ar.currentline, line, 10); // 5x faster than sprintf
-#else
-            sprintf(line, "%d", ar.currentline);
-#endif
-
-            luaL_addchar(&buf, ':');
-            luaL_addstring(&buf, line);
-        }
-
-        if (ar.name)
-        {
-            luaL_addstring(&buf, " function ");
-            luaL_addstring(&buf, ar.name);
-        }
-
-        luaL_addchar(&buf, '\n');
-    }
-
-    luaL_pushresult(&buf);
     return 1;
 }
 

@@ -20,11 +20,12 @@
 #include "byteveil_decompiler/Lua51.h"
 #include "byteveil_decompiler/MoonSec.h"
 #include "byteveil_decompiler/Protectors.h"
+#include "byteveil_decompiler/RobloxBytecode.h"
 #include "byteveil_decompiler/Unpack.h"
 #include "Luau/Compiler.h"
 #include "lualib.h"
 
-namespace luau { struct IdentityEncoder final : Luau::BytecodeEncoder { uint8_t encodeOp(uint8_t op) override { return op; } }; }
+namespace luau { struct IdentityEncoder final : Luau::BytecodeEncoder { void encode(uint32_t*, size_t) override {} }; }
 
 // Pathological or heavily-obfuscated input can make the Luau-path lifter
 // generate a runaway amount of AST/printed output (observed in practice: a
@@ -197,7 +198,7 @@ int main(int ac, char** av)
     Options o; if (!parse(ac, av, o)) { usage(av[0]); return 2; }
     std::string input; if (!readFile(o.input, input)) { std::cerr << "error: cannot read " << o.input << '\n'; return 1; }
     bool lua51 = ByteVeil::Lua51::isChunk(input);
-    bool looks = input.size() >= 5 && input.compare(0, 5, "\x1bLuau", 5) == 0;
+    bool looks = ByteVeil::Lua51::isChunk(input) || Luau::Decompiler::RobloxBytecode::isBytecode(input);
     bool binary = !o.compileSource || looks || lua51;
     if (o.analyze) {
         analyze(input, binary);

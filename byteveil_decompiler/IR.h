@@ -4,6 +4,8 @@
 #include <vector>
 #include "Common.h"
 
+struct lua_State;
+
 namespace Luau::Decompiler::IR {
 struct Instruction {
     int offset = 0;
@@ -141,6 +143,7 @@ std::string prototypesText(const Module& module);
 }
 
 namespace Luau::Decompiler {
+bool loadBytecode(lua_State* L, const std::string& input, Proto*& root, std::string& error);
 std::string inspectBytecode(lua_State* L, std::string& bytecode, const std::string& mode, std::string& error);
 }
 

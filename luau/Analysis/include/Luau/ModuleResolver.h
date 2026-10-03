@@ -21,13 +21,11 @@ struct ModuleResolver
 
     /** Compute a ModuleName from an AST fragment.  This AST fragment is generally the argument to the require() function.
      *
-     * You probably want to implement this with some variation of pathExprToModuleName.
-     *
      * @returns The ModuleInfo if the expression is a syntactically legal path.
      * @returns std::nullopt if we are unable to determine whether or not the expression is a valid path.  Type inference will
      * silently assume that it could succeed in this case.
      *
-     * FIXME: This is clearly not the right behaviour longterm.  We'll want to adust this interface to be able to signal
+     * FIXME: This is clearly not the right behaviour longterm.  We'll want to adjust this interface to be able to signal
      *  a) success,
      *  b) Definitive failure (this expression will absolutely cause require() to fail at runtime), and
      *  c) uncertainty

@@ -15,7 +15,7 @@ else()
     add_compile_options(-include stdint.h)
 endif()
 
-add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_decompiler/Lua51.h byteveil_decompiler/MoonSec.cpp byteveil_decompiler/MoonSec.h byteveil_decompiler/Protectors.cpp byteveil_decompiler/Protectors.h byteveil_decompiler/Unpack.cpp byteveil_decompiler/Unpack.h byteveil_decompiler/IR.cpp byteveil_decompiler/AstGen/src/Common.cpp byteveil_decompiler/BlockGen/include/Lifter.h byteveil_decompiler/BlockGen/src/Lifter.cpp byteveil_decompiler/Common.h byteveil_decompiler/BlockGen/src/BlockGen.cpp byteveil_decompiler/BlockGen/include/BlockGen.h byteveil_decompiler/AstGen/include/VirtualAstStack.h byteveil_decompiler/AstGen/src/VirtualAstStack.cpp byteveil_decompiler/BlockGen/include/BodyHandler.h byteveil_decompiler/BlockGen/src/BodyHandler.cpp byteveil_decompiler/AstGen/include/Generator.h byteveil_decompiler/AstGen/src/Generator.cpp byteveil_decompiler/AstGen/include/Handlers.h byteveil_decompiler/AstGen/src/Handlers.cpp byteveil_decompiler/Decompile.h byteveil_decompiler/Decompile.cpp byteveil_decompiler/Restructure.cpp byteveil_decompiler/Restructure.h byteveil_decompiler/RegisterDecompile.cpp byteveil_decompiler/RegisterDecompile.h luau/Analysis/src/Transpiler.cpp)
+add_executable(byteveil byteveil_cli.cpp byteveil_decompiler/Lua51.cpp byteveil_decompiler/Lua51.h byteveil_decompiler/MoonSec.cpp byteveil_decompiler/MoonSec.h byteveil_decompiler/Protectors.cpp byteveil_decompiler/Protectors.h byteveil_decompiler/Unpack.cpp byteveil_decompiler/Unpack.h byteveil_decompiler/RobloxBytecode.cpp byteveil_decompiler/RobloxBytecode.h byteveil_decompiler/IR.cpp byteveil_decompiler/AstGen/src/Common.cpp byteveil_decompiler/BlockGen/include/Lifter.h byteveil_decompiler/BlockGen/src/Lifter.cpp byteveil_decompiler/Common.h byteveil_decompiler/BlockGen/src/BlockGen.cpp byteveil_decompiler/BlockGen/include/BlockGen.h byteveil_decompiler/AstGen/include/VirtualAstStack.h byteveil_decompiler/AstGen/src/VirtualAstStack.cpp byteveil_decompiler/BlockGen/include/BodyHandler.h byteveil_decompiler/BlockGen/src/BodyHandler.cpp byteveil_decompiler/AstGen/include/Generator.h byteveil_decompiler/AstGen/src/Generator.cpp byteveil_decompiler/AstGen/include/Handlers.h byteveil_decompiler/AstGen/src/Handlers.cpp byteveil_decompiler/Decompile.h byteveil_decompiler/Decompile.cpp byteveil_decompiler/Restructure.cpp byteveil_decompiler/Restructure.h byteveil_decompiler/RegisterDecompile.cpp byteveil_decompiler/RegisterDecompile.h)
 
 include(CTest)
 enable_testing()
@@ -81,6 +81,9 @@ if(BUILD_TESTING)
     add_test(NAME byteveil_test_luau_equivalence.sh
         COMMAND ${BYTEVEIL_BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_luau_equivalence.sh $<TARGET_FILE:byteveil> $<TARGET_FILE:byteveil_luau_runner>)
     set_tests_properties(byteveil_test_luau_equivalence.sh PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME byteveil_test_roblox_bytecode.sh
+        COMMAND ${BYTEVEIL_BASH_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/test_roblox_bytecode.sh $<TARGET_FILE:byteveil> $<TARGET_FILE:byteveil_luau_runner>)
+    set_tests_properties(byteveil_test_roblox_bytecode.sh PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased - Support Roblox Luau bytecode
+
+### Added
+
+- Read Roblox serialized Luau bytecode versions 3 through 14, normalize the
+  opcode encoding observed in the supplied corpus, and accept its optional
+  24-byte footer. CLI format detection now recognizes these files automatically.
+- Extend Luau instruction validation, IR output, and source reconstruction for
+  current opcodes, integer constants, table templates, and large functions.
+
+### Validation
+
+- All ten CTest suites pass. All 110 supplied sample files (57 unique hashes)
+  were inspected; each decompiled output compiled and loaded as Luau, with no
+  unsupported-opcode comments. Sample scripts were not executed.
+- Added synthetic bytecode regressions for encoded opcodes, control flow,
+  malformed/truncated inputs, the optional footer, and large functions.
+
 ## Unreleased - Omit dead Lua 5.1 argument setup registers
 
 ### Changed

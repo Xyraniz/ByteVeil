@@ -13,7 +13,7 @@ namespace Luau::Decompiler::AstGen {
         return new AstStatFor {Location(), var,
                                 from, to, step,
                                 new AstStatBlock {Location(), bodyArray},
-                                true, Location(), true };
+                                true, Location() };
     }
 
     AstStat* AstStatIfGenerator::generate() {
@@ -22,7 +22,7 @@ namespace Luau::Decompiler::AstGen {
         return new AstStatIf{ Location(), condition,
                               new AstStatBlock {Location(), bodyArray},
                               nullptr,
-                              Location(), Location(), true };
+                              Location(), Location() };
     }
 
     AstStat* BodyGenerator::generate() {
@@ -41,7 +41,7 @@ namespace Luau::Decompiler::AstGen {
         // unconditional true/false that would silently misrepresent the loop.
         AstExpr* cond = condition ? condition : Luau::Decompiler::orPlaceholder(nullptr);
         return new AstStatWhile { Location(), cond, new AstStatBlock {Location(), bodyArray},
-                                  true, Location(), true };
+                                  true, Location() };
     }
 
     void AstStatWhileGenerator::updateCondition(AstExpr *cond) {

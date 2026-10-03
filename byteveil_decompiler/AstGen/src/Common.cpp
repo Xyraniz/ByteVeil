@@ -10,7 +10,9 @@ namespace Luau::Decompiler {
 
     AstExprGlobal* genFunctionAst(StkId func) {
         auto cl = func->value.gc->cl;
-        return cl.isC ? makeGlobal(cl.c.debugname) : makeGlobal(cl.l.p->debugname->data);
+        const char* name = cl.isC ? (cl.c.debugname ? getstr(cl.c.debugname) : "")
+                                  : (cl.l.p->debugname ? getstr(cl.l.p->debugname) : "");
+        return makeGlobal(name);
     }
 
     AstExpr* getConstantAst(TValue* val) {
@@ -25,7 +27,7 @@ namespace Luau::Decompiler {
                 return new AstExprConstantNumber { Location(), val->value.n };
             case LUA_TSTRING: {
                 AstArray<char> str{val->value.gc->ts.data, val->value.gc->ts.len};
-                return new AstExprConstantString{ Location(), str };
+                return new AstExprConstantString{ Location(), str, AstExprConstantString::QuoteStyle::QuotedSimple };
             }
             case LUA_TFUNCTION:
                 return genFunctionAst(val);
@@ -37,7 +39,8 @@ namespace Luau::Decompiler {
         if (value)
             return value;
         static char placeholder[] = "--[[ byteveil: unresolved register ]]";
-        return new AstExprConstantString{Location(), AstArray<char>{placeholder, sizeof(placeholder) - 1}};
+        return new AstExprConstantString{Location(), AstArray<char>{placeholder, sizeof(placeholder) - 1},
+            AstExprConstantString::QuoteStyle::QuotedSimple};
     }
 
     const char* getConstantName(Proto* proto, unsigned int idx) {

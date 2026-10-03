@@ -7,7 +7,7 @@
 // Creating the bytecode is outside the scope of this file and is handled by bytecode builder (BytecodeBuilder.h) and bytecode compiler (Compiler.h)
 // Note that ALL enums declared in this file are order-sensitive since the values are baked into bytecode that needs to be processed by legacy clients.
 
-// Bytecode definitions
+// # Bytecode definitions
 // Bytecode instructions are using "word code" - each instruction is one or many 32-bit words.
 // The first word in the instruction is always the instruction header, and *must* contain the opcode (enum below) in the least significant byte.
 //
@@ -17,18 +17,54 @@
 //     E - least-significant byte for the opcode, followed by E (24-bit integer). E is a signed integer that commonly specifies a jump offset
 //
 // Instruction word is sometimes followed by one extra word, indicated as AUX - this is just a 32-bit word and is decoded according to the specification for each opcode.
-// For each opcode the encoding is *static* - that is, based on the opcode you know a-priory how large the instruction is, with the exception of NEWCLOSURE
+// For each opcode the encoding is *static* - that is, based on the opcode you know apriori how large the instruction is, with the exception of NEWCLOSURE
 
-// Bytecode indices
+// # Bytecode indices
 // Bytecode instructions commonly refer to integer values that define offsets or indices for various entities. For each type, there's a maximum encodable value.
 // Note that in some cases, the compiler will set a lower limit than the maximum encodable value is to prevent fragile code into bumping against the limits whenever we change the compilation details.
 // Additionally, in some specific instructions such as ANDK, the limit on the encoded value is smaller; this means that if a value is larger, a different instruction must be selected.
 //
 // Registers: 0-254. Registers refer to the values on the function's stack frame, including arguments.
-// Upvalues: 0-254. Upvalues refer to the values stored in the closure object.
+// Upvalues: 0-199. Upvalues refer to the values stored in the closure object.
 // Constants: 0-2^23-1. Constants are stored in a table allocated with each proto; to allow for future bytecode tweaks the encodable value is limited to 23 bits.
 // Closures: 0-2^15-1. Closures are created from child protos via a child index; the limit is for the number of closures immediately referenced in each function.
-// Jumps: -2^23..2^23. Jump offsets are specified in word increments, so jumping over an instruction may sometimes require an offset of 2 or more.
+// Jumps: -2^23..2^23. Jump offsets are specified in word increments, so jumping over an instruction may sometimes require an offset of 2 or more. Note that for jump instructions with AUX, the AUX word is included as part of the jump offset.
+
+// # Bytecode versions
+// Bytecode serialized format embeds a version number, that dictates both the serialized form as well as the allowed instructions. As long as the bytecode version falls into supported
+// range (indicated by LBC_BYTECODE_MIN / LBC_BYTECODE_MAX) and was produced by Luau compiler, it should load and execute correctly.
+//
+// Note that Luau runtime doesn't provide indefinite bytecode compatibility: support for older versions gets removed over time. As such, bytecode isn't a durable storage format and it's expected
+// that Luau users can recompile bytecode from source on Luau version upgrades if necessary.
+
+// # Bytecode version history
+//
+// Note: due to limitations of the versioning scheme, some bytecode blobs that carry version 2 are using features from version 3. Starting from version 3, version should be sufficient to indicate bytecode compatibility.
+//
+// Version 1: Baseline version for the open-source release. Supported until 0.521.
+// Version 2: Adds Proto::linedefined. Supported until 0.544.
+// Version 3: Adds FORGPREP/JUMPXEQK* and enhances AUX encoding for FORGLOOP. Removes FORGLOOP_NEXT/INEXT and JUMPIFEQK/JUMPIFNOTEQK. Currently supported.
+// Version 4: Adds Proto::flags, typeinfo, and floor division opcodes IDIV/IDIVK. Currently supported.
+// Version 5: Adds SUBRK/DIVRK and vector constants. Currently supported.
+// Version 6: Adds FASTCALL3. Currently supported.
+// Version 7: Adds LBC_CONSTANT_TABLE_WITH_CONSTANTS for DUPTABLE with pre-filled constant values. Currently supported.
+// Version 8: Adds LBC_CONSTANT_INTEGER for 64-bit integer constants. Currently supported.
+// Version 9: Adds atom-based userdata field access acceleration. Currently supported.
+// Version 10: Adds LBC_CONSTANT_CLASS_SHAPE and NEWCLASSMEMBER for use with Luau Classes. Experimental.
+// Version 11: Adds CALLFB, CMPPROTO and feedback vector description. Experimental.
+// Version 12: Adds cost function serialized for proto and prepend each proto with size in bytes. Experimental.
+// Version 13: Adds support for double-precision vector constants. Experimental.
+// Version 14: Adds FASTPCALL. Currently supported.
+
+// WIP Versions: Used for in-progress features that might require multiple changes to bytecode. Since these versions are higher than the non-WIP versions, they are responsible for maintaining compatibility with them. For example, tests exercising WIP bytecode versions may need to enable flags for unreleased but non-WIP bytecode versions.
+// Version 100: Adds NEWCLASS for use with Luau Classes. Future class-related bytecode changes should go in this version before release. Experimental.
+
+// # Bytecode type information history
+// Version 1: (from bytecode version 4) Type information for function signature. Currently supported.
+// Version 2: (from bytecode version 4) Type information for arguments, upvalues, locals and some temporaries. Currently supported.
+// Version 3: (from bytecode version 5) Type information for userdata type names and their index mapping. Currently supported.
+
+// Bytecode opcode, part of the instruction header
 enum LuauOpcode
 {
     // NOP: noop
@@ -52,7 +88,7 @@ enum LuauOpcode
     // D: value (-32768..32767)
     LOP_LOADN,
 
-    // LOADK: sets register to an entry from the constant table from the proto (number/string)
+    // LOADK: sets register to an entry from the constant table from the proto (number/vector/string)
     // A: target register
     // D: constant table index (0..32767)
     LOP_LOADK,
@@ -76,12 +112,12 @@ enum LuauOpcode
 
     // GETUPVAL: load upvalue from the upvalue table for the current function
     // A: target register
-    // B: upvalue index (0..255)
+    // B: upvalue index
     LOP_GETUPVAL,
 
     // SETUPVAL: store value into the upvalue table for the current function
     // A: target register
-    // B: upvalue index (0..255)
+    // B: upvalue index
     LOP_SETUPVAL,
 
     // CLOSEUPVALS: close (migrate to heap) all upvalues that were captured for registers >= target
@@ -177,7 +213,7 @@ enum LuauOpcode
 
     // JUMPIFEQ, JUMPIFLE, JUMPIFLT, JUMPIFNOTEQ, JUMPIFNOTLE, JUMPIFNOTLT: jumps to target offset if the comparison is true (or false, for NOT variants)
     // A: source register 1
-    // D: jump offset (-32768..32767; 0 means "next instruction" aka "don't jump")
+    // D: jump offset (-32768..32767; 1 means "next instruction" aka "don't jump")
     // AUX: source register 2
     LOP_JUMPIFEQ,
     LOP_JUMPIFLE,
@@ -200,7 +236,7 @@ enum LuauOpcode
     // ADDK, SUBK, MULK, DIVK, MODK, POWK: compute arithmetic operation between the source register and a constant and put the result into target register
     // A: target register
     // B: source register
-    // C: constant table index (0..255)
+    // C: constant table index (0..255); must refer to a number
     LOP_ADDK,
     LOP_SUBK,
     LOP_MULK,
@@ -267,22 +303,32 @@ enum LuauOpcode
     // FORGLOOP: adjust loop variables for one iteration of a generic for loop, jump back to the loop header if loop needs to continue
     // A: target register; generic for loops assume a register layout [generator, state, index, variables...]
     // D: jump offset (-32768..32767)
-    // AUX: variable count (1..255)
+    // AUX: variable count (1..255) in the low 8 bits, high bit indicates whether to use ipairs-style traversal in the fast path
     // loop variables are adjusted by calling generator(state, index) and expecting it to return a tuple that's copied to the user variables
     // the first variable is then copied into index; generator/state are immutable, index isn't visible to user code
     LOP_FORGLOOP,
 
-    // FORGPREP_INEXT/FORGLOOP_INEXT: FORGLOOP with 2 output variables (no AUX encoding), assuming generator is luaB_inext
-    // FORGPREP_INEXT prepares the index variable and jumps to FORGLOOP_INEXT
-    // FORGLOOP_INEXT has identical encoding and semantics to FORGLOOP (except for AUX encoding)
+    // FORGPREP_INEXT: prepare FORGLOOP with 2 output variables (no AUX encoding), assuming generator is luaB_inext, and jump to FORGLOOP
+    // A: target register (see FORGLOOP for register layout)
+    // D: jump offset (-32768..32767)
     LOP_FORGPREP_INEXT,
-    LOP_FORGLOOP_INEXT,
 
-    // FORGPREP_NEXT/FORGLOOP_NEXT: FORGLOOP with 2 output variables (no AUX encoding), assuming generator is luaB_next
-    // FORGPREP_NEXT prepares the index variable and jumps to FORGLOOP_NEXT
-    // FORGLOOP_NEXT has identical encoding and semantics to FORGLOOP (except for AUX encoding)
+    // FASTCALL3: perform a fast call of a built-in function using 3 register arguments
+    // A: builtin function id (see LuauBuiltinFunction)
+    // B: source argument register
+    // C: jump offset to get to following CALL
+    // AUX: source register 2 in least-significant byte
+    // AUX: source register 3 in second least-significant byte
+    LOP_FASTCALL3,
+
+    // FORGPREP_NEXT: prepare FORGLOOP with 2 output variables (no AUX encoding), assuming generator is luaB_next, and jump to FORGLOOP
+    // A: target register (see FORGLOOP for register layout)
+    // D: jump offset (-32768..32767)
     LOP_FORGPREP_NEXT,
-    LOP_FORGLOOP_NEXT,
+
+    // NATIVECALL: start executing new function in native code
+    // this is a pseudo-instruction that is never emitted by bytecode compiler, but can be constructed at runtime to accelerate native code dispatch
+    LOP_NATIVECALL,
 
     // GETVARARGS: copy variables into the target register from vararg storage for current function
     // A: target register
@@ -323,15 +369,15 @@ enum LuauOpcode
 
     // CAPTURE: capture a local or an upvalue as an upvalue into a newly created closure; only valid after NEWCLOSURE
     // A: capture type, see LuauCaptureType
-    // B: source register (for VAL/REF) or upvalue index (for UPVAL/UPREF)
+    // B: source register (for VAL/REF) or upvalue index (for UPVAL)
     LOP_CAPTURE,
 
-    // JUMPIFEQK, JUMPIFNOTEQK: jumps to target offset if the comparison with constant is true (or false, for NOT variants)
-    // A: source register 1
-    // D: jump offset (-32768..32767; 0 means "next instruction" aka "don't jump")
-    // AUX: constant table index
-    LOP_JUMPIFEQK,
-    LOP_JUMPIFNOTEQK,
+    // SUBRK, DIVRK: compute arithmetic operation between the constant and a source register and put the result into target register
+    // A: target register
+    // B: constant table index (0..255); must refer to a number
+    // C: source register
+    LOP_SUBRK,
+    LOP_DIVRK,
 
     // FASTCALL1: perform a fast call of a built-in function using 1 register argument
     // A: builtin function id (see LuauBuiltinFunction)
@@ -358,6 +404,73 @@ enum LuauOpcode
     // D: jump offset (-32768..32767)
     LOP_FORGPREP,
 
+    // JUMPXEQKNIL, JUMPXEQKB: jumps to target offset if the comparison with constant is true (or false, see AUX)
+    // A: source register 1
+    // D: jump offset (-32768..32767; 1 means "next instruction" aka "don't jump")
+    // AUX: constant value (for boolean) in low bit, NOT flag (that flips comparison result) in high bit
+    LOP_JUMPXEQKNIL,
+    LOP_JUMPXEQKB,
+
+    // JUMPXEQKN, JUMPXEQKS: jumps to target offset if the comparison with constant is true (or false, see AUX)
+    // A: source register 1
+    // D: jump offset (-32768..32767; 1 means "next instruction" aka "don't jump")
+    // AUX: constant table index in low 24 bits, NOT flag (that flips comparison result) in high bit
+    LOP_JUMPXEQKN,
+    LOP_JUMPXEQKS,
+
+    // IDIV: compute floor division between two source registers and put the result into target register
+    // A: target register
+    // B: source register 1
+    // C: source register 2
+    LOP_IDIV,
+
+    // IDIVK compute floor division between the source register and a constant and put the result into target register
+    // A: target register
+    // B: source register
+    // C: constant table index (0..255)
+    LOP_IDIVK,
+
+    // Atom-based userdata field access acceleration
+    // These are equivalent to their GETTABLEKS/SETTABLEKS/NAMECALL counterparts, except tailored towards userdata field accesses
+    // If the user has registered metamethods for a userdata tag, callbacks will be called by these instructions
+    // NOTE: it uses only lower 2 bytes in AUX for constant index. Higher bytes are used for runtime cache.
+    LOP_GETUDATAKS,
+    LOP_SETUDATAKS,
+    LOP_NAMECALLUDATA,
+
+    // NEWCLASSMEMBER: register this method on a class object.
+    // A: target register of class
+    // B: reserved
+    // C: initial value of this member. currently must be a function.
+    // AUX: The name of this member as a constant string
+    LOP_NEWCLASSMEMBER,
+
+    // CALLFB: call specified function with collecting runtime stats in a feedback slot
+    // A: register where the function object lives, followed by arguments; results are placed starting from the same register
+    // B: argument count + 1, or 0 to preserve all arguments up to top (MULTRET)
+    // C: result count + 1, or 0 to preserve all values and adjust top (MULTRET)
+    // AUX: feedback slot id. 0xFFFFFFFF - sealed
+    LOP_CALLFB,
+
+    // CMPPROTO: check if a register contains a closure with a specified Luau function proto id
+    // A: closure register
+    // D: jump offset if proto doesn't match
+    // AUX: proto id
+    LOP_CMPPROTO,
+
+    // FASTPCALL: perform a fastcall of a built-in protected call function
+    // A: protected function id (0 - pcall, 1 - xpcall)
+    // B: number of explicit arguments before a variadic tail
+    // C: jump offset to get to following CALL
+    LOP_FASTPCALL,
+
+    // NEWCLASS: reify a class object
+    // A: target register of class
+    // B: source register of superclass, or 0xFF if no superclass
+    // C: bottom bit is 1 if the class is open, else 0; upper 7 bits are reserved
+    // AUX: constant table index of unreified class object
+    LOP_NEWCLASS,
+
     // Enum entry for number of opcodes, not a valid opcode by itself!
     LOP__COUNT
 };
@@ -377,11 +490,42 @@ enum LuauOpcode
 // E encoding: one signed 24-bit value
 #define LUAU_INSN_E(insn) (int32_t(insn) >> 8)
 
+// Auxiliary AB: two 8-bit values, containing registers or small numbers
+// Used in FASTCALL3
+#define LUAU_INSN_AUX_A(aux) ((aux) & 0xff)
+#define LUAU_INSN_AUX_B(aux) (((aux) >> 8) & 0xff)
+
+// Auxiliary KV: unsigned 24-bit constant index
+// Used in LOP_JUMPXEQK* instructions
+#define LUAU_INSN_AUX_KV(aux) ((aux) & 0xffffff)
+
+// Auxiliary KB: 1-bit constant value
+// Used in LOP_JUMPXEQKB instruction
+#define LUAU_INSN_AUX_KB(aux) ((aux) & 0x1)
+
+// Auxiliary NOT: 1-bit negation flag
+// Used in LOP_JUMPXEQK* instructions
+#define LUAU_INSN_AUX_NOT(aux) ((aux) >> 31)
+
+// Auxiliary 16-bit constant index and 16-bit cachedslot
+// Used in LOP_GETUDATAKS, LOP_SETUDATAKS and LOP_NAMECALLUDATA
+#define LUAU_INSN_AUX_KV16(aux) ((aux) & 0xffffu)
+#define LUAU_INSN_AUX_SLOT(aux) ((aux) >> 16)
+
+#define LUAU_INSN_FBSLOT_SEALED 0xFFFFFFFF
+
 // Bytecode tags, used internally for bytecode encoded as a string
 enum LuauBytecodeTag
 {
-    // Bytecode version
-    LBC_VERSION = 2,
+    // Bytecode version; runtime supports [MIN, MAX], compiler emits TARGET by default but may emit a higher version when flags are enabled
+    LBC_VERSION_MIN = 3,
+    LBC_VERSION_MAX = 14,
+    LBC_VERSION_TARGET = 9,
+    LBC_VERSION_CLASSES = 100,
+    // Type encoding version
+    LBC_TYPE_VERSION_MIN = 1,
+    LBC_TYPE_VERSION_MAX = 3,
+    LBC_TYPE_VERSION_TARGET = 3,
     // Types of constant table entries
     LBC_CONSTANT_NIL = 0,
     LBC_CONSTANT_BOOLEAN,
@@ -390,6 +534,39 @@ enum LuauBytecodeTag
     LBC_CONSTANT_IMPORT,
     LBC_CONSTANT_TABLE,
     LBC_CONSTANT_CLOSURE,
+    LBC_CONSTANT_VECTOR,
+    LBC_CONSTANT_TABLE_WITH_CONSTANTS,
+    LBC_CONSTANT_INTEGER,
+    LBC_CONSTANT_CLASS_SHAPE,
+    LBC_CONSTANT_VECTORD,
+
+    /** WARNING: This must always be last. */
+    LBC_CONSTANT__COUNT
+};
+
+// Type table tags
+enum LuauBytecodeType
+{
+    LBC_TYPE_NIL = 0,
+    LBC_TYPE_BOOLEAN,
+    LBC_TYPE_NUMBER,
+    LBC_TYPE_STRING,
+    LBC_TYPE_TABLE,
+    LBC_TYPE_FUNCTION,
+    LBC_TYPE_THREAD,
+    LBC_TYPE_USERDATA,
+    LBC_TYPE_VECTOR,
+    LBC_TYPE_BUFFER,
+    LBC_TYPE_INTEGER,
+
+    LBC_TYPE_ANY = 15,
+
+    LBC_TYPE_TAGGED_USERDATA_BASE = 64,
+    LBC_TYPE_TAGGED_USERDATA_END = 64 + 32,
+
+    LBC_TYPE_OPTIONAL_BIT = 1 << 7,
+
+    LBC_TYPE_INVALID = 256,
 };
 
 // Builtin function ids, used in LOP_FASTCALL
@@ -479,6 +656,105 @@ enum LuauBuiltinFunction
 
     // select(_, ...)
     LBF_SELECT_VARARG,
+
+    // rawlen
+    LBF_RAWLEN,
+
+    // bit32.extract(_, k, k)
+    LBF_BIT32_EXTRACTK,
+
+    // get/setmetatable
+    LBF_GETMETATABLE,
+    LBF_SETMETATABLE,
+
+    // tonumber/tostring
+    LBF_TONUMBER,
+    LBF_TOSTRING,
+
+    // bit32.byteswap(n)
+    LBF_BIT32_BYTESWAP,
+
+    // buffer.
+    LBF_BUFFER_READI8,
+    LBF_BUFFER_READU8,
+    LBF_BUFFER_WRITEU8,
+    LBF_BUFFER_READI16,
+    LBF_BUFFER_READU16,
+    LBF_BUFFER_WRITEU16,
+    LBF_BUFFER_READI32,
+    LBF_BUFFER_READU32,
+    LBF_BUFFER_WRITEU32,
+    LBF_BUFFER_READF32,
+    LBF_BUFFER_WRITEF32,
+    LBF_BUFFER_READF64,
+    LBF_BUFFER_WRITEF64,
+
+    // vector.
+    LBF_VECTOR_MAGNITUDE,
+    LBF_VECTOR_NORMALIZE,
+    LBF_VECTOR_CROSS,
+    LBF_VECTOR_DOT,
+    LBF_VECTOR_FLOOR,
+    LBF_VECTOR_CEIL,
+    LBF_VECTOR_ABS,
+    LBF_VECTOR_SIGN,
+    LBF_VECTOR_CLAMP,
+    LBF_VECTOR_MIN,
+    LBF_VECTOR_MAX,
+
+    // math.lerp
+    LBF_MATH_LERP,
+
+    // vector.lerp
+    LBF_VECTOR_LERP,
+
+    // math.
+    LBF_MATH_ISNAN,
+    LBF_MATH_ISINF,
+    LBF_MATH_ISFINITE,
+
+    // integer
+    LBF_INTEGER_CREATE,
+    LBF_INTEGER_TONUMBER,
+    LBF_INTEGER_NEG,
+    LBF_INTEGER_ADD,
+    LBF_INTEGER_SUB,
+    LBF_INTEGER_MUL,
+    LBF_INTEGER_DIV,
+    LBF_INTEGER_MIN,
+    LBF_INTEGER_MAX,
+    LBF_INTEGER_REM,
+    LBF_INTEGER_IDIV,
+    LBF_INTEGER_UDIV,
+    LBF_INTEGER_UREM,
+    LBF_INTEGER_MOD,
+    LBF_INTEGER_CLAMP,
+    LBF_INTEGER_BAND,
+    LBF_INTEGER_BOR,
+    LBF_INTEGER_BNOT,
+    LBF_INTEGER_BXOR,
+    LBF_INTEGER_LT,
+    LBF_INTEGER_LE,
+    LBF_INTEGER_ULT,
+    LBF_INTEGER_ULE,
+    LBF_INTEGER_GT,
+    LBF_INTEGER_GE,
+    LBF_INTEGER_UGT,
+    LBF_INTEGER_UGE,
+    LBF_INTEGER_LSHIFT,
+    LBF_INTEGER_RSHIFT,
+    LBF_INTEGER_ARSHIFT,
+    LBF_INTEGER_LROTATE,
+    LBF_INTEGER_RROTATE,
+    LBF_INTEGER_EXTRACT,
+    LBF_INTEGER_BTEST,
+    LBF_INTEGER_COUNTRZ,
+    LBF_INTEGER_COUNTLZ,
+    LBF_INTEGER_BSWAP,
+
+    // buffer.readinteger / buffer.writeinteger (int64_t)
+    LBF_BUFFER_READINTEGER,
+    LBF_BUFFER_WRITEINTEGER,
 };
 
 // Capture type, used in LOP_CAPTURE
@@ -487,4 +763,24 @@ enum LuauCaptureType
     LCT_VAL = 0,
     LCT_REF,
     LCT_UPVAL,
+};
+
+// Proto flag bitmask, stored in Proto::flags
+enum LuauProtoFlag
+{
+    // used to tag main proto for modules with --!native
+    LPF_NATIVE_MODULE = 1 << 0,
+    // used to tag individual protos as not profitable to compile natively
+    LPF_NATIVE_COLD = 1 << 1,
+    // used to tag main proto for modules that have at least one function with native attribute
+    LPF_NATIVE_FUNCTION = 1 << 2,
+    // function can be inlined
+    LPF_INLINABLE = 1 << 3,
+    // top-level function uses export statements and returns the export table
+    LPF_USES_EXPORT = 1 << 4,
+};
+
+enum LuauFeedbackType
+{
+    LFT_CALLTARGET = 0
 };

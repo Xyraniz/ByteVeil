@@ -1,14 +1,15 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/TypeAttach.h"
 
-#include "Luau/Error.h"
+#include "Luau/Ast.h"
 #include "Luau/Module.h"
 #include "Luau/RecursionCounter.h"
 #include "Luau/Scope.h"
 #include "Luau/ToString.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypePack.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/TypeFunction.h"
 
 #include <string>
 
@@ -35,13 +36,27 @@ using SyntheticNames = std::unordered_map<const void*, char*>;
 namespace Luau
 {
 
-static const char* getName(Allocator* allocator, SyntheticNames* syntheticNames, const Unifiable::Generic& gen)
+static const char* getName(Allocator* allocator, SyntheticNames* syntheticNames, const GenericType& gen)
 {
     size_t s = syntheticNames->size();
     char*& n = (*syntheticNames)[&gen];
     if (!n)
     {
-        std::string str = gen.explicitName ? gen.name : generateName(s);
+        std::string str = gen.explicitName ? gen.name : generateName(s, /*isForGeneric*/ true);
+        n = static_cast<char*>(allocator->allocate(str.size() + 1));
+        strcpy(n, str.c_str());
+    }
+
+    return n;
+}
+
+static const char* getName(Allocator* allocator, SyntheticNames* syntheticNames, const GenericTypePack& gen)
+{
+    size_t s = syntheticNames->size();
+    char*& n = (*syntheticNames)[&gen];
+    if (!n)
+    {
+        std::string str = gen.explicitName ? gen.name : generateName(s, /*isForGeneric*/ true);
         n = static_cast<char*>(allocator->allocate(str.size() + 1));
         strcpy(n, str.c_str());
     }
@@ -75,36 +90,45 @@ public:
 
     AstTypePack* rehydrate(TypePackId tp);
 
-    AstType* operator()(const PrimitiveTypeVar& ptv)
+    AstType* operator()(const PrimitiveType& ptv)
     {
         switch (ptv.type)
         {
-        case PrimitiveTypeVar::NilType:
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("nil"));
-        case PrimitiveTypeVar::Boolean:
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("boolean"));
-        case PrimitiveTypeVar::Number:
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("number"));
-        case PrimitiveTypeVar::String:
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("string"));
-        case PrimitiveTypeVar::Thread:
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("thread"));
+        case PrimitiveType::NilType:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("nil"), std::nullopt, Location());
+        case PrimitiveType::Boolean:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("boolean"), std::nullopt, Location());
+        case PrimitiveType::Number:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("number"), std::nullopt, Location());
+        case PrimitiveType::Integer:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("integer"), std::nullopt, Location());
+        case PrimitiveType::String:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("string"), std::nullopt, Location());
+        case PrimitiveType::Thread:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("thread"), std::nullopt, Location());
+        case PrimitiveType::Buffer:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("buffer"), std::nullopt, Location());
+        case PrimitiveType::Function:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("function"), std::nullopt, Location());
+        case PrimitiveType::Table:
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("table"), std::nullopt, Location());
         default:
+            LUAU_ASSERT(false); // this should be unreachable.
             return nullptr;
         }
     }
 
-    AstType* operator()(const ConstrainedTypeVar& ctv)
+    AstType* operator()(const BlockedType& btv)
     {
-        AstArray<AstType*> types;
-        types.size = ctv.parts.size();
-        types.data = static_cast<AstType**>(allocator->allocate(sizeof(AstType*) * ctv.parts.size()));
-        for (size_t i = 0; i < ctv.parts.size(); ++i)
-            types.data[i] = Luau::visit(*this, ctv.parts[i]->ty);
-        return allocator->alloc<AstTypeIntersection>(Location(), types);
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("*blocked*"), std::nullopt, Location());
     }
 
-    AstType* operator()(const SingletonTypeVar& stv)
+    AstType* operator()(const PendingExpansionType& petv)
+    {
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("*pending-expansion*"), std::nullopt, Location());
+    }
+
+    AstType* operator()(const SingletonType& stv)
     {
         if (const BooleanSingleton* bs = get<BooleanSingleton>(&stv))
             return allocator->alloc<AstTypeSingletonBool>(Location(), bs->value);
@@ -119,11 +143,17 @@ public:
             return nullptr;
     }
 
-    AstType* operator()(const AnyTypeVar&)
+    AstType* operator()(const AnyType&)
     {
-        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("any"));
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("any"), std::nullopt, Location());
     }
-    AstType* operator()(const TableTypeVar& ttv)
+
+    AstType* operator()(const NoRefineType&)
+    {
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("*no-refine*"), std::nullopt, Location());
+    }
+
+    AstType* operator()(const TableType& ttv)
     {
         RecursionCounter counter(&count);
 
@@ -143,15 +173,17 @@ public:
                 parameters.data[i] = {{}, rehydrate(ttv.instantiatedTypePackParams[i])};
             }
 
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName(ttv.name->c_str()), parameters.size != 0, parameters);
+            return allocator->alloc<AstTypeReference>(
+                Location(), std::nullopt, AstName(ttv.name->c_str()), std::nullopt, Location(), parameters.size != 0, parameters
+            );
         }
 
         if (hasSeen(&ttv))
         {
             if (ttv.name)
-                return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName(ttv.name->c_str()));
+                return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName(ttv.name->c_str()), std::nullopt, Location());
             else
-                return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Cycle>"));
+                return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Cycle>"), std::nullopt, Location());
         }
 
         AstArray<AstTableProp> props;
@@ -164,10 +196,34 @@ public:
 
             char* name = allocateString(*allocator, propName);
 
-            props.data[idx].name = AstName(name);
-            props.data[idx].type = Luau::visit(*this, prop.type->ty);
-            props.data[idx].location = Location();
-            idx++;
+            if (prop.isShared())
+            {
+                props.data[idx].name = AstName(name);
+                props.data[idx].type = Luau::visit(*this, (*prop.readTy)->ty);
+                props.data[idx].access = AstTableAccess::ReadWrite;
+                props.data[idx].location = Location();
+                idx++;
+            }
+            else
+            {
+                if (prop.readTy)
+                {
+                    props.data[idx].name = AstName(name);
+                    props.data[idx].type = Luau::visit(*this, (*prop.readTy)->ty);
+                    props.data[idx].access = AstTableAccess::Read;
+                    props.data[idx].location = Location();
+                    idx++;
+                }
+
+                if (prop.writeTy)
+                {
+                    props.data[idx].name = AstName(name);
+                    props.data[idx].type = Luau::visit(*this, (*prop.writeTy)->ty);
+                    props.data[idx].access = AstTableAccess::Write;
+                    props.data[idx].location = Location();
+                    idx++;
+                }
+            }
         }
 
         AstTableIndexer* indexer = nullptr;
@@ -182,63 +238,97 @@ public:
         return allocator->alloc<AstTypeTable>(Location(), props, indexer);
     }
 
-    AstType* operator()(const MetatableTypeVar& mtv)
+    AstType* operator()(const MetatableType& mtv)
     {
         return Luau::visit(*this, mtv.table->ty);
     }
 
-    AstType* operator()(const ClassTypeVar& ctv)
+    AstType* operator()(const ExternType& etv)
     {
         RecursionCounter counter(&count);
 
-        char* name = allocateString(*allocator, ctv.name);
+        char* name = allocateString(*allocator, etv.name);
 
-        if (!options.expandClassProps || hasSeen(&ctv) || count > 1)
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName{name});
+        if (!options.expandExternTypeProps || hasSeen(&etv) || count > 1)
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName{name}, std::nullopt, Location());
 
         AstArray<AstTableProp> props;
-        props.size = ctv.props.size();
+        props.size = etv.props.size();
         props.data = static_cast<AstTableProp*>(allocator->allocate(sizeof(AstTableProp) * props.size));
 
         int idx = 0;
-        for (const auto& [propName, prop] : ctv.props)
+        for (const auto& [propName, prop] : etv.props)
         {
             char* name = allocateString(*allocator, propName);
 
-            props.data[idx].name = AstName{name};
-            props.data[idx].type = Luau::visit(*this, prop.type->ty);
-            props.data[idx].location = Location();
-            idx++;
+            if (prop.isShared())
+            {
+                props.data[idx].name = AstName(name);
+                props.data[idx].type = Luau::visit(*this, (*prop.readTy)->ty);
+                props.data[idx].access = AstTableAccess::ReadWrite;
+                props.data[idx].location = Location();
+                idx++;
+            }
+            else
+            {
+                if (prop.readTy)
+                {
+                    props.data[idx].name = AstName(name);
+                    props.data[idx].type = Luau::visit(*this, (*prop.readTy)->ty);
+                    props.data[idx].access = AstTableAccess::Read;
+                    props.data[idx].location = Location();
+                    idx++;
+                }
+
+                if (prop.writeTy)
+                {
+                    props.data[idx].name = AstName(name);
+                    props.data[idx].type = Luau::visit(*this, (*prop.writeTy)->ty);
+                    props.data[idx].access = AstTableAccess::Write;
+                    props.data[idx].location = Location();
+                    idx++;
+                }
+            }
         }
 
-        return allocator->alloc<AstTypeTable>(Location(), props);
+        AstTableIndexer* indexer = nullptr;
+        if (etv.indexer)
+        {
+            RecursionCounter counter(&count);
+
+            indexer = allocator->alloc<AstTableIndexer>();
+            indexer->indexType = Luau::visit(*this, etv.indexer->indexType->ty);
+            indexer->resultType = Luau::visit(*this, etv.indexer->indexResultType->ty);
+        }
+
+        return allocator->alloc<AstTypeTable>(Location(), props, indexer);
     }
 
-    AstType* operator()(const FunctionTypeVar& ftv)
+    AstType* operator()(const FunctionType& ftv)
     {
         RecursionCounter counter(&count);
 
         if (hasSeen(&ftv))
-            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Cycle>"));
+            return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Cycle>"), std::nullopt, Location());
 
-        AstArray<AstGenericType> generics;
+        AstArray<AstGenericType*> generics;
         generics.size = ftv.generics.size();
-        generics.data = static_cast<AstGenericType*>(allocator->allocate(sizeof(AstGenericType) * generics.size));
+        generics.data = static_cast<AstGenericType**>(allocator->allocate(sizeof(AstGenericType) * generics.size));
         size_t numGenerics = 0;
         for (auto it = ftv.generics.begin(); it != ftv.generics.end(); ++it)
         {
-            if (auto gtv = get<GenericTypeVar>(*it))
-                generics.data[numGenerics++] = {AstName(gtv->name.c_str()), Location(), nullptr};
+            if (auto gtv = get<GenericType>(follow(*it)))
+                generics.data[numGenerics++] = allocator->alloc<AstGenericType>(Location(), AstName(gtv->name.c_str()), nullptr);
         }
 
-        AstArray<AstGenericTypePack> genericPacks;
+        AstArray<AstGenericTypePack*> genericPacks;
         genericPacks.size = ftv.genericPacks.size();
-        genericPacks.data = static_cast<AstGenericTypePack*>(allocator->allocate(sizeof(AstGenericTypePack) * genericPacks.size));
+        genericPacks.data = static_cast<AstGenericTypePack**>(allocator->allocate(sizeof(AstGenericTypePack) * genericPacks.size));
         size_t numGenericPacks = 0;
         for (auto it = ftv.genericPacks.begin(); it != ftv.genericPacks.end(); ++it)
         {
-            if (auto gtv = get<GenericTypeVar>(*it))
-                genericPacks.data[numGenericPacks++] = {AstName(gtv->name.c_str()), Location(), nullptr};
+            if (auto gtv = get<GenericTypePack>(follow(*it)))
+                genericPacks.data[numGenericPacks++] = allocator->alloc<AstGenericTypePack>(Location(), AstName(gtv->name.c_str()), nullptr);
         }
 
         AstArray<AstType*> argTypes;
@@ -265,13 +355,13 @@ public:
             std::optional<AstArgumentName>* arg = &argNames.data[i++];
 
             if (el)
-                new (arg) std::optional<AstArgumentName>(AstArgumentName(AstName(el->name.c_str()), el->location));
+                new (arg) std::optional<AstArgumentName>(AstArgumentName(AstName(el->name.c_str()), Location()));
             else
                 new (arg) std::optional<AstArgumentName>();
         }
 
         AstArray<AstType*> returnTypes;
-        const auto& [retVector, retTail] = flatten(ftv.retType);
+        const auto& [retVector, retTail] = flatten(ftv.retTypes);
         returnTypes.size = retVector.size();
         returnTypes.data = static_cast<AstType**>(allocator->allocate(sizeof(AstType*) * returnTypes.size));
         for (size_t i = 0; i < returnTypes.size; ++i)
@@ -285,26 +375,30 @@ public:
         if (retTail)
             retTailAnnotation = rehydrate(*retTail);
 
+        auto returnAnnotation = allocator->alloc<AstTypePackExplicit>(Location(), AstTypeList{returnTypes, retTailAnnotation});
         return allocator->alloc<AstTypeFunction>(
-            Location(), generics, genericPacks, AstTypeList{argTypes, argTailAnnotation}, argNames, AstTypeList{returnTypes, retTailAnnotation});
+            Location(), generics, genericPacks, AstTypeList{argTypes, argTailAnnotation}, argNames, returnAnnotation
+        );
     }
-    AstType* operator()(const Unifiable::Error&)
+    AstType* operator()(const ErrorType&)
     {
-        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("Unifiable<Error>"));
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("Unifiable<Error>"), std::nullopt, Location());
     }
-    AstType* operator()(const GenericTypeVar& gtv)
+    AstType* operator()(const GenericType& gtv)
     {
-        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName(getName(allocator, syntheticNames, gtv)));
+        return allocator->alloc<AstTypeReference>(
+            Location(), std::nullopt, AstName(getName(allocator, syntheticNames, gtv)), std::nullopt, Location()
+        );
     }
     AstType* operator()(const Unifiable::Bound<TypeId>& bound)
     {
         return Luau::visit(*this, bound.boundTo->ty);
     }
-    AstType* operator()(const FreeTypeVar& ftv)
+    AstType* operator()(const FreeType& ft)
     {
-        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("free"));
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("free"), std::nullopt, Location());
     }
-    AstType* operator()(const UnionTypeVar& uv)
+    AstType* operator()(const UnionType& uv)
     {
         AstArray<AstType*> unionTypes;
         unionTypes.size = uv.options.size();
@@ -315,7 +409,7 @@ public:
         }
         return allocator->alloc<AstTypeUnion>(Location(), unionTypes);
     }
-    AstType* operator()(const IntersectionTypeVar& uv)
+    AstType* operator()(const IntersectionType& uv)
     {
         AstArray<AstType*> intersectionTypes;
         intersectionTypes.size = uv.parts.size();
@@ -326,9 +420,33 @@ public:
         }
         return allocator->alloc<AstTypeIntersection>(Location(), intersectionTypes);
     }
-    AstType* operator()(const LazyTypeVar& ltv)
+    AstType* operator()(const LazyType& ltv)
     {
-        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Lazy?>"));
+        if (TypeId unwrapped = ltv.unwrapped.load())
+            return Luau::visit(*this, unwrapped->ty);
+
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("<Lazy?>"), std::nullopt, Location());
+    }
+    AstType* operator()(const UnknownType& ttv)
+    {
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName{"unknown"}, std::nullopt, Location());
+    }
+    AstType* operator()(const NeverType& ttv)
+    {
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName{"never"}, std::nullopt, Location());
+    }
+    AstType* operator()(const NegationType& ntv)
+    {
+        AstArray<AstTypeOrPack> params;
+        params.size = 1;
+        params.data = static_cast<AstTypeOrPack*>(allocator->allocate(sizeof(AstTypeOrPack)));
+        params.data[0] = AstTypeOrPack{Luau::visit(*this, ntv.ty->ty), nullptr};
+
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName("negate"), std::nullopt, Location(), true, params);
+    }
+    AstType* operator()(const TypeFunctionInstanceType& tfit)
+    {
+        return allocator->alloc<AstTypeReference>(Location(), std::nullopt, AstName{tfit.function->name.c_str()}, std::nullopt, Location());
     }
 
 private:
@@ -353,6 +471,11 @@ public:
     AstTypePack* operator()(const BoundTypePack& btp) const
     {
         return Luau::visit(*this, btp.boundTo->ty);
+    }
+
+    AstTypePack* operator()(const BlockedTypePack& btp) const
+    {
+        return allocator->alloc<AstTypePackGeneric>(Location(), AstName("*blocked*"));
     }
 
     AstTypePack* operator()(const TypePack& tp) const
@@ -390,9 +513,14 @@ public:
         return allocator->alloc<AstTypePackGeneric>(Location(), AstName("free"));
     }
 
-    AstTypePack* operator()(const Unifiable::Error&) const
+    AstTypePack* operator()(const ErrorTypePack&) const
     {
         return allocator->alloc<AstTypePackGeneric>(Location(), AstName("Unifiable<Error>"));
+    }
+
+    AstTypePack* operator()(const TypeFunctionInstanceTypePack& tfitp) const
+    {
+        return allocator->alloc<AstTypePackGeneric>(Location(), AstName(tfitp.function->name.c_str()));
     }
 
 private:
@@ -455,7 +583,7 @@ public:
         return result;
     }
 
-    virtual bool visit(AstStatLocal* al) override
+    bool visit(AstStatLocal* al) override
     {
         for (size_t i = 0; i < al->vars.size; ++i)
         {
@@ -469,31 +597,34 @@ public:
         AstType* annotation = local->annotation;
         if (!annotation)
         {
-            if (auto result = getScope(local->location)->lookup(local))
-                local->annotation = typeAst(*result);
+            if (auto scope = getScope(local->location))
+            {
+                if (auto result = scope->lookup(local))
+                    local->annotation = typeAst(*result);
+            }
         }
         return true;
     }
 
-    virtual bool visit(AstExprLocal* al) override
+    bool visit(AstExprLocal* al) override
     {
         return visitLocal(al->local);
     }
 
-    virtual bool visit(AstStatFor* stat) override
+    bool visit(AstStatFor* stat) override
     {
         visitLocal(stat->var);
         return true;
     }
 
-    virtual bool visit(AstStatForIn* stat) override
+    bool visit(AstStatForIn* stat) override
     {
         for (size_t i = 0; i < stat->vars.size; ++i)
             visitLocal(stat->vars.data[i]);
         return true;
     }
 
-    virtual bool visit(AstExprFunction* fn) override
+    bool visit(AstExprFunction* fn) override
     {
         // TODO: add generics if the inferred type of the function is generic CLI-39908
         for (size_t i = 0; i < fn->args.size; ++i)
@@ -514,7 +645,7 @@ public:
                 if (tail)
                     variadicAnnotation = TypeRehydrationVisitor(allocator, &syntheticNames).rehydrate(*tail);
 
-                fn->returnAnnotation = AstTypeList{typeAstPack(ret), variadicAnnotation};
+                fn->returnAnnotation = allocator->alloc<AstTypePackExplicit>(Location(), AstTypeList{typeAstPack(ret), variadicAnnotation});
             }
         }
 

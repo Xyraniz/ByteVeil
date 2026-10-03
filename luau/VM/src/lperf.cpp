@@ -9,12 +9,17 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <Windows.h>
+#include <windows.h>
 #endif
 
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#endif
+
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
 #endif
 
 #include <time.h>
@@ -29,8 +34,10 @@ static double clock_period()
     mach_timebase_info_data_t result = {};
     mach_timebase_info(&result);
     return double(result.numer) / double(result.denom) * 1e-9;
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     return 1e-9;
+#elif defined(__EMSCRIPTEN__)
+    return 1e-3;
 #else
     return 1.0 / double(CLOCKS_PER_SEC);
 #endif
@@ -44,10 +51,12 @@ static double clock_timestamp()
     return double(result.QuadPart);
 #elif defined(__APPLE__)
     return double(mach_absolute_time());
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__FreeBSD__)
     timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return now.tv_sec * 1e9 + now.tv_nsec;
+#elif defined(__EMSCRIPTEN__)
+    return emscripten_get_now();
 #else
     return double(clock());
 #endif

@@ -5,8 +5,11 @@
 #include "lobject.h"
 #include "lstate.h"
 
-/* string size limit */
+// string size limit
 #define MAXSSIZE (1 << 30)
+
+// string atoms are not defined by default; the storage is 16-bit integer
+#define ATOM_UNDEF -32768
 
 #define sizestring(len) (offsetof(TString, data) + len + 1)
 
@@ -14,6 +17,12 @@
 #define luaS_newliteral(L, s) (luaS_newlstr(L, "" s, (sizeof(s) / sizeof(char)) - 1))
 
 #define luaS_fix(s) l_setbit((s)->marked, FIXEDBIT)
+
+#define luaS_updateatom(L, ts) \
+    { \
+        if (ts->atom == ATOM_UNDEF) \
+            ts->atom = L->global->cb.useratom ? L->global->cb.useratom(L, ts->data, ts->len) : -1; \
+    }
 
 LUAI_FUNC unsigned int luaS_hash(const char* str, size_t len);
 

@@ -1,13 +1,19 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Common.h"
 #include "Luau/Location.h"
+#include "Luau/Variant.h"
 
+#include <iterator>
 #include <optional>
 #include <functional>
+#include <string>
 
 #include <string.h>
-#include <cstdint>
+#include <stdint.h>
+
+LUAU_FASTFLAG(DebugLuauUserDefinedClasses)
 
 namespace Luau
 {
@@ -52,242 +58,14 @@ struct AstName
     }
 };
 
-class AstVisitor
-{
-public:
-    virtual ~AstVisitor() {}
-
-    virtual bool visit(class AstNode*)
-    {
-        return true;
-    }
-
-    virtual bool visit(class AstExpr* node)
-    {
-        return visit((class AstNode*)node);
-    }
-
-    virtual bool visit(class AstExprGroup* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprConstantNil* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprConstantBool* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprConstantNumber* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprConstantString* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprLocal* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprGlobal* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprVarargs* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprCall* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprIndexName* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprIndexExpr* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprFunction* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprTable* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprUnary* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprBinary* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprTypeAssertion* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprIfElse* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-    virtual bool visit(class AstExprError* node)
-    {
-        return visit((class AstExpr*)node);
-    }
-
-    virtual bool visit(class AstStat* node)
-    {
-        return visit((class AstNode*)node);
-    }
-
-    virtual bool visit(class AstStatBlock* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatIf* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatWhile* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatRepeat* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatBreak* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatContinue* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatReturn* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatExpr* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatLocal* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatFor* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatForIn* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatAssign* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatCompoundAssign* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatFunction* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatLocalFunction* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatTypeAlias* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatDeclareFunction* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatDeclareGlobal* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatDeclareClass* node)
-    {
-        return visit((class AstStat*)node);
-    }
-    virtual bool visit(class AstStatError* node)
-    {
-        return visit((class AstStat*)node);
-    }
-
-    // By default visiting type annotations is disabled; override this in your visitor if you need to!
-    virtual bool visit(class AstType* node)
-    {
-        return false;
-    }
-
-    virtual bool visit(class AstTypeReference* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeTable* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeFunction* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeTypeof* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeUnion* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeIntersection* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeSingletonBool* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeSingletonString* node)
-    {
-        return visit((class AstType*)node);
-    }
-    virtual bool visit(class AstTypeError* node)
-    {
-        return visit((class AstType*)node);
-    }
-
-    virtual bool visit(class AstTypePack* node)
-    {
-        return false;
-    }
-    virtual bool visit(class AstTypePackExplicit* node)
-    {
-        return visit((class AstTypePack*)node);
-    }
-    virtual bool visit(class AstTypePackVariadic* node)
-    {
-        return visit((class AstTypePack*)node);
-    }
-    virtual bool visit(class AstTypePackGeneric* node)
-    {
-        return visit((class AstTypePack*)node);
-    }
-};
-
 class AstType;
+class AstVisitor;
+class AstStat;
+class AstStatBlock;
+class AstExpr;
+class AstTypePack;
+class AstAttr;
+class AstExprTable;
 
 struct AstLocal
 {
@@ -296,15 +74,27 @@ struct AstLocal
     AstLocal* shadow;
     size_t functionDepth;
     size_t loopDepth;
+    bool isConst;
+    // exported is only a property set after construction
+    bool isExported = false;
 
     AstType* annotation;
 
-    AstLocal(const AstName& name, const Location& location, AstLocal* shadow, size_t functionDepth, size_t loopDepth, AstType* annotation)
+    AstLocal(
+        const AstName& name,
+        const Location& location,
+        AstLocal* shadow,
+        size_t functionDepth,
+        size_t loopDepth,
+        AstType* annotation,
+        bool isConst = false
+    )
         : name(name)
         , location(location)
         , shadow(shadow)
         , functionDepth(functionDepth)
         , loopDepth(loopDepth)
+        , isConst(isConst)
         , annotation(annotation)
     {
     }
@@ -313,16 +103,27 @@ struct AstLocal
 template<typename T>
 struct AstArray
 {
-    T* data;
-    size_t size;
+    T* data = nullptr;
+    size_t size = 0;
 
     const T* begin() const
     {
         return data;
     }
+
     const T* end() const
     {
         return data + size;
+    }
+
+    std::reverse_iterator<const T*> rbegin() const
+    {
+        return std::make_reverse_iterator(end());
+    }
+
+    std::reverse_iterator<const T*> rend() const
+    {
+        return std::make_reverse_iterator(begin());
     }
 };
 
@@ -333,21 +134,14 @@ struct AstTypeList
     AstTypePack* tailType = nullptr;
 };
 
+// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
+struct AstTypeOrPack
+{
+    AstType* type = nullptr;
+    AstTypePack* typePack = nullptr;
+};
+
 using AstArgumentName = std::pair<AstName, Location>; // TODO: remove and replace when we get a common struct for this pair instead of AstName
-
-struct AstGenericType
-{
-    AstName name;
-    Location location;
-    AstType* defaultValue = nullptr;
-};
-
-struct AstGenericTypePack
-{
-    AstName name;
-    Location location;
-    AstTypePack* defaultValue = nullptr;
-};
 
 extern int gAstRttiIndex;
 
@@ -389,6 +183,10 @@ public:
     {
         return nullptr;
     }
+    virtual AstAttr* asAttr()
+    {
+        return nullptr;
+    }
 
     template<typename T>
     bool is() const
@@ -408,6 +206,44 @@ public:
 
     const int classIndex;
     Location location;
+};
+
+class AstAttr : public AstNode
+{
+public:
+    LUAU_RTTI(AstAttr)
+
+    enum class Type
+    {
+        Checked,
+        Native,
+        Deprecated,
+        DebugNoinline,
+        Unknown
+    };
+
+    struct DeprecatedInfo
+    {
+        bool deprecated = false;
+        std::optional<std::string> use;
+        std::optional<std::string> reason;
+    };
+
+    AstAttr(const Location& location, Type type, AstArray<AstExpr*> args);
+    AstAttr(const Location& location, Type type, AstArray<AstExpr*> args, AstName name);
+
+    AstAttr* asAttr() override
+    {
+        return this;
+    }
+
+    void visit(AstVisitor* visitor) override;
+
+    DeprecatedInfo deprecatedInfo() const;
+
+    Type type;
+    AstArray<AstExpr*> args;
+    AstName name;
 };
 
 class AstExpr : public AstNode
@@ -439,6 +275,32 @@ public:
     }
 
     bool hasSemicolon;
+};
+
+class AstGenericType : public AstNode
+{
+public:
+    LUAU_RTTI(AstGenericType)
+
+    explicit AstGenericType(const Location& location, AstName name, AstType* defaultValue = nullptr);
+
+    void visit(AstVisitor* visitor) override;
+
+    AstName name;
+    AstType* defaultValue = nullptr;
+};
+
+class AstGenericTypePack : public AstNode
+{
+public:
+    LUAU_RTTI(AstGenericTypePack)
+
+    explicit AstGenericTypePack(const Location& location, AstName name, AstTypePack* defaultValue = nullptr);
+
+    void visit(AstVisitor* visitor) override;
+
+    AstName name;
+    AstTypePack* defaultValue = nullptr;
 };
 
 class AstExprGroup : public AstExpr
@@ -475,28 +337,79 @@ public:
     bool value;
 };
 
+enum class ConstantNumberParseResult
+{
+    Ok,
+    Imprecise,
+    Malformed,
+    BinOverflow,
+    HexOverflow,
+    IntOverflow,
+};
+
 class AstExprConstantNumber : public AstExpr
 {
 public:
     LUAU_RTTI(AstExprConstantNumber)
 
-    AstExprConstantNumber(const Location& location, double value);
+    AstExprConstantNumber(const Location& location, double value, ConstantNumberParseResult parseResult = ConstantNumberParseResult::Ok);
 
     void visit(AstVisitor* visitor) override;
 
     double value;
+    ConstantNumberParseResult parseResult;
 };
 
+class AstExprConstantInteger : public AstExpr
+{
+public:
+    LUAU_RTTI(AstExprConstantInteger)
+
+    AstExprConstantInteger(const Location& location, int64_t value, ConstantNumberParseResult parseResult = ConstantNumberParseResult::Ok);
+
+    void visit(AstVisitor* visitor) override;
+
+    int64_t value;
+    ConstantNumberParseResult parseResult;
+};
 class AstExprConstantString : public AstExpr
 {
 public:
     LUAU_RTTI(AstExprConstantString)
 
-    AstExprConstantString(const Location& location, const AstArray<char>& value);
+    enum class QuoteStyle
+    {
+        // A string created using double quotes or an interpolated string,
+        // as in:
+        //
+        //  "foo", `My name is {protagonist}! / And I'm {antagonist}!`
+        //
+        QuotedSimple,
+        // A string created using single quotes, as in:
+        //
+        //  'bar'
+        //
+        QuotedSingle,
+        // A string created using `[[ ... ]]` as in:
+        //
+        //   [[ Gee, this sure is a long string.
+        //   it even has a new line in it! ]]
+        //
+        QuotedRaw,
+        // A "string" in the context of a table literal, as in:
+        //
+        //  { foo = 42 } -- `foo` here is a "constant string"
+        //
+        Unquoted,
+    };
+
+    AstExprConstantString(const Location& location, const AstArray<char>& value, QuoteStyle quoteStyle);
 
     void visit(AstVisitor* visitor) override;
+    bool isQuoted() const;
 
     AstArray<char> value;
+    QuoteStyle quoteStyle;
 };
 
 class AstExprLocal : public AstExpr
@@ -539,11 +452,22 @@ class AstExprCall : public AstExpr
 public:
     LUAU_RTTI(AstExprCall)
 
-    AstExprCall(const Location& location, AstExpr* func, const AstArray<AstExpr*>& args, bool self, const Location& argLocation);
+    AstExprCall(
+        const Location& location,
+        AstExpr* func,
+        const AstArray<AstExpr*>& args,
+        bool self,
+        const AstArray<AstTypeOrPack>& explicitTypes,
+        const Location& argLocation
+    );
 
     void visit(AstVisitor* visitor) override;
 
     AstExpr* func;
+    // These will only be filled in specifically `t:f<<A, B>>()`.
+    // In `f<<A, B>>()`, this is parsed as `f<<A, B>>` as an expression,
+    // which is then called.
+    AstArray<AstTypeOrPack> typeArguments;
     AstArray<AstExpr*> args;
     bool self;
     Location argLocation;
@@ -555,7 +479,13 @@ public:
     LUAU_RTTI(AstExprIndexName)
 
     AstExprIndexName(
-        const Location& location, AstExpr* expr, const AstName& index, const Location& indexLocation, const Position& opPosition, char op);
+        const Location& location,
+        AstExpr* expr,
+        const AstName& index,
+        const Location& indexLocation,
+        const Position& opPosition,
+        char op
+    );
 
     void visit(AstVisitor* visitor) override;
 
@@ -584,18 +514,35 @@ class AstExprFunction : public AstExpr
 public:
     LUAU_RTTI(AstExprFunction)
 
-    AstExprFunction(const Location& location, const AstArray<AstGenericType>& generics, const AstArray<AstGenericTypePack>& genericPacks,
-        AstLocal* self, const AstArray<AstLocal*>& args, std::optional<Location> vararg, AstStatBlock* body, size_t functionDepth,
-        const AstName& debugname, std::optional<AstTypeList> returnAnnotation = {}, AstTypePack* varargAnnotation = nullptr, bool hasEnd = false,
-        std::optional<Location> argLocation = std::nullopt);
+    AstExprFunction(
+        const Location& location,
+        const AstArray<AstAttr*>& attributes,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        AstLocal* self,
+        const AstArray<AstLocal*>& args,
+        bool vararg,
+        const Location& varargLocation,
+        AstStatBlock* body,
+        size_t functionDepth,
+        const AstName& debugname,
+        AstTypePack* returnAnnotation,
+        AstTypePack* varargAnnotation = nullptr,
+        const std::optional<Location>& argLocation = std::nullopt
+    );
 
     void visit(AstVisitor* visitor) override;
 
-    AstArray<AstGenericType> generics;
-    AstArray<AstGenericTypePack> genericPacks;
+    bool hasNativeAttribute() const;
+    bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
+
+    AstArray<AstAttr*> attributes;
+    AstArray<AstGenericType*> generics;
+    AstArray<AstGenericTypePack*> genericPacks;
     AstLocal* self;
     AstArray<AstLocal*> args;
-    std::optional<AstTypeList> returnAnnotation;
+    AstTypePack* returnAnnotation = nullptr;
     bool vararg = false;
     Location varargLocation;
     AstTypePack* varargAnnotation;
@@ -606,7 +553,6 @@ public:
 
     AstName debugname;
 
-    bool hasEnd = false;
     std::optional<Location> argLocation;
 };
 
@@ -617,7 +563,7 @@ public:
 
     struct Item
     {
-        enum Kind
+        enum class Kind
         {
             List,    // foo, in which case key is a nullptr
             Record,  // foo=bar, in which case key is a AstExprConstantString
@@ -634,6 +580,8 @@ public:
 
     void visit(AstVisitor* visitor) override;
 
+    std::optional<AstExpr*> getRecord(const char* key) const;
+
     AstArray<Item> items;
 };
 
@@ -642,7 +590,7 @@ class AstExprUnary : public AstExpr
 public:
     LUAU_RTTI(AstExprUnary)
 
-    enum Op
+    enum class Op
     {
         Not,
         Minus,
@@ -670,6 +618,7 @@ public:
         Sub,
         Mul,
         Div,
+        FloorDiv,
         Mod,
         Pow,
         Concat,
@@ -680,7 +629,9 @@ public:
         CompareGt,
         CompareGe,
         And,
-        Or
+        Or,
+
+        Op__Count
     };
 
     AstExprBinary(const Location& location, Op op, AstExpr* left, AstExpr* right);
@@ -714,6 +665,19 @@ public:
 
     AstExprIfElse(const Location& location, AstExpr* condition, bool hasThen, AstExpr* trueExpr, bool hasElse, AstExpr* falseExpr);
 
+    AstExprIfElse(
+        const Location& location,
+        AstExpr* condition,
+        bool hasThen,
+        AstExpr* trueExpr,
+        bool hasElse,
+        AstExpr* falseExpr,
+        AstLocal* conditionLocal,
+        bool conditionIsConst,
+        const std::optional<Location>& conditionKeywordLocation,
+        const std::optional<Location>& conditionEqualsLocation
+    );
+
     void visit(AstVisitor* visitor) override;
 
     AstExpr* condition;
@@ -721,6 +685,44 @@ public:
     AstExpr* trueExpr;
     bool hasElse;
     AstExpr* falseExpr;
+
+    // Active for 'if local' and 'if const' expressions; conditionLocal is bound to `condition` and in scope for trueExpr only
+    AstLocal* conditionLocal = nullptr;
+    bool conditionIsConst = false;
+    std::optional<Location> conditionKeywordLocation;
+
+    // Location of the `=` in an `if local`/`if const` binding
+    std::optional<Location> conditionEqualsLocation;
+};
+
+class AstExprInterpString : public AstExpr
+{
+public:
+    LUAU_RTTI(AstExprInterpString)
+
+    AstExprInterpString(const Location& location, const AstArray<AstArray<char>>& strings, const AstArray<AstExpr*>& expressions);
+
+    void visit(AstVisitor* visitor) override;
+
+    /// An interpolated string such as `foo{bar}baz` is represented as
+    /// an array of strings for "foo" and "bar", and an array of expressions for "baz".
+    /// `strings` will always have one more element than `expressions`.
+    AstArray<AstArray<char>> strings;
+    AstArray<AstExpr*> expressions;
+};
+
+// f<<T>>
+class AstExprInstantiate : public AstExpr
+{
+public:
+    LUAU_RTTI(AstExprInstantiate)
+
+    AstExprInstantiate(const Location& location, AstExpr* expr, AstArray<AstTypeOrPack> types);
+
+    void visit(AstVisitor* visitor) override;
+
+    AstExpr* expr;
+    AstArray<AstTypeOrPack> typeArguments;
 };
 
 class AstStatBlock : public AstStat
@@ -728,11 +730,23 @@ class AstStatBlock : public AstStat
 public:
     LUAU_RTTI(AstStatBlock)
 
-    AstStatBlock(const Location& location, const AstArray<AstStat*>& body);
+    AstStatBlock(const Location& location, const AstArray<AstStat*>& body, bool hasEnd = true);
 
     void visit(AstVisitor* visitor) override;
 
     AstArray<AstStat*> body;
+
+    /* Indicates whether or not this block has been terminated in a
+     * syntactically valid way.
+     *
+     * This is usually but not always done with the 'end' keyword.  AstStatIf
+     * and AstStatRepeat are the two main exceptions to this.
+     *
+     * The 'then' clause of an if statement can properly be closed by the
+     * keywords 'else' or 'elseif'.  A 'repeat' loop's body is closed with the
+     * 'until' keyword.
+     */
+    bool hasEnd = false;
 };
 
 class AstStatIf : public AstStat
@@ -740,8 +754,27 @@ class AstStatIf : public AstStat
 public:
     LUAU_RTTI(AstStatIf)
 
-    AstStatIf(const Location& location, AstExpr* condition, AstStatBlock* thenbody, AstStat* elsebody, const std::optional<Location>& thenLocation,
-        const std::optional<Location>& elseLocation, bool hasEnd);
+    AstStatIf(
+        const Location& location,
+        AstExpr* condition,
+        AstStatBlock* thenbody,
+        AstStat* elsebody,
+        const std::optional<Location>& thenLocation,
+        const std::optional<Location>& elseLocation
+    );
+
+    AstStatIf(
+        const Location& location,
+        AstExpr* condition,
+        AstStatBlock* thenbody,
+        AstStat* elsebody,
+        const std::optional<Location>& thenLocation,
+        const std::optional<Location>& elseLocation,
+        AstLocal* conditionLocal,
+        bool conditionIsConst,
+        const std::optional<Location>& conditionKeywordLocation,
+        const std::optional<Location>& conditionEqualsLocation
+    );
 
     void visit(AstVisitor* visitor) override;
 
@@ -754,7 +787,13 @@ public:
     // Active for 'elseif' as well
     std::optional<Location> elseLocation;
 
-    bool hasEnd = false;
+    // Active for 'if local' and 'if const' statements
+    AstLocal* conditionLocal = nullptr;
+    bool conditionIsConst = false;
+    std::optional<Location> conditionKeywordLocation;
+
+    // Location of the `=` in an `if local`/`if const` binding
+    std::optional<Location> conditionEqualsLocation;
 };
 
 class AstStatWhile : public AstStat
@@ -762,7 +801,7 @@ class AstStatWhile : public AstStat
 public:
     LUAU_RTTI(AstStatWhile)
 
-    AstStatWhile(const Location& location, AstExpr* condition, AstStatBlock* body, bool hasDo, const Location& doLocation, bool hasEnd);
+    AstStatWhile(const Location& location, AstExpr* condition, AstStatBlock* body, bool hasDo, const Location& doLocation);
 
     void visit(AstVisitor* visitor) override;
 
@@ -771,8 +810,6 @@ public:
 
     bool hasDo = false;
     Location doLocation;
-
-    bool hasEnd = false;
 };
 
 class AstStatRepeat : public AstStat
@@ -780,14 +817,14 @@ class AstStatRepeat : public AstStat
 public:
     LUAU_RTTI(AstStatRepeat)
 
-    AstStatRepeat(const Location& location, AstExpr* condition, AstStatBlock* body, bool hasUntil);
+    AstStatRepeat(const Location& location, AstExpr* condition, AstStatBlock* body, bool DEPRECATED_hasUntil);
 
     void visit(AstVisitor* visitor) override;
 
     AstExpr* condition;
     AstStatBlock* body;
 
-    bool hasUntil = false;
+    bool DEPRECATED_hasUntil = false;
 };
 
 class AstStatBreak : public AstStat
@@ -839,14 +876,24 @@ class AstStatLocal : public AstStat
 public:
     LUAU_RTTI(AstStatLocal)
 
-    AstStatLocal(const Location& location, const AstArray<AstLocal*>& vars, const AstArray<AstExpr*>& values,
-        const std::optional<Location>& equalsSignLocation);
+    AstStatLocal(
+        const Location& location,
+        const AstArray<AstLocal*>& vars,
+        const AstArray<AstExpr*>& values,
+        const std::optional<Location>& equalsSignLocation,
+        bool isConst = false
+    );
 
     void visit(AstVisitor* visitor) override;
 
     AstArray<AstLocal*> vars;
     AstArray<AstExpr*> values;
 
+    bool isConst = false;
+    bool isExported = false;
+
+    // if the StatLocal is being exported, this is the location of `const` or `local`
+    std::optional<Location> keywordLocation;
     std::optional<Location> equalsSignLocation;
 };
 
@@ -855,8 +902,16 @@ class AstStatFor : public AstStat
 public:
     LUAU_RTTI(AstStatFor)
 
-    AstStatFor(const Location& location, AstLocal* var, AstExpr* from, AstExpr* to, AstExpr* step, AstStatBlock* body, bool hasDo,
-        const Location& doLocation, bool hasEnd);
+    AstStatFor(
+        const Location& location,
+        AstLocal* var,
+        AstExpr* from,
+        AstExpr* to,
+        AstExpr* step,
+        AstStatBlock* body,
+        bool hasDo,
+        const Location& doLocation
+    );
 
     void visit(AstVisitor* visitor) override;
 
@@ -868,8 +923,6 @@ public:
 
     bool hasDo = false;
     Location doLocation;
-
-    bool hasEnd = false;
 };
 
 class AstStatForIn : public AstStat
@@ -877,8 +930,16 @@ class AstStatForIn : public AstStat
 public:
     LUAU_RTTI(AstStatForIn)
 
-    AstStatForIn(const Location& location, const AstArray<AstLocal*>& vars, const AstArray<AstExpr*>& values, AstStatBlock* body, bool hasIn,
-        const Location& inLocation, bool hasDo, const Location& doLocation, bool hasEnd);
+    AstStatForIn(
+        const Location& location,
+        const AstArray<AstLocal*>& vars,
+        const AstArray<AstExpr*>& values,
+        AstStatBlock* body,
+        bool hasIn,
+        const Location& inLocation,
+        bool hasDo,
+        const Location& doLocation
+    );
 
     void visit(AstVisitor* visitor) override;
 
@@ -891,8 +952,6 @@ public:
 
     bool hasDo = false;
     Location doLocation;
-
-    bool hasEnd = false;
 };
 
 class AstStatAssign : public AstStat
@@ -940,12 +999,15 @@ class AstStatLocalFunction : public AstStat
 public:
     LUAU_RTTI(AstStatLocalFunction)
 
-    AstStatLocalFunction(const Location& location, AstLocal* name, AstExprFunction* func);
+    AstStatLocalFunction(const Location& location, AstLocal* name, AstExprFunction* func, bool isConst, Position constKeywordBegin);
 
     void visit(AstVisitor* visitor) override;
 
     AstLocal* name;
     AstExprFunction* func;
+    bool isConst;
+    // Position of the `const` keyword; Position::missing() when isConst is false.
+    Position constKeywordBegin;
 };
 
 class AstStatTypeAlias : public AstStat
@@ -953,16 +1015,47 @@ class AstStatTypeAlias : public AstStat
 public:
     LUAU_RTTI(AstStatTypeAlias)
 
-    AstStatTypeAlias(const Location& location, const AstName& name, const AstArray<AstGenericType>& generics,
-        const AstArray<AstGenericTypePack>& genericPacks, AstType* type, bool exported);
+    AstStatTypeAlias(
+        const Location& location,
+        const AstName& name,
+        const Location& nameLocation,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        AstType* type,
+        bool exported
+    );
 
     void visit(AstVisitor* visitor) override;
 
     AstName name;
-    AstArray<AstGenericType> generics;
-    AstArray<AstGenericTypePack> genericPacks;
+    Location nameLocation;
+    AstArray<AstGenericType*> generics;
+    AstArray<AstGenericTypePack*> genericPacks;
     AstType* type;
     bool exported;
+};
+
+class AstStatTypeFunction : public AstStat
+{
+public:
+    LUAU_RTTI(AstStatTypeFunction);
+
+    AstStatTypeFunction(
+        const Location& location,
+        const AstName& name,
+        const Location& nameLocation,
+        AstExprFunction* body,
+        bool exported,
+        bool hasErrors
+    );
+
+    void visit(AstVisitor* visitor) override;
+
+    AstName name;
+    Location nameLocation;
+    AstExprFunction* body = nullptr;
+    bool exported = false;
+    bool hasErrors = false;
 };
 
 class AstStatDeclareGlobal : public AstStat
@@ -970,11 +1063,12 @@ class AstStatDeclareGlobal : public AstStat
 public:
     LUAU_RTTI(AstStatDeclareGlobal)
 
-    AstStatDeclareGlobal(const Location& location, const AstName& name, AstType* type);
+    AstStatDeclareGlobal(const Location& location, const AstName& name, const Location& nameLocation, AstType* type);
 
     void visit(AstVisitor* visitor) override;
 
     AstName name;
+    Location nameLocation;
     AstType* type;
 };
 
@@ -983,40 +1077,134 @@ class AstStatDeclareFunction : public AstStat
 public:
     LUAU_RTTI(AstStatDeclareFunction)
 
-    AstStatDeclareFunction(const Location& location, const AstName& name, const AstArray<AstGenericType>& generics,
-        const AstArray<AstGenericTypePack>& genericPacks, const AstTypeList& params, const AstArray<AstArgumentName>& paramNames,
-        const AstTypeList& retTypes);
+    AstStatDeclareFunction(
+        const Location& location,
+        const AstName& name,
+        const Location& nameLocation,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        const AstTypeList& params,
+        const AstArray<AstArgumentName>& paramNames,
+        bool vararg,
+        const Location& varargLocation,
+        AstTypePack* retTypes
+    );
+
+    AstStatDeclareFunction(
+        const Location& location,
+        const AstArray<AstAttr*>& attributes,
+        const AstName& name,
+        const Location& nameLocation,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        const AstTypeList& params,
+        const AstArray<AstArgumentName>& paramNames,
+        bool vararg,
+        const Location& varargLocation,
+        AstTypePack* retTypes
+    );
 
     void visit(AstVisitor* visitor) override;
 
+    bool isCheckedFunction() const;
+    bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
+
+    AstArray<AstAttr*> attributes;
     AstName name;
-    AstArray<AstGenericType> generics;
-    AstArray<AstGenericTypePack> genericPacks;
+    Location nameLocation;
+    AstArray<AstGenericType*> generics;
+    AstArray<AstGenericTypePack*> genericPacks;
     AstTypeList params;
     AstArray<AstArgumentName> paramNames;
-    AstTypeList retTypes;
+    bool vararg = false;
+    Location varargLocation;
+    AstTypePack* retTypes;
 };
 
-struct AstDeclaredClassProp
+enum class AstTableAccess
+{
+    Read = 0b01,
+    Write = 0b10,
+    ReadWrite = 0b11,
+};
+
+struct AstDeclaredExternTypeProperty
 {
     AstName name;
+    Location nameLocation;
     AstType* ty = nullptr;
     bool isMethod = false;
+    Location location;
+    AstTableAccess access = AstTableAccess::ReadWrite;
 };
 
-class AstStatDeclareClass : public AstStat
+struct AstClassProperty
+{
+    Location qualifierLocation;
+    AstName name;
+    Location nameLocation;
+    std::optional<Location> typeColonLocation = std::nullopt;
+    AstType* ty = nullptr;
+};
+
+struct AstClassMethod
+{
+    std::optional<Location> qualifierLocation;
+    Location keywordLocation;
+    AstName functionName;
+    Location nameLocation;
+    AstExprFunction* function;
+};
+
+using AstClassMember = Variant<AstClassProperty, AstClassMethod>;
+
+class AstStatClass : public AstStat
 {
 public:
-    LUAU_RTTI(AstStatDeclareClass)
+    LUAU_RTTI(AstStatClass)
 
-    AstStatDeclareClass(const Location& location, const AstName& name, std::optional<AstName> superName, const AstArray<AstDeclaredClassProp>& props);
+    AstLocal* name;
+    AstExpr* super;
+    AstArray<AstClassMember> members;
+    bool exported;
+    bool open;
+
+    AstStatClass(const Location& location, AstLocal* name, AstExpr* super, AstArray<AstClassMember> members, bool exported, bool open);
+
+    void visit(AstVisitor* visitor) override;
+};
+
+struct AstTableIndexer
+{
+    AstType* indexType;
+    AstType* resultType;
+    Location location;
+
+    AstTableAccess access = AstTableAccess::ReadWrite;
+    std::optional<Location> accessLocation;
+};
+
+class AstStatDeclareExternType : public AstStat
+{
+public:
+    LUAU_RTTI(AstStatDeclareExternType)
+
+    AstStatDeclareExternType(
+        const Location& location,
+        const AstName& name,
+        std::optional<AstName> superName,
+        const AstArray<AstDeclaredExternTypeProperty>& props,
+        AstTableIndexer* indexer = nullptr
+    );
 
     void visit(AstVisitor* visitor) override;
 
     AstName name;
     std::optional<AstName> superName;
 
-    AstArray<AstDeclaredClassProp> props;
+    AstArray<AstDeclaredExternTypeProperty> props;
+    AstTableIndexer* indexer;
 };
 
 class AstType : public AstNode
@@ -1033,26 +1221,30 @@ public:
     }
 };
 
-// Don't have Luau::Variant available, it's a bit of an overhead, but a plain struct is nice to use
-struct AstTypeOrPack
-{
-    AstType* type = nullptr;
-    AstTypePack* typePack = nullptr;
-};
-
 class AstTypeReference : public AstType
 {
 public:
     LUAU_RTTI(AstTypeReference)
 
-    AstTypeReference(const Location& location, std::optional<AstName> prefix, AstName name, bool hasParameterList = false,
-        const AstArray<AstTypeOrPack>& parameters = {});
+    AstTypeReference(
+        const Location& location,
+        std::optional<AstName> prefix,
+        AstName name,
+        std::optional<Location> prefixLocation,
+        const Location& nameLocation,
+        bool hasParameterList = false,
+        const AstArray<AstTypeOrPack>& parameters = {},
+        AstLocal* prefixLocal = nullptr
+    );
 
     void visit(AstVisitor* visitor) override;
 
     bool hasParameterList;
     std::optional<AstName> prefix;
+    std::optional<Location> prefixLocation;
+    AstLocal* prefixLocal = nullptr;
     AstName name;
+    Location nameLocation;
     AstArray<AstTypeOrPack> parameters;
 };
 
@@ -1061,13 +1253,8 @@ struct AstTableProp
     AstName name;
     Location location;
     AstType* type;
-};
-
-struct AstTableIndexer
-{
-    AstType* indexType;
-    AstType* resultType;
-    Location location;
+    AstTableAccess access = AstTableAccess::ReadWrite;
+    std::optional<Location> accessLocation;
 };
 
 class AstTypeTable : public AstType
@@ -1075,12 +1262,13 @@ class AstTypeTable : public AstType
 public:
     LUAU_RTTI(AstTypeTable)
 
-    AstTypeTable(const Location& location, const AstArray<AstTableProp>& props, AstTableIndexer* indexer = nullptr);
+    AstTypeTable(const Location& location, const AstArray<AstTableProp>& props, AstTableIndexer* indexer = nullptr, bool isExact = false);
 
     void visit(AstVisitor* visitor) override;
 
     AstArray<AstTableProp> props;
     AstTableIndexer* indexer;
+    bool isExact = false;
 };
 
 class AstTypeFunction : public AstType
@@ -1088,16 +1276,37 @@ class AstTypeFunction : public AstType
 public:
     LUAU_RTTI(AstTypeFunction)
 
-    AstTypeFunction(const Location& location, const AstArray<AstGenericType>& generics, const AstArray<AstGenericTypePack>& genericPacks,
-        const AstTypeList& argTypes, const AstArray<std::optional<AstArgumentName>>& argNames, const AstTypeList& returnTypes);
+    AstTypeFunction(
+        const Location& location,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        const AstTypeList& argTypes,
+        const AstArray<std::optional<AstArgumentName>>& argNames,
+        AstTypePack* returnTypes
+    );
+
+    AstTypeFunction(
+        const Location& location,
+        const AstArray<AstAttr*>& attributes,
+        const AstArray<AstGenericType*>& generics,
+        const AstArray<AstGenericTypePack*>& genericPacks,
+        const AstTypeList& argTypes,
+        const AstArray<std::optional<AstArgumentName>>& argNames,
+        AstTypePack* returnTypes
+    );
 
     void visit(AstVisitor* visitor) override;
 
-    AstArray<AstGenericType> generics;
-    AstArray<AstGenericTypePack> genericPacks;
+    bool isCheckedFunction() const;
+    bool hasAttribute(AstAttr::Type attributeType) const;
+    AstAttr* getAttribute(AstAttr::Type attributeType) const;
+
+    AstArray<AstAttr*> attributes;
+    AstArray<AstGenericType*> generics;
+    AstArray<AstGenericTypePack*> genericPacks;
     AstTypeList argTypes;
     AstArray<std::optional<AstArgumentName>> argNames;
-    AstTypeList returnTypes;
+    AstTypePack* returnTypes;
 };
 
 class AstTypeTypeof : public AstType
@@ -1110,6 +1319,16 @@ public:
     void visit(AstVisitor* visitor) override;
 
     AstExpr* expr;
+};
+
+class AstTypeOptional : public AstType
+{
+public:
+    LUAU_RTTI(AstTypeOptional)
+
+    AstTypeOptional(const Location& location);
+
+    void visit(AstVisitor* visitor) override;
 };
 
 class AstTypeUnion : public AstType
@@ -1201,6 +1420,18 @@ public:
     const AstArray<char> value;
 };
 
+class AstTypeGroup : public AstType
+{
+public:
+    LUAU_RTTI(AstTypeGroup)
+
+    explicit AstTypeGroup(const Location& location, AstType* type);
+
+    void visit(AstVisitor* visitor) override;
+
+    AstType* type;
+};
+
 class AstTypePack : public AstNode
 {
 public:
@@ -1246,7 +1477,299 @@ public:
     AstName genericName;
 };
 
+class AstVisitor
+{
+public:
+    virtual ~AstVisitor() {}
+
+    virtual bool visit(class AstNode*)
+    {
+        return true;
+    }
+
+    virtual bool visit(class AstAttr* node)
+    {
+        return visit(static_cast<AstNode*>(node));
+    }
+
+    virtual bool visit(class AstGenericType* node)
+    {
+        return visit(static_cast<AstNode*>(node));
+    }
+
+    virtual bool visit(class AstGenericTypePack* node)
+    {
+        return visit(static_cast<AstNode*>(node));
+    }
+
+    virtual bool visit(class AstExpr* node)
+    {
+        return visit(static_cast<AstNode*>(node));
+    }
+
+    virtual bool visit(class AstExprGroup* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprConstantNil* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprConstantBool* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprConstantNumber* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprConstantInteger* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprConstantString* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprLocal* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprGlobal* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprVarargs* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprCall* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprIndexName* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprIndexExpr* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprFunction* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprTable* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprUnary* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprBinary* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprTypeAssertion* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprIfElse* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprInterpString* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprInstantiate* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+    virtual bool visit(class AstExprError* node)
+    {
+        return visit(static_cast<AstExpr*>(node));
+    }
+
+    virtual bool visit(class AstStat* node)
+    {
+        return visit(static_cast<AstNode*>(node));
+    }
+
+    virtual bool visit(class AstStatBlock* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatIf* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatWhile* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatRepeat* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatBreak* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatContinue* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatReturn* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatExpr* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatLocal* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatFor* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatForIn* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatAssign* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatCompoundAssign* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatFunction* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatLocalFunction* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatTypeAlias* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatTypeFunction* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatDeclareFunction* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatDeclareGlobal* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatClass* node)
+    {
+        LUAU_ASSERT(FFlag::DebugLuauUserDefinedClasses);
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatDeclareExternType* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+    virtual bool visit(class AstStatError* node)
+    {
+        return visit(static_cast<AstStat*>(node));
+    }
+
+    // By default visiting type annotations is disabled; override this in your visitor if you need to!
+    virtual bool visit(class AstType* node)
+    {
+        return false;
+    }
+
+    virtual bool visit(class AstTypeReference* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeTable* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeFunction* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeTypeof* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeOptional* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeUnion* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeIntersection* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeSingletonBool* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeSingletonString* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeGroup* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+    virtual bool visit(class AstTypeError* node)
+    {
+        return visit(static_cast<AstType*>(node));
+    }
+
+    virtual bool visit(class AstTypePack* node)
+    {
+        return false;
+    }
+    virtual bool visit(class AstTypePackExplicit* node)
+    {
+        return visit(static_cast<AstTypePack*>(node));
+    }
+    virtual bool visit(class AstTypePackVariadic* node)
+    {
+        return visit(static_cast<AstTypePack*>(node));
+    }
+    virtual bool visit(class AstTypePackGeneric* node)
+    {
+        return visit(static_cast<AstTypePack*>(node));
+    }
+};
+
+bool isLValue(const AstExpr*);
+bool isConstantLiteral(const AstExpr*);
+bool isLiteralTable(const AstExpr*);
 AstName getIdentifier(AstExpr*);
+Location getLocation(const AstTypeList& typeList);
+
+template<typename T> // AstNode, AstExpr, AstLocal, etc
+Location getLocation(AstArray<T*> array)
+{
+    if (0 == array.size)
+        return {};
+
+    return Location{array.data[0]->location.begin, array.data[array.size - 1]->location.end};
+}
 
 #undef LUAU_RTTI
 

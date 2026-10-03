@@ -4,14 +4,12 @@
 #include "Luau/Location.h"
 #include "Luau/LValue.h"
 #include "Luau/Variant.h"
+#include "Luau/TypeFwd.h"
 
 #include <vector>
 
 namespace Luau
 {
-
-struct TypeVar;
-using TypeId = const TypeVar*;
 
 struct TruthyPredicate;
 struct IsAPredicate;
@@ -57,11 +55,7 @@ struct AndPredicate
     PredicateVec lhs;
     PredicateVec rhs;
 
-    AndPredicate(PredicateVec&& lhs, PredicateVec&& rhs)
-        : lhs(std::move(lhs))
-        , rhs(std::move(rhs))
-    {
-    }
+    AndPredicate(PredicateVec&& lhs, PredicateVec&& rhs);
 };
 
 struct OrPredicate
@@ -69,17 +63,26 @@ struct OrPredicate
     PredicateVec lhs;
     PredicateVec rhs;
 
-    OrPredicate(PredicateVec&& lhs, PredicateVec&& rhs)
-        : lhs(std::move(lhs))
-        , rhs(std::move(rhs))
-    {
-    }
+    OrPredicate(PredicateVec&& lhs, PredicateVec&& rhs);
 };
 
 struct NotPredicate
 {
     PredicateVec predicates;
 };
+
+// Outside definition works around clang 15 issue where vector instantiation is triggered while Predicate is still incomplete
+inline AndPredicate::AndPredicate(PredicateVec&& lhs, PredicateVec&& rhs)
+    : lhs(std::move(lhs))
+    , rhs(std::move(rhs))
+{
+}
+
+inline OrPredicate::OrPredicate(PredicateVec&& lhs, PredicateVec&& rhs)
+    : lhs(std::move(lhs))
+    , rhs(std::move(rhs))
+{
+}
 
 template<typename T>
 const T* get(const Predicate& predicate)

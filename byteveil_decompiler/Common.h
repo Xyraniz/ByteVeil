@@ -14,5 +14,16 @@
 #include "../luau/VM/src/lapi.h"
 #include "../luau/VM/src/lobject.h"
 #include "../luau/Common/include/Luau/Bytecode.h"
-#include "../luau/Compiler/include/Luau/BytecodeBuilder.h"
+#include "../luau/Bytecode/include/Luau/BytecodeBuilder.h"
 #include "Luau/Ast.h"
+
+// Luau removed these opcodes when FORGLOOP gained AUX mode bits and
+// constant comparisons moved to JUMPXEQK*. Keep out-of-range sentinels so
+// the legacy lifter can still describe old in-memory cases without matching
+// any opcode in current serialized chunks.
+namespace Luau {
+constexpr LuauOpcode LOP_FORGLOOP_INEXT = static_cast<LuauOpcode>(LOP__COUNT + 1);
+constexpr LuauOpcode LOP_FORGLOOP_NEXT = static_cast<LuauOpcode>(LOP__COUNT + 2);
+constexpr LuauOpcode LOP_JUMPIFEQK = static_cast<LuauOpcode>(LOP__COUNT + 3);
+constexpr LuauOpcode LOP_JUMPIFNOTEQK = static_cast<LuauOpcode>(LOP__COUNT + 4);
+}

@@ -9,7 +9,6 @@
 namespace Luau
 {
 
-// TODO Rename this to Name once the old type alias is gone.
 struct Symbol
 {
     Symbol()
@@ -36,14 +35,12 @@ struct Symbol
     AstLocal* local;
     AstName global;
 
-    bool operator==(const Symbol& rhs) const
+    explicit operator bool() const
     {
-        if (local)
-            return local == rhs.local;
-        if (global.value)
-            return rhs.global.value && global == rhs.global.value; // Subtlety: AstName::operator==(const char*) uses strcmp, not pointer identity.
-        return false;
+        return local != nullptr || global.value != nullptr;
     }
+
+    bool operator==(const Symbol& rhs) const;
 
     bool operator!=(const Symbol& rhs) const
     {
@@ -58,8 +55,8 @@ struct Symbol
             return global < rhs.global;
         else if (local)
             return true;
-        else
-            return false;
+
+        return false;
     }
 
     AstName astName() const

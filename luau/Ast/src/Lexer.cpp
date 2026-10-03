@@ -1,6 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Lexer.h"
 
+#include "Luau/Allocator.h"
+#include "Luau/Common.h"
 #include "Luau/Confusables.h"
 #include "Luau/StringUtils.h"
 
@@ -8,64 +10,6 @@
 
 namespace Luau
 {
-
-Allocator::Allocator()
-    : root(static_cast<Page*>(operator new(sizeof(Page))))
-    , offset(0)
-{
-    root->next = nullptr;
-}
-
-Allocator::Allocator(Allocator&& rhs)
-    : root(rhs.root)
-    , offset(rhs.offset)
-{
-    rhs.root = nullptr;
-    rhs.offset = 0;
-}
-
-Allocator::~Allocator()
-{
-    Page* page = root;
-
-    while (page)
-    {
-        Page* next = page->next;
-
-        operator delete(page);
-
-        page = next;
-    }
-}
-
-void* Allocator::allocate(size_t size)
-{
-    constexpr size_t align = alignof(void*) > alignof(double) ? alignof(void*) : alignof(double);
-
-    if (root)
-    {
-        uintptr_t data = reinterpret_cast<uintptr_t>(root->data);
-        uintptr_t result = (data + offset + align - 1) & ~(align - 1);
-        if (result + size <= data + sizeof(root->data))
-        {
-            offset = result - data + size;
-            return reinterpret_cast<void*>(result);
-        }
-    }
-
-    // allocate new page
-    size_t pageSize = size > sizeof(root->data) ? size : sizeof(root->data);
-    void* pageData = operator new(offsetof(Page, data) + pageSize);
-
-    Page* page = static_cast<Page*>(pageData);
-
-    page->next = root;
-
-    root = page;
-    offset = size;
-
-    return page->data;
-}
 
 Lexeme::Lexeme(const Location& location, Type type)
     : type(type)
@@ -89,7 +33,10 @@ Lexeme::Lexeme(const Location& location, Type type, const char* data, size_t siz
     , length(unsigned(size))
     , data(data)
 {
-    LUAU_ASSERT(type == RawString || type == QuotedString || type == Number || type == Comment || type == BlockComment);
+    LUAU_ASSERT(
+        type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
+        type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment
+    );
 }
 
 Lexeme::Lexeme(const Location& location, Type type, const char* name)
@@ -98,11 +45,21 @@ Lexeme::Lexeme(const Location& location, Type type, const char* name)
     , length(0)
     , name(name)
 {
-    LUAU_ASSERT(type == Name || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
+    LUAU_ASSERT(type == Name || type == Attribute || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
 }
 
-static const char* kReserved[] = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or",
-    "repeat", "return", "then", "true", "until", "while"};
+unsigned int Lexeme::getLength() const
+{
+    LUAU_ASSERT(
+        type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
+        type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment
+    );
+
+    return length;
+}
+
+static const char* kReserved[] = {"and",   "break", "do",  "else", "elseif", "end",    "false", "for",  "function", "if",   "in",
+                                  "local", "nil",   "not", "or",   "repeat", "return", "then",  "true", "until",    "while"};
 
 std::string Lexeme::toString() const
 {
@@ -135,6 +92,9 @@ std::string Lexeme::toString() const
     case DoubleColon:
         return "'::'";
 
+    case FloorDiv:
+        return "'//'";
+
     case AddAssign:
         return "'+='";
 
@@ -146,6 +106,9 @@ std::string Lexeme::toString() const
 
     case DivAssign:
         return "'/='";
+
+    case FloorDivAssign:
+        return "'//='";
 
     case ModAssign:
         return "'%='";
@@ -160,6 +123,18 @@ std::string Lexeme::toString() const
     case QuotedString:
         return data ? format("\"%.*s\"", length, data) : "string";
 
+    case InterpStringBegin:
+        return data ? format("`%.*s{", length, data) : "the beginning of an interpolated string";
+
+    case InterpStringMid:
+        return data ? format("}%.*s{", length, data) : "the middle of an interpolated string";
+
+    case InterpStringEnd:
+        return data ? format("}%.*s`", length, data) : "the end of an interpolated string";
+
+    case InterpStringSimple:
+        return data ? format("`%.*s`", length, data) : "interpolated string";
+
     case Number:
         return data ? format("'%.*s'", length, data) : "number";
 
@@ -169,11 +144,20 @@ std::string Lexeme::toString() const
     case Comment:
         return "comment";
 
+    case Attribute:
+        return name ? format("'%s'", name) : "attribute";
+
+    case AttributeOpen:
+        return "'@['";
+
     case BrokenString:
         return "malformed string";
 
     case BrokenComment:
         return "unfinished comment";
+
+    case BrokenInterpDoubleBrace:
+        return "'{{', which is invalid (did you mean '\\{'?)";
 
     case BrokenUnicode:
         if (codepoint)
@@ -218,7 +202,7 @@ size_t AstNameTable::EntryHash::operator()(const Entry& e) const
 }
 
 AstNameTable::AstNameTable(Allocator& allocator)
-    : data({AstName(""), 0, Lexeme::Eof}, 128)
+    : data(128)
     , allocator(allocator)
 {
     static_assert(sizeof(kReserved) / sizeof(kReserved[0]) == Lexeme::Reserved_END - Lexeme::Reserved_BEGIN);
@@ -253,7 +237,7 @@ std::pair<AstName, Lexeme::Type> AstNameTable::getOrAddWithType(const char* name
     nameData[length] = 0;
 
     const_cast<Entry&>(entry).value = AstName(nameData);
-    const_cast<Entry&>(entry).type = Lexeme::Name;
+    const_cast<Entry&>(entry).type = (name[0] == '@' ? Lexeme::Attribute : Lexeme::Name);
 
     return std::make_pair(entry.value, entry.type);
 }
@@ -265,6 +249,11 @@ std::pair<AstName, Lexeme::Type> AstNameTable::getWithType(const char* name, siz
         return std::make_pair(entry->value, entry->type);
     }
     return std::make_pair(AstName(), Lexeme::Name);
+}
+
+AstName AstNameTable::getOrAdd(const char* name, size_t len)
+{
+    return getOrAddWithType(name, len).first;
 }
 
 AstName AstNameTable::getOrAdd(const char* name)
@@ -322,13 +311,45 @@ static char unescape(char ch)
     }
 }
 
-Lexer::Lexer(const char* buffer, size_t bufferSize, AstNameTable& names)
+unsigned int Lexeme::getBlockDepth() const
+{
+    LUAU_ASSERT(type == Lexeme::RawString || type == Lexeme::BlockComment);
+
+    // If we have a well-formed string, we are guaranteed to see 2 `]` characters after the end of the string contents
+    LUAU_ASSERT(*(data + length) == ']');
+    unsigned int depth = 0;
+    do
+    {
+        depth++;
+    } while (*(data + length + depth) != ']');
+
+    return depth - 1;
+}
+
+Lexeme::QuoteStyle Lexeme::getQuoteStyle() const
+{
+    LUAU_ASSERT(type == Lexeme::QuotedString);
+
+    // If we have a well-formed string, we are guaranteed to see a closing delimiter after the string
+    LUAU_ASSERT(data);
+
+    char quote = *(data + length);
+    if (quote == '\'')
+        return Lexeme::QuoteStyle::Single;
+    else if (quote == '"')
+        return Lexeme::QuoteStyle::Double;
+
+    LUAU_ASSERT(!"Unknown quote style");
+    return Lexeme::QuoteStyle::Double; // unreachable, but required due to compiler warning
+}
+
+Lexer::Lexer(const char* buffer, size_t bufferSize, AstNameTable& names, Position startPosition)
     : buffer(buffer)
     , bufferSize(bufferSize)
     , offset(0)
-    , line(0)
-    , lineOffset(0)
-    , lexeme(Location(Position(0, 0), 0), Lexeme::Eof)
+    , line(startPosition.line)
+    , lineOffset(0u - startPosition.column)
+    , lexeme((Location(Position(startPosition.line, startPosition.column), 0)), Lexeme::Eof)
     , names(names)
     , skipComments(false)
     , readNames(true)
@@ -357,7 +378,7 @@ const Lexeme& Lexer::next(bool skipComments, bool updatePrevLocation)
     {
         // consume whitespace before the token
         while (isSpace(peekch()))
-            consume();
+            consumeAny();
 
         if (updatePrevLocation)
             prevLocation = lexeme.location;
@@ -384,6 +405,8 @@ Lexeme Lexer::lookahead()
     unsigned int currentLineOffset = lineOffset;
     Lexeme currentLexeme = lexeme;
     Location currentPrevLocation = prevLocation;
+    size_t currentBraceStackSize = braceStack.size();
+    BraceType currentBraceType = braceStack.empty() ? BraceType::Normal : braceStack.back();
 
     Lexeme result = next();
 
@@ -392,6 +415,11 @@ Lexeme Lexer::lookahead()
     lineOffset = currentLineOffset;
     lexeme = currentLexeme;
     prevLocation = currentPrevLocation;
+
+    if (braceStack.size() < currentBraceStackSize)
+        braceStack.push_back(currentBraceType);
+    else if (braceStack.size() > currentBraceStackSize)
+        braceStack.pop_back();
 
     return result;
 }
@@ -417,12 +445,23 @@ char Lexer::peekch(unsigned int lookahead) const
     return (offset + lookahead < bufferSize) ? buffer[offset + lookahead] : 0;
 }
 
+LUAU_FORCEINLINE
 Position Lexer::position() const
 {
     return Position(line, offset - lineOffset);
 }
 
+LUAU_FORCEINLINE
 void Lexer::consume()
+{
+    // consume() assumes current character is known to not be a newline; use consumeAny if this is not guaranteed
+    LUAU_ASSERT(!isNewline(buffer[offset]));
+
+    offset++;
+}
+
+LUAU_FORCEINLINE
+void Lexer::consumeAny()
 {
     if (isNewline(buffer[offset]))
     {
@@ -508,11 +547,37 @@ Lexeme Lexer::readLongString(const Position& start, int sep, Lexeme::Type ok, Le
         }
         else
         {
-            consume();
+            consumeAny();
         }
     }
 
     return Lexeme(Location(start, position()), broken);
+}
+
+void Lexer::readBackslashInString()
+{
+    LUAU_ASSERT(peekch() == '\\');
+    consume();
+    switch (peekch())
+    {
+    case '\r':
+        consume();
+        if (peekch() == '\n')
+            consumeAny();
+        break;
+
+    case 0:
+        break;
+
+    case 'z':
+        consume();
+        while (isSpace(peekch()))
+            consumeAny();
+        break;
+
+    default:
+        consumeAny();
+    }
 }
 
 Lexeme Lexer::readQuotedString()
@@ -535,27 +600,7 @@ Lexeme Lexer::readQuotedString()
             return Lexeme(Location(start, position()), Lexeme::BrokenString);
 
         case '\\':
-            consume();
-            switch (peekch())
-            {
-            case '\r':
-                consume();
-                if (peekch() == '\n')
-                    consume();
-                break;
-
-            case 0:
-                break;
-
-            case 'z':
-                consume();
-                while (isSpace(peekch()))
-                    consume();
-                break;
-
-            default:
-                consume();
-            }
+            readBackslashInString();
             break;
 
         default:
@@ -566,6 +611,69 @@ Lexeme Lexer::readQuotedString()
     consume();
 
     return Lexeme(Location(start, position()), Lexeme::QuotedString, &buffer[startOffset], offset - startOffset - 1);
+}
+
+Lexeme Lexer::readInterpolatedStringBegin()
+{
+    LUAU_ASSERT(peekch() == '`');
+
+    Position start = position();
+    consume();
+
+    return readInterpolatedStringSection(start, Lexeme::InterpStringBegin, Lexeme::InterpStringSimple);
+}
+
+Lexeme Lexer::readInterpolatedStringSection(Position start, Lexeme::Type formatType, Lexeme::Type endType)
+{
+    unsigned int startOffset = offset;
+
+    while (peekch() != '`')
+    {
+        switch (peekch())
+        {
+        case 0:
+        case '\r':
+        case '\n':
+            return Lexeme(Location(start, position()), Lexeme::BrokenString);
+
+        case '\\':
+            // Allow for \u{}, which would otherwise be consumed by looking for {
+            if (peekch(1) == 'u' && peekch(2) == '{')
+            {
+                consume(); // backslash
+                consume(); // u
+                consume(); // {
+                break;
+            }
+
+            readBackslashInString();
+            break;
+
+        case '{':
+        {
+            braceStack.push_back(BraceType::InterpolatedString);
+
+            if (peekch(1) == '{')
+            {
+                Lexeme brokenDoubleBrace =
+                    Lexeme(Location(start, position()), Lexeme::BrokenInterpDoubleBrace, &buffer[startOffset], offset - startOffset);
+                consume();
+                consume();
+                return brokenDoubleBrace;
+            }
+
+            consume();
+            return Lexeme(Location(start, position()), formatType, &buffer[startOffset], offset - startOffset - 1);
+        }
+
+        default:
+            consume();
+        }
+    }
+
+    consume();
+
+    return Lexeme(Location(start, position()), endType, &buffer[startOffset], offset - startOffset - 1);
 }
 
 Lexeme Lexer::readNumber(const Position& start, unsigned int startOffset)
@@ -596,7 +704,7 @@ Lexeme Lexer::readNumber(const Position& start, unsigned int startOffset)
 
 std::pair<AstName, Lexeme::Type> Lexer::readName()
 {
-    LUAU_ASSERT(isAlpha(peekch()) || peekch() == '_');
+    LUAU_ASSERT(isAlpha(peekch()) || peekch() == '_' || peekch() == '@');
 
     unsigned int startOffset = offset;
 
@@ -660,6 +768,36 @@ Lexeme Lexer::readNext()
         }
     }
 
+    case '{':
+    {
+        consume();
+
+        if (!braceStack.empty())
+            braceStack.push_back(BraceType::Normal);
+
+        return Lexeme(Location(start, 1), '{');
+    }
+
+    case '}':
+    {
+        consume();
+
+        if (braceStack.empty())
+        {
+            return Lexeme(Location(start, 1), '}');
+        }
+
+        const BraceType braceStackTop = braceStack.back();
+        braceStack.pop_back();
+
+        if (braceStackTop != BraceType::InterpolatedString)
+        {
+            return Lexeme(Location(start, 1), '}');
+        }
+
+        return readInterpolatedStringSection(start, Lexeme::InterpStringMid, Lexeme::InterpStringEnd);
+    }
+
     case '=':
     {
         consume();
@@ -716,6 +854,9 @@ Lexeme Lexer::readNext()
     case '\'':
         return readQuotedString();
 
+    case '`':
+        return readInterpolatedStringBegin();
+
     case '.':
         consume();
 
@@ -760,15 +901,31 @@ Lexeme Lexer::readNext()
             return Lexeme(Location(start, 1), '+');
 
     case '/':
+    {
         consume();
 
-        if (peekch() == '=')
+        char ch = peekch();
+
+        if (ch == '=')
         {
             consume();
             return Lexeme(Location(start, 2), Lexeme::DivAssign);
         }
+        else if (ch == '/')
+        {
+            consume();
+
+            if (peekch() == '=')
+            {
+                consume();
+                return Lexeme(Location(start, 3), Lexeme::FloorDivAssign);
+            }
+            else
+                return Lexeme(Location(start, 2), Lexeme::FloorDiv);
+        }
         else
             return Lexeme(Location(start, 1), '/');
+    }
 
     case '*':
         consume();
@@ -817,19 +974,44 @@ Lexeme Lexer::readNext()
 
     case '(':
     case ')':
-    case '{':
-    case '}':
     case ']':
     case ';':
     case ',':
     case '#':
+    case '?':
+    case '&':
+    case '|':
     {
         char ch = peekch();
         consume();
 
         return Lexeme(Location(start, 1), ch);
     }
+    case '@':
+    {
+        if (peekch(1) == '[')
+        {
+            consume();
+            consume();
 
+            return Lexeme(Location(start, 2), Lexeme::AttributeOpen);
+        }
+        else
+        {
+            // consume @ first
+            consume();
+
+            if (isAlpha(peekch()) || peekch() == '_')
+            {
+                std::pair<AstName, Lexeme::Type> attribute = readName();
+                return Lexeme(Location(start, position()), Lexeme::Attribute, attribute.first.value);
+            }
+            else
+            {
+                return Lexeme(Location(start, position()), Lexeme::Attribute, "");
+            }
+        }
+    }
     default:
         if (isDigit(peekch()))
         {
@@ -853,6 +1035,14 @@ Lexeme Lexer::readNext()
             return Lexeme(Location(start, 1), ch);
         }
     }
+}
+
+std::optional<Lexer::BraceType> Lexer::peekBraceStackTop()
+{
+    if (braceStack.empty())
+        return std::nullopt;
+    else
+        return {braceStack.back()};
 }
 
 LUAU_NOINLINE Lexeme Lexer::readUtf8Error()

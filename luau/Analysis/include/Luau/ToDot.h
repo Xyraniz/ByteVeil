@@ -2,16 +2,12 @@
 #pragma once
 
 #include "Luau/Common.h"
+#include "Luau/TypeFwd.h"
 
 #include <string>
 
 namespace Luau
 {
-struct TypeVar;
-using TypeId = const TypeVar*;
-
-struct TypePackVar;
-using TypePackId = const TypePackVar*;
 
 struct ToDotOptions
 {

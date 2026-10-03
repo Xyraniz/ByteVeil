@@ -71,9 +71,9 @@ LUA
 "$BIN" --format json "$TMP/semantics.luau" >"$TMP/semantics.json"
 "$BIN" --format lua "$TMP/semantics.luau" >"$TMP/reconstructed.luau"
 grep -q '^-- ByteVeil Luau register-state reconstruction' "$TMP/reconstructed.luau"
-grep -q 'local capture_' "$TMP/reconstructed.luau"
+grep -q 'captures\[' "$TMP/reconstructed.luau"
 grep -q 'cells\[' "$TMP/reconstructed.luau"
-grep -q 'iterator_results_' "$TMP/reconstructed.luau"
+grep -q 'iterator_results = table.pack' "$TMP/reconstructed.luau"
 ! grep -q 'unsupported opcode' "$TMP/reconstructed.luau"
 "$BYTEVEIL_PYTHON" - "$TMP/semantics.json" <<'PY'
 import json

@@ -3,7 +3,7 @@
 //
 #pragma once
 #include <iostream>
-#include <Luau/Transpiler.h>
+#include <Luau/PrettyPrinter.h>
 #include "BlockGen/include/BlockGen.h"
 #include "Common.h"
 

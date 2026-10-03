@@ -17,6 +17,8 @@ ByteVeil can:
 
 - Identify Lua 5.1 and Luau bytecode by signature.
 
+- Read serialized Luau bytecode versions 3 through 14, including the Roblox opcode encoding found in the supplied game-script corpus.
+
 - Compile Luau source to bytecode for analysis.
 
 - Emit JSON or IR-style descriptions of Luau functions, exact constant tables, debug locals, upvalue names, prototypes, instructions, source lines, jump targets, basic blocks, and nested functions.
@@ -152,6 +154,14 @@ Write the root control-flow graph as Graphviz DOT:
 ```
 
 The JSON/IR representation contains nested functions, parameters, register counts, typed constant entries, exact hexadecimal bytes for Luau strings, debug-local lifetimes, upvalue names, instructions, basic blocks, successors and predecessors, reachability, line information, jump targets, decoded AUX words, complete register use/definition sets, purity/effects, loop/SCC facts, scopes, and SSA information. Its JSON encoder preserves valid UTF-8 and safely escapes control or invalid byte sequences. Multi-register operations such as `CALL`, `NAMECALL`, `GETVARARGS`, and loop instructions retain every defined register and its SSA version. The internal IR validates prototype depth, total instruction count, real instruction boundaries (including rejection of jumps into AUX words), operand ranges, constant/prototype references, and constant/debug metadata before building the representation.
+
+### Roblox Luau bytecode
+
+Roblox bytecode dumps use the Luau serialized chunk layout with encoded instruction opcodes. ByteVeil recognizes the current encoding present in the supplied corpus, normalizes opcode bytes while preserving AUX words, and accepts the optional 24-byte trailer present in those dumps. Input detection is automatic; `--bytecode` can be used to force the bytecode path.
+
+The vendored Luau reader supports serialized versions 3–14. Older v1/v2 chunks and experimental version 100 are outside that range. Roblox may change its opcode encoding or bytecode version, so dumps that use a different mapping or a newer format require an update. ByteVeil inspects and decompiles these chunks statically; it does not run the Roblox scripts.
+
+`tests/test_roblox_bytecode.sh` generates a small encoded Luau fixture locally, checks opcode normalization and the optional trailer, and compiles the reconstructed source without executing it. The repository does not include the supplied game's scripts.
 
 ## Lift to source-like output
 

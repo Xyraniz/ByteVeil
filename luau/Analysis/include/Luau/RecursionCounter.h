@@ -2,60 +2,48 @@
 #pragma once
 
 #include "Luau/Common.h"
+#include "Luau/Error.h"
+#include "Luau/NativeStackGuard.h"
 
 #include <stdexcept>
 #include <exception>
 
-LUAU_FASTFLAG(LuauRecursionLimitException);
-
 namespace Luau
 {
 
-struct RecursionLimitException : public std::exception
+struct RecursionLimitException : public InternalCompilerError
 {
-    const char* what() const noexcept
-    {
-        return "Internal recursion counter limit exceeded";
-    }
+    explicit RecursionLimitException(const std::string& system);
 };
 
 struct RecursionCounter
 {
-    RecursionCounter(int* count)
-        : count(count)
-    {
-        ++(*count);
-    }
+    explicit RecursionCounter(int* count);
+    ~RecursionCounter();
 
-    ~RecursionCounter()
-    {
-        LUAU_ASSERT(*count > 0);
-        --(*count);
-    }
+    RecursionCounter(const RecursionCounter&) = delete;
+    RecursionCounter& operator=(const RecursionCounter&) = delete;
+    RecursionCounter(RecursionCounter&&) = delete;
+    RecursionCounter& operator=(RecursionCounter&&) = delete;
 
-private:
+protected:
     int* count;
 };
 
 struct RecursionLimiter : RecursionCounter
 {
-    // TODO: remove ctx after LuauRecursionLimitException is removed
-    RecursionLimiter(int* count, int limit, const char* ctx)
-        : RecursionCounter(count)
-    {
-        LUAU_ASSERT(ctx);
-        if (limit > 0 && *count > limit)
-        {
-            if (FFlag::LuauRecursionLimitException)
-                throw RecursionLimitException();
-            else
-            {
-                std::string m = "Internal recursion counter limit exceeded: ";
-                m += ctx;
-                throw std::runtime_error(m);
-            }
-        }
-    }
+    NativeStackGuard nativeStackGuard;
+
+    RecursionLimiter(const std::string& system, int* count, int limit);
+};
+
+struct NonExceptionalRecursionLimiter : RecursionCounter
+{
+    NativeStackGuard nativeStackGuard;
+
+    bool isOk(int limit) const;
+
+    NonExceptionalRecursionLimiter(int* count);
 };
 
 } // namespace Luau

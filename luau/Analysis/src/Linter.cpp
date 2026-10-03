@@ -9,49 +9,17 @@
 #include "Luau/Common.h"
 
 #include <algorithm>
-#include <math.h>
-#include <limits.h>
+#include <cmath>
+#include <climits>
 
 LUAU_FASTINTVARIABLE(LuauSuggestionDistance, 4)
-LUAU_FASTFLAGVARIABLE(LuauLintGlobalNeverReadBeforeWritten, false)
+LUAU_FASTINTVARIABLE(LuauLinterRecursionLimit, 128)
+LUAU_FASTFLAG(LuauExperimentalIfLocalAnalysis)
+
+LUAU_FASTFLAGVARIABLE(LuauImproveDeprecatedLint)
 
 namespace Luau
 {
-
-// clang-format off
-static const char* kWarningNames[] = {
-    "Unknown",
-
-    "UnknownGlobal",
-    "DeprecatedGlobal",
-    "GlobalUsedAsLocal",
-    "LocalShadow",
-    "SameLineStatement",
-    "MultiLineStatement",
-    "LocalUnused",
-    "FunctionUnused",
-    "ImportUnused",
-    "BuiltinGlobalWrite",
-    "PlaceholderRead",
-    "UnreachableCode",
-    "UnknownType",
-    "ForRange",
-    "UnbalancedAssignment",
-    "ImplicitReturn",
-    "DuplicateLocal",
-    "FormatString",
-    "TableLiteral",
-    "UninitializedLocal",
-    "DuplicateFunction",
-    "DeprecatedApi",
-    "TableOperations",
-    "DuplicateCondition",
-    "MisleadingAndOr",
-    "CommentDirective",
-};
-// clang-format on
-
-static_assert(std::size(kWarningNames) == unsigned(LintWarning::Code__Count), "did you forget to add warning to the list?");
 
 struct LintContext
 {
@@ -73,7 +41,6 @@ struct LintContext
 
     LintContext()
         : root(nullptr)
-        , builtinGlobals(AstName())
         , module(nullptr)
     {
     }
@@ -136,7 +103,7 @@ static void emitWarning(LintContext& context, LintWarning::Code code, const Loca
     std::string message = vformat(format, args);
     va_end(args);
 
-    LintWarning warning = {code, location, message};
+    LintWarning warning = {code, location, std::move(message)};
     context.result.push_back(warning);
 }
 
@@ -153,6 +120,7 @@ static bool similar(AstExpr* lhs, AstExpr* rhs)
     CASE(AstExprConstantNil) return true;
     CASE(AstExprConstantBool) return le->value == re->value;
     CASE(AstExprConstantNumber) return le->value == re->value;
+    CASE(AstExprConstantInteger) return le->value == re->value;
     CASE(AstExprConstantString) return le->value.size == re->value.size && memcmp(le->value.data, re->value.data, le->value.size) == 0;
     CASE(AstExprLocal) return le->local == re->local;
     CASE(AstExprGlobal) return le->name == re->name;
@@ -203,6 +171,29 @@ static bool similar(AstExpr* lhs, AstExpr* rhs)
         return true;
     }
     CASE(AstExprIfElse) return similar(le->condition, re->condition) && similar(le->trueExpr, re->trueExpr) && similar(le->falseExpr, re->falseExpr);
+    CASE(AstExprInterpString)
+    {
+        if (le->strings.size != re->strings.size)
+            return false;
+
+        if (le->expressions.size != re->expressions.size)
+            return false;
+
+        for (size_t i = 0; i < le->strings.size; ++i)
+            if (le->strings.data[i].size != re->strings.data[i].size ||
+                memcmp(le->strings.data[i].data, re->strings.data[i].data, le->strings.data[i].size) != 0)
+                return false;
+
+        for (size_t i = 0; i < le->expressions.size; ++i)
+            if (!similar(le->expressions.data[i], re->expressions.data[i]))
+                return false;
+
+        return true;
+    }
+    CASE(AstExprInstantiate)
+    {
+        return similar(le->expr, re->expr);
+    }
     else
     {
         LUAU_ASSERT(!"Unknown expression type");
@@ -262,17 +253,14 @@ private:
         std::optional<const char*> deprecated;
     };
 
-    LintContext* context;
+    LintContext* context = nullptr;
 
     DenseHashMap<AstName, Global> globals;
     std::vector<AstExprGlobal*> globalRefs;
     std::vector<FunctionInfo> functionStack;
 
 
-    LintGlobalLocal()
-        : globals(AstName())
-    {
-    }
+    LintGlobalLocal() = default;
 
     void report()
     {
@@ -282,12 +270,20 @@ private:
             Global* g = globals.find(gv->name);
 
             if (!g || (!g->assigned && !g->builtin))
-                emitWarning(*context, LintWarning::Code_UnknownGlobal, gv->location, "Unknown global '%s'", gv->name.value);
+                emitWarning(
+                    *context, LintWarning::Code_UnknownGlobal, gv->location, "Unknown global '%s'; consider assigning to it first", gv->name.value
+                );
             else if (g->deprecated)
             {
-                if (*g->deprecated)
-                    emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated, use '%s' instead",
-                        gv->name.value, *g->deprecated);
+                if (const char* replacement = *g->deprecated; replacement && strlen(replacement))
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_DeprecatedGlobal,
+                        gv->location,
+                        "Global '%s' is deprecated, use '%s' instead",
+                        gv->name.value,
+                        replacement
+                    );
                 else
                     emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated", gv->name.value);
             }
@@ -302,19 +298,33 @@ private:
                 AstExprFunction* top = g.functionRef.back();
 
                 if (top->debugname.value)
-                    emitWarning(*context, LintWarning::Code_GlobalUsedAsLocal, g.firstRef->location,
-                        "Global '%s' is only used in the enclosing function '%s'; consider changing it to local", g.firstRef->name.value,
-                        top->debugname.value);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_GlobalUsedAsLocal,
+                        g.firstRef->location,
+                        "Global '%s' is only used in the enclosing function '%s'; consider changing it to local",
+                        g.firstRef->name.value,
+                        top->debugname.value
+                    );
                 else
-                    emitWarning(*context, LintWarning::Code_GlobalUsedAsLocal, g.firstRef->location,
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_GlobalUsedAsLocal,
+                        g.firstRef->location,
                         "Global '%s' is only used in the enclosing function defined at line %d; consider changing it to local",
-                        g.firstRef->name.value, top->location.begin.line + 1);
+                        g.firstRef->name.value,
+                        top->location.begin.line + 1
+                    );
             }
-            else if (FFlag::LuauLintGlobalNeverReadBeforeWritten && g.assigned && !g.readBeforeWritten && !g.definedInModuleScope &&
-                     g.firstRef->name != context->placeholder)
+            else if (g.assigned && !g.readBeforeWritten && !g.definedInModuleScope && g.firstRef->name != context->placeholder)
             {
-                emitWarning(*context, LintWarning::Code_GlobalUsedAsLocal, g.firstRef->location,
-                    "Global '%s' is never read before being written. Consider changing it to local", g.firstRef->name.value);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_GlobalUsedAsLocal,
+                    g.firstRef->location,
+                    "Global '%s' is never read before being written. Consider changing it to local",
+                    g.firstRef->name.value
+                );
             }
         }
     }
@@ -332,7 +342,7 @@ private:
 
     bool visit(AstExprGlobal* node) override
     {
-        if (FFlag::LuauLintGlobalNeverReadBeforeWritten && !functionStack.empty() && !functionStack.back().dominatedGlobals.contains(node->name))
+        if (!functionStack.empty() && !functionStack.back().dominatedGlobals.contains(node->name))
         {
             Global& g = globals[node->name];
             g.readBeforeWritten = true;
@@ -341,7 +351,8 @@ private:
 
         if (node->name == context->placeholder)
             emitWarning(
-                *context, LintWarning::Code_PlaceholderRead, node->location, "Placeholder value '_' is read here; consider using a named variable");
+                *context, LintWarning::Code_PlaceholderRead, node->location, "Placeholder value '_' is read here; consider using a named variable"
+            );
 
         return true;
     }
@@ -350,7 +361,8 @@ private:
     {
         if (node->local->name == context->placeholder)
             emitWarning(
-                *context, LintWarning::Code_PlaceholderRead, node->location, "Placeholder value '_' is read here; consider using a named variable");
+                *context, LintWarning::Code_PlaceholderRead, node->location, "Placeholder value '_' is read here; consider using a named variable"
+            );
 
         return true;
     }
@@ -365,24 +377,26 @@ private:
             {
                 Global& g = globals[gv->name];
 
-                if (FFlag::LuauLintGlobalNeverReadBeforeWritten)
+                if (functionStack.empty())
                 {
-                    if (functionStack.empty())
+                    g.definedInModuleScope = true;
+                }
+                else
+                {
+                    if (!functionStack.back().conditionalExecution)
                     {
-                        g.definedInModuleScope = true;
-                    }
-                    else
-                    {
-                        if (!functionStack.back().conditionalExecution)
-                        {
-                            functionStack.back().dominatedGlobals.insert(gv->name);
-                        }
+                        functionStack.back().dominatedGlobals.insert(gv->name);
                     }
                 }
 
                 if (g.builtin)
-                    emitWarning(*context, LintWarning::Code_BuiltinGlobalWrite, gv->location,
-                        "Built-in global '%s' is overwritten here; consider using a local or changing the name", gv->name.value);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_BuiltinGlobalWrite,
+                        gv->location,
+                        "Built-in global '%s' is overwritten here; consider using a local or changing the name",
+                        gv->name.value
+                    );
                 else
                     g.assigned = true;
 
@@ -411,16 +425,18 @@ private:
             Global& g = globals[gv->name];
 
             if (g.builtin)
-                emitWarning(*context, LintWarning::Code_BuiltinGlobalWrite, gv->location,
-                    "Built-in global '%s' is overwritten here; consider using a local or changing the name", gv->name.value);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_BuiltinGlobalWrite,
+                    gv->location,
+                    "Built-in global '%s' is overwritten here; consider using a local or changing the name",
+                    gv->name.value
+                );
             else
             {
                 g.assigned = true;
-                if (FFlag::LuauLintGlobalNeverReadBeforeWritten)
-                {
-                    g.definedAsFunction = true;
-                    g.definedInModuleScope = functionStack.empty();
-                }
+                g.definedAsFunction = true;
+                g.definedInModuleScope = functionStack.empty();
             }
 
             trackGlobalRef(gv);
@@ -454,9 +470,6 @@ private:
 
     bool visit(AstStatIf* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->thenbody->visit(this);
@@ -468,9 +481,6 @@ private:
 
     bool visit(AstStatWhile* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->body->visit(this);
@@ -480,9 +490,6 @@ private:
 
     bool visit(AstStatRepeat* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->body->visit(this);
@@ -492,9 +499,6 @@ private:
 
     bool visit(AstStatFor* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->from->visit(this);
         node->to->visit(this);
@@ -509,9 +513,6 @@ private:
 
     bool visit(AstStatForIn* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         for (AstExpr* expr : node->values)
             expr->visit(this);
@@ -598,8 +599,12 @@ private:
             if (node->body.data[i - 1]->hasSemicolon)
                 continue;
 
-            emitWarning(*context, LintWarning::Code_SameLineStatement, location,
-                "A new statement is on the same line; add semi-colon on previous statement to silence");
+            emitWarning(
+                *context,
+                LintWarning::Code_SameLineStatement,
+                location,
+                "A new statement is on the same line; add semi-colon on previous statement to silence"
+            );
 
             lastLine = location.begin.line;
         }
@@ -646,7 +651,8 @@ private:
                 if (location.begin.column <= top.start.begin.column)
                 {
                     emitWarning(
-                        *context, LintWarning::Code_MultiLineStatement, location, "Statement spans multiple lines; use indentation to silence");
+                        *context, LintWarning::Code_MultiLineStatement, location, "Statement spans multiple lines; use indentation to silence"
+                    );
 
                     top.flagged = true;
                 }
@@ -727,12 +733,7 @@ private:
     DenseHashMap<AstName, AstLocal*> imports;
     DenseHashMap<AstName, Global> globals;
 
-    LintLocalHygiene()
-        : locals(NULL)
-        , imports(AstName())
-        , globals(AstName())
-    {
-    }
+    LintLocalHygiene() = default;
 
     void report()
     {
@@ -760,8 +761,14 @@ private:
 
             // don't warn on inter-function shadowing since it is much more fragile wrt refactoring
             if (shadow->functionDepth == local->functionDepth)
-                emitWarning(*context, LintWarning::Code_LocalShadow, local->location, "Variable '%s' shadows previous declaration at line %d",
-                    local->name.value, shadow->location.begin.line + 1);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_LocalShadow,
+                    local->location,
+                    "Variable '%s' shadows previous declaration at line %d",
+                    local->name.value,
+                    shadow->location.begin.line + 1
+                );
         }
         else if (Global* global = globals.find(local->name))
         {
@@ -769,8 +776,14 @@ private:
                 ; // there are many builtins with common names like 'table'; some of them are deprecated as well
             else if (global->firstRef)
             {
-                emitWarning(*context, LintWarning::Code_LocalShadow, local->location, "Variable '%s' shadows a global variable used at line %d",
-                    local->name.value, global->firstRef->location.begin.line + 1);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_LocalShadow,
+                    local->location,
+                    "Variable '%s' shadows a global variable used at line %d",
+                    local->name.value,
+                    global->firstRef->location.begin.line + 1
+                );
             }
             else
             {
@@ -785,14 +798,21 @@ private:
             return;
 
         if (info.function)
-            emitWarning(*context, LintWarning::Code_FunctionUnused, local->location, "Function '%s' is never used; prefix with '_' to silence",
-                local->name.value);
+            emitWarning(
+                *context,
+                LintWarning::Code_FunctionUnused,
+                local->location,
+                "Function '%s' is never used; prefix with '_' to silence",
+                local->name.value
+            );
         else if (info.import)
-            emitWarning(*context, LintWarning::Code_ImportUnused, local->location, "Import '%s' is never used; prefix with '_' to silence",
-                local->name.value);
+            emitWarning(
+                *context, LintWarning::Code_ImportUnused, local->location, "Import '%s' is never used; prefix with '_' to silence", local->name.value
+            );
         else
-            emitWarning(*context, LintWarning::Code_LocalUnused, local->location, "Variable '%s' is never used; prefix with '_' to silence",
-                local->name.value);
+            emitWarning(
+                *context, LintWarning::Code_LocalUnused, local->location, "Variable '%s' is never used; prefix with '_' to silence", local->name.value
+            );
     }
 
     bool isRequireCall(AstExpr* expr)
@@ -883,6 +903,11 @@ private:
         return true;
     }
 
+    bool visit(AstTypePack* node) override
+    {
+        return true;
+    }
+
     bool visit(AstTypeReference* node) override
     {
         if (!node->prefix)
@@ -936,18 +961,20 @@ private:
 
     DenseHashMap<AstName, Global> globals;
 
-    LintUnusedFunction()
-        : globals(AstName())
-    {
-    }
+    LintUnusedFunction() = default;
 
     void report()
     {
         for (auto& g : globals)
         {
             if (g.second.function && !g.second.used && g.first.value[0] != '_')
-                emitWarning(*context, LintWarning::Code_FunctionUnused, g.second.location, "Function '%s' is never used; prefix with '_' to silence",
-                    g.first.value);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_FunctionUnused,
+                    g.second.location,
+                    "Function '%s' is never used; prefix with '_' to silence",
+                    g.first.value
+                );
         }
     }
 
@@ -1046,8 +1073,13 @@ private:
                     if (step == Error && si->is<AstStatExpr>() && next->is<AstStatReturn>() && i + 2 == stat->body.size)
                         return Error;
 
-                    emitWarning(*context, LintWarning::Code_UnreachableCode, next->location, "Unreachable code (previous statement always %ss)",
-                        getReason(step));
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_UnreachableCode,
+                        next->location,
+                        "Unreachable code (previous statement always %ss)",
+                        getReason(step)
+                    );
                     return step;
                 }
             }
@@ -1137,18 +1169,18 @@ private:
     {
         Kind_Unknown,
         Kind_Primitive, // primitive type supported by VM - boolean/userdata/etc. No differentiation between types of userdata.
-        Kind_Vector,    // 'vector' but only used when type is used
+        Kind_Vector,    // TODO: deprecated and not set, but read in 'visit'
         Kind_Userdata,  // custom userdata type
     };
 
     TypeKind getTypeKind(const std::string& name)
     {
         if (name == "nil" || name == "boolean" || name == "userdata" || name == "number" || name == "string" || name == "table" ||
-            name == "function" || name == "thread")
+            name == "function" || name == "thread" || name == "buffer")
             return Kind_Primitive;
 
         if (name == "vector")
-            return Kind_Vector;
+            return Kind_Primitive;
 
         if (std::optional<TypeFun> maybeTy = context->scope->lookupType(name))
             return Kind_Userdata;
@@ -1240,24 +1272,36 @@ private:
             Location rangeLocation(node->from->location, node->to->location);
 
             // for i=#t,1 do
-            if (fu && fu->op == AstExprUnary::Len && tc && tc->value == 1.0)
+            if (fu && fu->op == AstExprUnary::Op::Len && tc && tc->value == 1.0)
                 emitWarning(
-                    *context, LintWarning::Code_ForRange, rangeLocation, "For loop should iterate backwards; did you forget to specify -1 as step?");
+                    *context, LintWarning::Code_ForRange, rangeLocation, "For loop should iterate backwards; did you forget to specify -1 as step?"
+                );
             // for i=8,1 do
             else if (fc && tc && fc->value > tc->value)
                 emitWarning(
-                    *context, LintWarning::Code_ForRange, rangeLocation, "For loop should iterate backwards; did you forget to specify -1 as step?");
+                    *context, LintWarning::Code_ForRange, rangeLocation, "For loop should iterate backwards; did you forget to specify -1 as step?"
+                );
             // for i=1,8.75 do
             else if (fc && tc && getLoopEnd(fc->value, tc->value) != tc->value)
-                emitWarning(*context, LintWarning::Code_ForRange, rangeLocation, "For loop ends at %g instead of %g; did you forget to specify step?",
-                    getLoopEnd(fc->value, tc->value), tc->value);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ForRange,
+                    rangeLocation,
+                    "For loop ends at %g instead of %g; did you forget to specify step?",
+                    getLoopEnd(fc->value, tc->value),
+                    tc->value
+                );
             // for i=0,#t do
-            else if (fc && tu && fc->value == 0.0 && tu->op == AstExprUnary::Len)
+            else if (fc && tu && fc->value == 0.0 && tu->op == AstExprUnary::Op::Len)
                 emitWarning(*context, LintWarning::Code_ForRange, rangeLocation, "For loop starts at 0, but arrays start at 1");
             // for i=#t,0 do
-            else if (fu && fu->op == AstExprUnary::Len && tc && tc->value == 0.0)
-                emitWarning(*context, LintWarning::Code_ForRange, rangeLocation,
-                    "For loop should iterate backwards; did you forget to specify -1 as step? Also consider changing 0 to 1 since arrays start at 1");
+            else if (fu && fu->op == AstExprUnary::Op::Len && tc && tc->value == 0.0)
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ForRange,
+                    rangeLocation,
+                    "For loop should iterate backwards; did you forget to specify -1 as step? Also consider changing 0 to 1 since arrays start at 1"
+                );
         }
 
         return true;
@@ -1285,16 +1329,27 @@ private:
             AstExpr* last = values.data[values.size - 1];
 
             if (vars < values.size)
-                emitWarning(*context, LintWarning::Code_UnbalancedAssignment, location,
-                    "Assigning %d values to %d variables leaves some values unused", int(values.size), int(vars));
+                emitWarning(
+                    *context,
+                    LintWarning::Code_UnbalancedAssignment,
+                    location,
+                    "Assigning %d values to %d variables leaves some values unused",
+                    int(values.size),
+                    int(vars)
+                );
             else if (last->is<AstExprCall>() || last->is<AstExprVarargs>())
                 ; // we don't know how many values the last expression returns
             else if (last->is<AstExprConstantNil>())
                 ; // last expression is nil which explicitly silences the nil-init warning
             else
-                emitWarning(*context, LintWarning::Code_UnbalancedAssignment, location,
-                    "Assigning %d values to %d variables initializes extra variables with nil; add 'nil' to value list to silence", int(values.size),
-                    int(vars));
+                emitWarning(
+                    *context,
+                    LintWarning::Code_UnbalancedAssignment,
+                    location,
+                    "Assigning %d values to %d variables initializes extra variables with nil; add 'nil' to value list to silence",
+                    int(values.size),
+                    int(vars)
+                );
         }
     }
 
@@ -1377,13 +1432,22 @@ private:
             Location location = getEndLocation(bodyf);
 
             if (node->debugname.value)
-                emitWarning(*context, LintWarning::Code_ImplicitReturn, location,
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ImplicitReturn,
+                    location,
                     "Function '%s' can implicitly return no values even though there's an explicit return at line %d; add explicit return to silence",
-                    node->debugname.value, vret->location.begin.line + 1);
+                    node->debugname.value,
+                    vret->location.begin.line + 1
+                );
             else
-                emitWarning(*context, LintWarning::Code_ImplicitReturn, location,
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ImplicitReturn,
+                    location,
                     "Function can implicitly return no values even though there's an explicit return at line %d; add explicit return to silence",
-                    vret->location.begin.line + 1);
+                    vret->location.begin.line + 1
+                );
         }
 
         return true;
@@ -1433,7 +1497,7 @@ private:
     const char* checkStringFormat(const char* data, size_t size)
     {
         const char* flags = "-+ #0";
-        const char* options = "cdiouxXeEfgGqs";
+        const char* options = "cdiouxXeEfgGqs*";
 
         for (size_t i = 0; i < size; ++i)
         {
@@ -1838,11 +1902,11 @@ private:
         int count = 0;
 
         for (const AstExprTable::Item& item : node->items)
-            if (item.kind == AstExprTable::Item::List)
+            if (item.kind == AstExprTable::Item::Kind::List)
                 count++;
 
-        DenseHashMap<AstArray<char>*, int, AstArrayPredicate, AstArrayPredicate> names(nullptr);
-        DenseHashMap<int, int> indices(-1);
+        DenseHashMap<AstArray<char>*, int, AstArrayPredicate, AstArrayPredicate> names;
+        DenseHashMap<int, int> indices;
 
         for (const AstExprTable::Item& item : node->items)
         {
@@ -1854,23 +1918,41 @@ private:
                 int& line = names[&expr->value];
 
                 if (line)
-                    emitWarning(*context, LintWarning::Code_TableLiteral, expr->location,
-                        "Table field '%.*s' is a duplicate; previously defined at line %d", int(expr->value.size), expr->value.data, line);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_TableLiteral,
+                        expr->location,
+                        "Table field '%.*s' is a duplicate; previously defined at line %d",
+                        int(expr->value.size),
+                        expr->value.data,
+                        line
+                    );
                 else
                     line = expr->location.begin.line + 1;
             }
             else if (AstExprConstantNumber* expr = item.key->as<AstExprConstantNumber>())
             {
                 if (expr->value >= 1 && expr->value <= double(count) && double(int(expr->value)) == expr->value)
-                    emitWarning(*context, LintWarning::Code_TableLiteral, expr->location,
-                        "Table index %d is a duplicate; previously defined as a list entry", int(expr->value));
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_TableLiteral,
+                        expr->location,
+                        "Table index %d is a duplicate; previously defined as a list entry",
+                        int(expr->value)
+                    );
                 else if (expr->value >= 0 && expr->value <= double(INT_MAX) && double(int(expr->value)) == expr->value)
                 {
                     int& line = indices[int(expr->value)];
 
                     if (line)
-                        emitWarning(*context, LintWarning::Code_TableLiteral, expr->location,
-                            "Table index %d is a duplicate; previously defined at line %d", int(expr->value), line);
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableLiteral,
+                            expr->location,
+                            "Table index %d is a duplicate; previously defined at line %d",
+                            int(expr->value),
+                            line
+                        );
                     else
                         line = expr->location.begin.line + 1;
                 }
@@ -1885,17 +1967,95 @@ private:
         return true;
     }
 
+    bool visit(AstTypePack* node) override
+    {
+        return true;
+    }
+
     bool visit(AstTypeTable* node) override
     {
-        DenseHashMap<AstName, int> names(AstName{});
+        struct Rec
+        {
+            AstTableAccess access;
+            Location location;
+        };
+
+        if (context->module->checkedInNewSolver)
+        {
+            DenseHashMap<AstName, Rec> names;
+
+            for (const AstTableProp& item : node->props)
+            {
+                Rec* rec = names.find(item.name);
+                if (!rec)
+                {
+                    names[item.name] = Rec{item.access, item.location};
+                    continue;
+                }
+
+                if (int(rec->access) & int(item.access))
+                {
+                    if (rec->access == item.access)
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableLiteral,
+                            item.location,
+                            "Table type field '%s' is a duplicate; previously defined at line %d",
+                            item.name.value,
+                            rec->location.begin.line + 1
+                        );
+                    else if (rec->access == AstTableAccess::ReadWrite)
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableLiteral,
+                            item.location,
+                            "Table type field '%s' is already read-write; previously defined at line %d",
+                            item.name.value,
+                            rec->location.begin.line + 1
+                        );
+                    else if (rec->access == AstTableAccess::Read)
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableLiteral,
+                            rec->location,
+                            "Table type field '%s' already has a read type defined at line %d",
+                            item.name.value,
+                            rec->location.begin.line + 1
+                        );
+                    else if (rec->access == AstTableAccess::Write)
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableLiteral,
+                            rec->location,
+                            "Table type field '%s' already has a write type defined at line %d",
+                            item.name.value,
+                            rec->location.begin.line + 1
+                        );
+                    else
+                        LUAU_ASSERT(!"Unreachable");
+                }
+                else
+                    rec->access = AstTableAccess(int(rec->access) | int(item.access));
+            }
+
+            return true;
+        }
+
+        DenseHashMap<AstName, int> names;
 
         for (const AstTableProp& item : node->props)
         {
             int& line = names[item.name];
 
             if (line)
-                emitWarning(*context, LintWarning::Code_TableLiteral, item.location,
-                    "Table type field '%s' is a duplicate; previously defined at line %d", item.name.value, line);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableLiteral,
+                    item.location,
+                    "Table type field '%s' is a duplicate; previously defined at line %d",
+                    item.name.value,
+                    line
+                );
             else
                 line = item.location.begin.line + 1;
         }
@@ -1942,10 +2102,7 @@ private:
     LintContext* context;
     DenseHashMap<AstLocal*, Local> locals;
 
-    LintUninitializedLocal()
-        : locals(NULL)
-    {
-    }
+    LintUninitializedLocal() = default;
 
     void report()
     {
@@ -1956,9 +2113,14 @@ private:
 
             if (l.defined && !l.initialized && !l.assigned && l.firstUse)
             {
-                emitWarning(*context, LintWarning::Code_UninitializedLocal, l.firstUse->location,
-                    "Variable '%s' defined at line %d is never initialized or assigned; initialize with 'nil' to silence", local->name.value,
-                    local->location.begin.line + 1);
+                emitWarning(
+                    *context,
+                    LintWarning::Code_UninitializedLocal,
+                    l.firstUse->location,
+                    "Variable '%s' defined at line %d is never initialized or assigned; initialize with 'nil' to silence",
+                    local->name.value,
+                    local->location.begin.line + 1
+                );
             }
         }
     }
@@ -2038,7 +2200,6 @@ private:
 
     LintDuplicateFunction(LintContext* context)
         : context(context)
-        , defns("")
     {
     }
 
@@ -2092,8 +2253,14 @@ private:
 
     void report(const std::string& name, Location location, Location otherLocation)
     {
-        emitWarning(*context, LintWarning::Code_DuplicateFunction, location, "Duplicate function definition: '%s' also defined on line %d",
-            name.c_str(), otherLocation.begin.line + 1);
+        emitWarning(
+            *context,
+            LintWarning::Code_DuplicateFunction,
+            location,
+            "Duplicate function definition: '%s' also defined on line %d",
+            name.c_str(),
+            otherLocation.begin.line + 1
+        );
     }
 };
 
@@ -2102,9 +2269,6 @@ class LintDeprecatedApi : AstVisitor
 public:
     LUAU_NOINLINE static void process(LintContext& context)
     {
-        if (!context.module)
-            return;
-
         LintDeprecatedApi pass{&context};
         context.root->visit(&pass);
     }
@@ -2117,28 +2281,334 @@ private:
     {
     }
 
-    bool visit(AstExprIndexName* node) override
+    bool visit(AstExprLocal* node) override
     {
-        std::optional<TypeId> ty = context->getType(node->expr);
-        if (!ty)
-            return true;
+        const FunctionType* fty = getFunctionType(node);
+        bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
 
-        if (const ClassTypeVar* cty = get<ClassTypeVar>(follow(*ty)))
+        if (shouldReport)
         {
-            const Property* prop = lookupClassProp(cty, node->index.value);
-
-            if (prop && prop->deprecated)
-                report(node->location, *prop, cty->name.c_str(), node->index.value);
-        }
-        else if (const TableTypeVar* tty = get<TableTypeVar>(follow(*ty)))
-        {
-            auto prop = tty->props.find(node->index.value);
-
-            if (prop != tty->props.end() && prop->second.deprecated)
-                report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
+            if (fty->deprecatedInfo != nullptr)
+            {
+                report(node->location, node->local->name.value, *fty->deprecatedInfo);
+            }
+            else
+            {
+                report(node->location, node->local->name.value);
+            }
         }
 
         return true;
+    }
+
+    bool visit(AstExprGlobal* node) override
+    {
+        const FunctionType* fty = getFunctionType(node);
+        bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
+
+        if (shouldReport)
+        {
+            if (fty->deprecatedInfo != nullptr)
+            {
+                report(node->location, node->name.value, *fty->deprecatedInfo);
+            }
+            else
+            {
+                report(node->location, node->name.value);
+            }
+        }
+
+        return true;
+    }
+
+    bool visit(AstStatLocalFunction* node) override
+    {
+        check(node->func);
+        return false;
+    }
+
+    bool visit(AstStatFunction* node) override
+    {
+        check(node->func);
+        return false;
+    }
+
+    bool visit(AstExprIndexName* node) override
+    {
+        if (std::optional<TypeId> ty = context->getType(node->expr))
+            check(node, follow(*ty));
+        else if (AstExprGlobal* global = node->expr->as<AstExprGlobal>())
+            check(node->location, global->name, node->index);
+
+        return true;
+    }
+
+    bool visit(AstExprCall* node) override
+    {
+        // getfenv/setfenv are deprecated, however they are still used in some test frameworks and don't have a great general replacement
+        // for now we warn about the deprecation only when they are used with a numeric first argument; this produces fewer warnings and makes use
+        // of getfenv/setfenv a little more localized
+        if (!node->self && node->args.size >= 1)
+        {
+            if (AstExprGlobal* fenv = node->func->as<AstExprGlobal>(); fenv && (fenv->name == "getfenv" || fenv->name == "setfenv"))
+            {
+                AstExpr* level = node->args.data[0];
+                std::optional<TypeId> ty = context->getType(level);
+
+                if ((ty && isNumber(*ty)) || level->is<AstExprConstantNumber>())
+                {
+                    // some common uses of getfenv(n) can be replaced by debug.info if the goal is to get the caller's identity
+                    const char* suggestion = (fenv->name == "getfenv") ? "; consider using 'debug.info' instead" : "";
+
+                    emitWarning(
+                        *context, LintWarning::Code_DeprecatedApi, node->location, "Function '%s' is deprecated%s", fenv->name.value, suggestion
+                    );
+                }
+            }
+        }
+
+        return true;
+    }
+
+    void check(AstExprIndexName* node, TypeId ty)
+    {
+        if (FFlag::LuauImproveDeprecatedLint)
+        {
+            if (!checkProperty(node, ty, 0))
+            {
+                if (std::optional<TypeId> indexedType = context->getType(node))
+                    checkFunction(node, *indexedType);
+            }
+        }
+        else
+        {
+            if (const ExternType* cty = get<ExternType>(ty))
+            {
+                if (const Property* prop = lookupExternTypeProp(cty, node->index.value))
+                {
+                    if (prop->deprecated)
+                    {
+                        report(node->location, *prop, cty->name.c_str(), node->index.value);
+                    }
+                    else if (std::optional<TypeId> ty = prop->readTy)
+                    {
+                        const FunctionType* fty = get<FunctionType>(follow(ty));
+                        bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
+
+                        if (shouldReport)
+                        {
+                            const char* className = nullptr;
+                            if (AstExprGlobal* global = node->expr->as<AstExprGlobal>())
+                                className = global->name.value;
+
+                            const char* functionName = node->index.value;
+                            if (fty->deprecatedInfo != nullptr)
+                            {
+                                report(node->location, className, functionName, *fty->deprecatedInfo);
+                            }
+                            else
+                            {
+                                report(node->location, className, functionName);
+                            }
+                        }
+                    }
+                }
+            }
+            else if (const TableType* tty = get<TableType>(ty))
+            {
+                auto prop = tty->props.find(node->index.value);
+
+                if (prop != tty->props.end())
+                {
+                    if (prop->second.deprecated)
+                    {
+                        // strip synthetic typeof() for builtin tables
+                        if (tty->name && tty->name->compare(0, 7, "typeof(") == 0 && tty->name->back() == ')')
+                            report(node->location, prop->second, tty->name->substr(7, tty->name->length() - 8).c_str(), node->index.value);
+                        else
+                            report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
+                    }
+                    else
+                    {
+                        if (std::optional<TypeId> ty = prop->second.readTy)
+                        {
+                            const FunctionType* fty = get<FunctionType>(follow(ty));
+                            bool shouldReport = fty && fty->isDeprecatedFunction && !inScope(fty);
+
+                            if (shouldReport)
+                            {
+                                const char* className = nullptr;
+                                if (AstExprGlobal* global = node->expr->as<AstExprGlobal>())
+                                    className = global->name.value;
+
+                                const char* functionName = node->index.value;
+
+                                if (fty->deprecatedInfo != nullptr)
+                                {
+                                    report(node->location, className, functionName, *fty->deprecatedInfo);
+                                }
+                                else
+                                {
+                                    report(node->location, className, functionName);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    bool checkProperty(AstExprIndexName* node, TypeId ty, int metatableDepth)
+    {
+        LUAU_ASSERT(FFlag::LuauImproveDeprecatedLint);
+
+        if (metatableDepth >= FInt::LuauLinterRecursionLimit)
+            return false;
+
+        ty = follow(ty);
+
+        if (auto ety = get<ExternType>(ty))
+        {
+            if (const Property* prop = lookupExternTypeProp(ety, node->index.value))
+            {
+                if (prop->deprecated)
+                    report(node->location, *prop, ety->name.c_str(), node->index.value);
+                else if (std::optional<TypeId> ty = prop->readTy)
+                    checkFunction(node, *ty);
+
+                return true;
+            }
+        }
+        else if (auto tty = get<TableType>(ty))
+        {
+            auto prop = tty->props.find(node->index.value);
+
+            if (prop != tty->props.end())
+            {
+                if (prop->second.deprecated)
+                {
+                    // strip synthetic typeof() for builtin tables
+                    if (tty->name && tty->name->compare(0, 7, "typeof(") == 0 && tty->name->back() == ')')
+                        report(node->location, prop->second, tty->name->substr(7, tty->name->length() - 8).c_str(), node->index.value);
+                    else
+                        report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
+                }
+                else if (std::optional<TypeId> ty = prop->second.readTy)
+                    checkFunction(node, *ty);
+
+                return true;
+            }
+        }
+        else if (auto mtv = get<MetatableType>(ty))
+        {
+            return checkMetatableProperty(node, mtv->table, mtv->metatable, metatableDepth);
+        }
+
+        return false;
+    }
+
+    bool checkMetatableProperty(AstExprIndexName* node, TypeId tableTy, TypeId metatableTy, int metatableDepth)
+    {
+        LUAU_ASSERT(FFlag::LuauImproveDeprecatedLint);
+
+        if (checkProperty(node, tableTy, metatableDepth + 1))
+            return true;
+
+        if (const TableType* metatable = getTableType(metatableTy))
+        {
+            auto index = metatable->props.find("__index");
+            if (index != metatable->props.end() && index->second.readTy)
+                return checkProperty(node, *index->second.readTy, metatableDepth + 1);
+        }
+
+        return false;
+    }
+
+    void checkFunction(AstExprIndexName* node, TypeId ty)
+    {
+        LUAU_ASSERT(FFlag::LuauImproveDeprecatedLint);
+
+        if (auto fty = getDeprecatedFunctionType(ty, 0))
+        {
+            const char* className = nullptr;
+            if (auto global = node->expr->as<AstExprGlobal>())
+                className = global->name.value;
+
+            const char* functionName = node->index.value;
+
+            if (fty->deprecatedInfo != nullptr)
+                report(node->location, className, functionName, *fty->deprecatedInfo);
+            else
+                report(node->location, className, functionName);
+        }
+    }
+
+    const FunctionType* getDeprecatedFunctionType(TypeId ty, int depth)
+    {
+        LUAU_ASSERT(FFlag::LuauImproveDeprecatedLint);
+
+        if (depth >= FInt::LuauLinterRecursionLimit)
+            return nullptr;
+
+        ty = follow(ty);
+
+        if (const FunctionType* fty = get<FunctionType>(ty))
+            return fty->isDeprecatedFunction && !inScope(fty) ? fty : nullptr;
+
+        const std::vector<TypeId>* parts = nullptr;
+        if (const IntersectionType* itv = get<IntersectionType>(ty))
+            parts = &itv->parts;
+        else if (const UnionType* utv = get<UnionType>(ty))
+            parts = &utv->options;
+
+        if (!parts || parts->empty())
+            return nullptr;
+
+        const FunctionType* result = nullptr;
+        for (TypeId part : *parts)
+        {
+            const FunctionType* candidate = getDeprecatedFunctionType(part, depth + 1);
+            if (!candidate)
+                return nullptr;
+
+            if (!result)
+                result = candidate;
+        }
+
+        return result;
+    }
+
+    void check(const Location& location, AstName global, AstName index)
+    {
+        if (const LintContext::Global* gv = context->builtinGlobals.find(global))
+        {
+            if (const TableType* tty = get<TableType>(gv->type))
+            {
+                auto prop = tty->props.find(index.value);
+
+                if (prop != tty->props.end() && prop->second.deprecated)
+                    report(location, prop->second, global.value, index.value);
+            }
+        }
+    }
+
+    void check(AstExprFunction* func)
+    {
+        LUAU_ASSERT(func);
+
+        const FunctionType* fty = getFunctionType(func);
+        bool isDeprecated = fty && fty->isDeprecatedFunction;
+        // If a function is deprecated, we don't want to flag its recursive uses.
+        // So we push it on a stack while its body is being analyzed.
+        // When a deprecated function is used, we check the stack to ensure that we are not inside that function.
+        if (isDeprecated)
+            pushScope(fty);
+
+        func->visit(this);
+
+        if (isDeprecated)
+            popScope(fty);
     }
 
     void report(const Location& location, const Property& prop, const char* container, const char* field)
@@ -2149,6 +2619,90 @@ private:
             emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s.%s' is deprecated%s", container, field, suggestion.c_str());
         else
             emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s' is deprecated%s", field, suggestion.c_str());
+    }
+
+    void report(const Location& location, const char* tableName, const char* functionName)
+    {
+        if (tableName)
+            emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s.%s' is deprecated", tableName, functionName);
+        else
+            emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Member '%s' is deprecated", functionName);
+    }
+
+    void report(const Location& location, const char* tableName, const char* functionName, const AstAttr::DeprecatedInfo& info)
+    {
+        std::string usePart = info.use ? format(", use '%s' instead", info.use->c_str()) : "";
+        std::string reasonPart = info.reason ? format(". %s", info.reason->c_str()) : "";
+        if (tableName)
+            emitWarning(
+                *context,
+                LintWarning::Code_DeprecatedApi,
+                location,
+                "Member '%s.%s' is deprecated%s%s",
+                tableName,
+                functionName,
+                usePart.c_str(),
+                reasonPart.c_str()
+            );
+        else
+            emitWarning(
+                *context,
+                LintWarning::Code_DeprecatedApi,
+                location,
+                "Member '%s' is deprecated%s%s",
+                functionName,
+                usePart.c_str(),
+                reasonPart.c_str()
+            );
+    }
+
+    void report(const Location& location, const char* functionName)
+    {
+        emitWarning(*context, LintWarning::Code_DeprecatedApi, location, "Function '%s' is deprecated", functionName);
+    }
+
+    void report(const Location& location, const char* functionName, const AstAttr::DeprecatedInfo& info)
+    {
+        std::string usePart = info.use ? format(", use '%s' instead", info.use->c_str()) : "";
+        std::string reasonPart = info.reason ? format(". %s", info.reason->c_str()) : "";
+        emitWarning(
+            *context, LintWarning::Code_DeprecatedApi, location, "Function '%s' is deprecated%s%s", functionName, usePart.c_str(), reasonPart.c_str()
+        );
+    }
+
+    std::vector<const FunctionType*> functionTypeScopeStack;
+
+    void pushScope(const FunctionType* fty)
+    {
+        LUAU_ASSERT(fty);
+
+        functionTypeScopeStack.push_back(fty);
+    }
+
+    void popScope(const FunctionType* fty)
+    {
+        LUAU_ASSERT(fty);
+
+        LUAU_ASSERT(fty == functionTypeScopeStack.back());
+        functionTypeScopeStack.pop_back();
+    }
+
+    bool inScope(const FunctionType* fty) const
+    {
+        LUAU_ASSERT(fty);
+
+        return std::find(functionTypeScopeStack.begin(), functionTypeScopeStack.end(), fty) != functionTypeScopeStack.end();
+    }
+
+    const FunctionType* getFunctionType(AstExpr* node)
+    {
+        std::optional<TypeId> ty = context->getType(node);
+        if (!ty)
+            return nullptr;
+
+        const FunctionType* fty = get<FunctionType>(follow(ty));
+
+        return fty;
     }
 };
 
@@ -2172,16 +2726,50 @@ private:
     {
     }
 
+    bool visit(AstExprUnary* node) override
+    {
+        if (node->op == AstExprUnary::Op::Len)
+            checkIndexer(node, node->expr, "#");
+
+        return true;
+    }
+
     bool visit(AstExprCall* node) override
     {
-        AstExprIndexName* func = node->func->as<AstExprIndexName>();
-        if (!func)
-            return true;
+        if (AstExprGlobal* func = node->func->as<AstExprGlobal>())
+        {
+            if (func->name == "ipairs" && node->args.size == 1)
+                checkIndexer(node, node->args.data[0], "ipairs");
+        }
+        else if (AstExprIndexName* func = node->func->as<AstExprIndexName>())
+        {
+            if (AstExprGlobal* tablib = func->expr->as<AstExprGlobal>(); tablib && tablib->name == "table")
+                checkTableCall(node, func);
+        }
 
-        AstExprGlobal* tablib = func->expr->as<AstExprGlobal>();
-        if (!tablib || tablib->name != "table")
-            return true;
+        return true;
+    }
 
+    void checkIndexer(AstExpr* node, AstExpr* expr, const char* op)
+    {
+        std::optional<Luau::TypeId> ty = context->getType(expr);
+        if (!ty)
+            return;
+
+        const TableType* tty = get<TableType>(follow(*ty));
+        if (!tty)
+            return;
+
+        if (!tty->indexer && !tty->props.empty() && tty->state != TableState::Generic)
+            emitWarning(
+                *context, LintWarning::Code_TableOperations, node->location, "Using '%s' on a table without an array part is likely a bug", op
+            );
+        else if (tty->indexer && isString(tty->indexer->indexType)) // note: to avoid complexity of subtype tests we just check if the key is a string
+            emitWarning(*context, LintWarning::Code_TableOperations, node->location, "Using '%s' on a table with string keys is likely a bug", op);
+    }
+
+    void checkTableCall(AstExprCall* node, AstExprIndexName* func)
+    {
         AstExpr** args = node->args.data;
 
         if (func->index == "insert" && node->args.size == 2)
@@ -2193,9 +2781,13 @@ private:
                     size_t ret = getReturnCount(follow(*funty));
 
                     if (ret > 1)
-                        emitWarning(*context, LintWarning::Code_TableOperations, tail->location,
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_TableOperations,
+                            tail->location,
                             "table.insert may change behavior if the call returns more than one result; consider adding parentheses around second "
-                            "argument");
+                            "argument"
+                        );
                 }
             }
         }
@@ -2204,28 +2796,44 @@ private:
         {
             // table.insert(t, 0, ?)
             if (isConstant(args[1], 0.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
-                    "table.insert uses index 0 but arrays are 1-based; did you mean 1 instead?");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
+                    "table.insert uses index 0 but arrays are 1-based; did you mean 1 instead?"
+                );
 
             // table.insert(t, #t, ?)
             if (isLength(args[1], args[0]))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
                     "table.insert will insert the value before the last element, which is likely a bug; consider removing the second argument or "
-                    "wrap it in parentheses to silence");
+                    "wrap it in parentheses to silence"
+                );
 
             // table.insert(t, #t+1, ?)
             if (AstExprBinary* add = args[1]->as<AstExprBinary>();
                 add && add->op == AstExprBinary::Add && isLength(add->left, args[0]) && isConstant(add->right, 1.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
-                    "table.insert will append the value to the table; consider removing the second argument for efficiency");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
+                    "table.insert will append the value to the table; consider removing the second argument for efficiency"
+                );
         }
 
         if (func->index == "remove" && node->args.size >= 2)
         {
             // table.remove(t, 0)
             if (isConstant(args[1], 0.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
-                    "table.remove uses index 0 but arrays are 1-based; did you mean 1 instead?");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
+                    "table.remove uses index 0 but arrays are 1-based; did you mean 1 instead?"
+                );
 
             // note: it's tempting to check for table.remove(t, #t), which is equivalent to table.remove(t), but it's correct, occurs frequently,
             // and also reads better.
@@ -2233,38 +2841,56 @@ private:
             // table.remove(t, #t-1)
             if (AstExprBinary* sub = args[1]->as<AstExprBinary>();
                 sub && sub->op == AstExprBinary::Sub && isLength(sub->left, args[0]) && isConstant(sub->right, 1.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
                     "table.remove will remove the value before the last element, which is likely a bug; consider removing the second argument or "
-                    "wrap it in parentheses to silence");
+                    "wrap it in parentheses to silence"
+                );
         }
 
         if (func->index == "move" && node->args.size >= 4)
         {
             // table.move(t, 0, _, _)
             if (isConstant(args[1], 0.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
-                    "table.move uses index 0 but arrays are 1-based; did you mean 1 instead?");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
+                    "table.move uses index 0 but arrays are 1-based; did you mean 1 instead?"
+                );
 
             // table.move(t, _, _, 0)
             else if (isConstant(args[3], 0.0))
-                emitWarning(*context, LintWarning::Code_TableOperations, args[3]->location,
-                    "table.move uses index 0 but arrays are 1-based; did you mean 1 instead?");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[3]->location,
+                    "table.move uses index 0 but arrays are 1-based; did you mean 1 instead?"
+                );
         }
 
         if (func->index == "create" && node->args.size == 2)
         {
             // table.create(n, {...})
             if (args[1]->is<AstExprTable>())
-                emitWarning(*context, LintWarning::Code_TableOperations, args[1]->location,
-                    "table.create with a table literal will reuse the same object for all elements; consider using a for loop instead");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    args[1]->location,
+                    "table.create with a table literal will reuse the same object for all elements; consider using a for loop instead"
+                );
 
             // table.create(n, {...} :: ?)
             if (AstExprTypeAssertion* as = args[1]->as<AstExprTypeAssertion>(); as && as->expr->is<AstExprTable>())
-                emitWarning(*context, LintWarning::Code_TableOperations, as->expr->location,
-                    "table.create with a table literal will reuse the same object for all elements; consider using a for loop instead");
+                emitWarning(
+                    *context,
+                    LintWarning::Code_TableOperations,
+                    as->expr->location,
+                    "table.create with a table literal will reuse the same object for all elements; consider using a for loop instead"
+                );
         }
-
-        return true;
     }
 
     bool isConstant(AstExpr* expr, double value)
@@ -2276,22 +2902,22 @@ private:
     bool isLength(AstExpr* expr, AstExpr* table)
     {
         AstExprUnary* n = expr->as<AstExprUnary>();
-        return n && n->op == AstExprUnary::Len && similar(n->expr, table);
+        return n && n->op == AstExprUnary::Op::Len && similar(n->expr, table);
     }
 
     size_t getReturnCount(TypeId ty)
     {
-        if (auto ftv = get<FunctionTypeVar>(ty))
-            return size(ftv->retType);
+        if (auto ftv = get<FunctionType>(ty))
+            return size(ftv->retTypes);
 
-        if (auto itv = get<IntersectionTypeVar>(ty))
+        if (auto itv = get<IntersectionType>(ty))
         {
             // We don't process the type recursively to avoid having to deal with self-recursive intersection types
             size_t result = 0;
 
             for (TypeId part : itv->parts)
-                if (auto ftv = get<FunctionTypeVar>(follow(part)))
-                    result = std::max(result, size(ftv->retType));
+                if (auto ftv = get<FunctionType>(follow(part)))
+                    result = std::max(result, size(ftv->retTypes));
 
             return result;
         }
@@ -2335,7 +2961,8 @@ private:
             head->condition->visit(this);
             head->thenbody->visit(this);
 
-            conditions.push_back(head->condition);
+            if (!FFlag::LuauExperimentalIfLocalAnalysis || !head->conditionLocal)
+                conditions.push_back(head->condition);
 
             if (head->elsebody && head->elsebody->is<AstStatIf>())
             {
@@ -2370,7 +2997,8 @@ private:
             head->condition->visit(this);
             head->trueExpr->visit(this);
 
-            conditions.push_back(head->condition);
+            if (!FFlag::LuauExperimentalIfLocalAnalysis || !head->conditionLocal)
+                conditions.push_back(head->condition);
 
             if (head->falseExpr->is<AstExprIfElse>())
             {
@@ -2455,11 +3083,21 @@ private:
                 if (similar(conditions[j], conditions[i]))
                 {
                     if (conditions[i]->location.begin.line == conditions[j]->location.begin.line)
-                        emitWarning(*context, LintWarning::Code_DuplicateCondition, conditions[i]->location,
-                            "Condition has already been checked on column %d", conditions[j]->location.begin.column + 1);
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_DuplicateCondition,
+                            conditions[i]->location,
+                            "Condition has already been checked on column %d",
+                            conditions[j]->location.begin.column + 1
+                        );
                     else
-                        emitWarning(*context, LintWarning::Code_DuplicateCondition, conditions[i]->location,
-                            "Condition has already been checked on line %d", conditions[j]->location.begin.line + 1);
+                        emitWarning(
+                            *context,
+                            LintWarning::Code_DuplicateCondition,
+                            conditions[i]->location,
+                            "Condition has already been checked on line %d",
+                            conditions[j]->location.begin.line + 1
+                        );
                     break;
                 }
             }
@@ -2483,10 +3121,7 @@ private:
 
     DenseHashMap<AstLocal*, AstNode*> locals;
 
-    LintDuplicateLocal()
-        : locals(nullptr)
-    {
-    }
+    LintDuplicateLocal() = default;
 
     bool visit(AstStatLocal* node) override
     {
@@ -2504,11 +3139,23 @@ private:
             if (local->shadow && locals[local->shadow] == node && !ignoreDuplicate(local))
             {
                 if (local->shadow->location.begin.line == local->location.begin.line)
-                    emitWarning(*context, LintWarning::Code_DuplicateLocal, local->location, "Variable '%s' already defined on column %d",
-                        local->name.value, local->shadow->location.begin.column + 1);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_DuplicateLocal,
+                        local->location,
+                        "Variable '%s' already defined on column %d",
+                        local->name.value,
+                        local->shadow->location.begin.column + 1
+                    );
                 else
-                    emitWarning(*context, LintWarning::Code_DuplicateLocal, local->location, "Variable '%s' already defined on line %d",
-                        local->name.value, local->shadow->location.begin.line + 1);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_DuplicateLocal,
+                        local->location,
+                        "Variable '%s' already defined on line %d",
+                        local->name.value,
+                        local->shadow->location.begin.line + 1
+                    );
             }
         }
 
@@ -2532,11 +3179,23 @@ private:
                 if (local->shadow == node->self)
                     emitWarning(*context, LintWarning::Code_DuplicateLocal, local->location, "Function parameter 'self' already defined implicitly");
                 else if (local->shadow->location.begin.line == local->location.begin.line)
-                    emitWarning(*context, LintWarning::Code_DuplicateLocal, local->location, "Function parameter '%s' already defined on column %d",
-                        local->name.value, local->shadow->location.begin.column + 1);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_DuplicateLocal,
+                        local->location,
+                        "Function parameter '%s' already defined on column %d",
+                        local->name.value,
+                        local->shadow->location.begin.column + 1
+                    );
                 else
-                    emitWarning(*context, LintWarning::Code_DuplicateLocal, local->location, "Function parameter '%s' already defined on line %d",
-                        local->name.value, local->shadow->location.begin.line + 1);
+                    emitWarning(
+                        *context,
+                        LintWarning::Code_DuplicateLocal,
+                        local->location,
+                        "Function parameter '%s' already defined on line %d",
+                        local->name.value,
+                        local->shadow->location.begin.line + 1
+                    );
             }
         }
 
@@ -2580,10 +3239,165 @@ private:
             alt = "false";
 
         if (alt)
-            emitWarning(*context, LintWarning::Code_MisleadingAndOr, node->location,
+            emitWarning(
+                *context,
+                LintWarning::Code_MisleadingAndOr,
+                node->location,
                 "The and-or expression always evaluates to the second alternative because the first alternative is %s; consider using if-then-else "
                 "expression instead",
-                alt);
+                alt
+            );
+
+        return true;
+    }
+};
+
+class LintIntegerParsing : AstVisitor
+{
+public:
+    LUAU_NOINLINE static void process(LintContext& context)
+    {
+        LintIntegerParsing pass;
+        pass.context = &context;
+
+        context.root->visit(&pass);
+    }
+
+private:
+    LintContext* context;
+
+    bool visit(AstExprConstantNumber* node) override
+    {
+        switch (node->parseResult)
+        {
+        case ConstantNumberParseResult::Ok:
+        case ConstantNumberParseResult::Malformed:
+            break;
+        case ConstantNumberParseResult::Imprecise:
+            emitWarning(
+                *context,
+                LintWarning::Code_IntegerParsing,
+                node->location,
+                "Number literal exceeded available precision and was truncated to closest representable number"
+            );
+            break;
+        case ConstantNumberParseResult::BinOverflow:
+            emitWarning(
+                *context,
+                LintWarning::Code_IntegerParsing,
+                node->location,
+                "Binary number literal exceeded available precision and was truncated to 2^64"
+            );
+            break;
+        case ConstantNumberParseResult::HexOverflow:
+            emitWarning(
+                *context,
+                LintWarning::Code_IntegerParsing,
+                node->location,
+                "Hexadecimal number literal exceeded available precision and was truncated to 2^64"
+            );
+            break;
+        case ConstantNumberParseResult::IntOverflow:
+            emitWarning(*context, LintWarning::Code_IntegerParsing, node->location, "Integer number literal was clamped because it was out of range");
+            break;
+        }
+
+        return true;
+    }
+};
+
+class LintComparisonPrecedence : AstVisitor
+{
+public:
+    LUAU_NOINLINE static void process(LintContext& context)
+    {
+        LintComparisonPrecedence pass;
+        pass.context = &context;
+
+        context.root->visit(&pass);
+    }
+
+private:
+    LintContext* context;
+
+    static bool isEquality(AstExprBinary::Op op)
+    {
+        return op == AstExprBinary::CompareNe || op == AstExprBinary::CompareEq;
+    }
+
+    static bool isComparison(AstExprBinary::Op op)
+    {
+        return op == AstExprBinary::CompareNe || op == AstExprBinary::CompareEq || op == AstExprBinary::CompareLt || op == AstExprBinary::CompareLe ||
+               op == AstExprBinary::CompareGt || op == AstExprBinary::CompareGe;
+    }
+
+    static bool isNot(AstExpr* node)
+    {
+        AstExprUnary* expr = node->as<AstExprUnary>();
+
+        return expr && expr->op == AstExprUnary::Op::Not;
+    }
+
+    bool visit(AstExprBinary* node) override
+    {
+        if (!isComparison(node->op))
+            return true;
+
+        // not X == Y; we silence this for not X == not Y as it's likely an intentional boolean comparison
+        if (isNot(node->left) && !isNot(node->right))
+        {
+            std::string op = toString(node->op);
+
+            if (isEquality(node->op))
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ComparisonPrecedence,
+                    node->location,
+                    "not X %s Y is equivalent to (not X) %s Y; consider using X %s Y, or add parentheses to silence",
+                    op.c_str(),
+                    op.c_str(),
+                    node->op == AstExprBinary::CompareEq ? "~=" : "=="
+                );
+            else
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ComparisonPrecedence,
+                    node->location,
+                    "not X %s Y is equivalent to (not X) %s Y; add parentheses to silence",
+                    op.c_str(),
+                    op.c_str()
+                );
+        }
+        else if (AstExprBinary* left = node->left->as<AstExprBinary>(); left && isComparison(left->op))
+        {
+            std::string lop = toString(left->op);
+            std::string rop = toString(node->op);
+
+            if (isEquality(left->op) || isEquality(node->op))
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ComparisonPrecedence,
+                    node->location,
+                    "X %s Y %s Z is equivalent to (X %s Y) %s Z; add parentheses to silence",
+                    lop.c_str(),
+                    rop.c_str(),
+                    lop.c_str(),
+                    rop.c_str()
+                );
+            else
+                emitWarning(
+                    *context,
+                    LintWarning::Code_ComparisonPrecedence,
+                    node->location,
+                    "X %s Y %s Z is equivalent to (X %s Y) %s Z; did you mean X %s Y and Y %s Z?",
+                    lop.c_str(),
+                    rop.c_str(),
+                    lop.c_str(),
+                    rop.c_str(),
+                    lop.c_str(),
+                    rop.c_str()
+                );
+        }
 
         return true;
     }
@@ -2614,7 +3428,7 @@ static void fillBuiltinGlobals(LintContext& context, const AstNameTable& names, 
     }
 }
 
-static const char* fuzzyMatch(std::string_view str, const char** array, size_t size)
+static const char* fuzzyMatch(std::string_view str, const char* const* array, size_t size)
 {
     if (FInt::LuauSuggestionDistance == 0)
         return nullptr;
@@ -2648,8 +3462,12 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
 
         if (!hc.header)
         {
-            emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
-                "Comment directive is ignored because it is placed after the first non-comment token");
+            emitWarning(
+                context,
+                LintWarning::Code_CommentDirective,
+                hc.location,
+                "Comment directive is ignored because it is placed after the first non-comment token"
+            );
         }
         else
         {
@@ -2670,23 +3488,65 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
 
                     // skip Unknown
                     if (const char* suggestion = fuzzyMatch(rule, kWarningNames + 1, LintWarning::Code__Count - 1))
-                        emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
-                            "nolint directive refers to unknown lint rule '%s'; did you mean '%s'?", rule, suggestion);
+                        emitWarning(
+                            context,
+                            LintWarning::Code_CommentDirective,
+                            hc.location,
+                            "nolint directive refers to unknown lint rule '%s'; did you mean '%s'?",
+                            rule,
+                            suggestion
+                        );
                     else
                         emitWarning(
-                            context, LintWarning::Code_CommentDirective, hc.location, "nolint directive refers to unknown lint rule '%s'", rule);
+                            context, LintWarning::Code_CommentDirective, hc.location, "nolint directive refers to unknown lint rule '%s'", rule
+                        );
                 }
             }
             else if (first == "nocheck" || first == "nonstrict" || first == "strict")
             {
                 if (space != std::string::npos)
-                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
-                        "Comment directive with the type checking mode has extra symbols at the end of the line");
+                    emitWarning(
+                        context,
+                        LintWarning::Code_CommentDirective,
+                        hc.location,
+                        "Comment directive with the type checking mode has extra symbols at the end of the line"
+                    );
                 else if (seenMode)
-                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
-                        "Comment directive with the type checking mode has already been used");
+                    emitWarning(
+                        context,
+                        LintWarning::Code_CommentDirective,
+                        hc.location,
+                        "Comment directive with the type checking mode has already been used"
+                    );
                 else
                     seenMode = true;
+            }
+            else if (first == "optimize")
+            {
+                size_t notspace = hc.content.find_first_not_of(" \t", space);
+
+                if (space == std::string::npos || notspace == std::string::npos)
+                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location, "optimize directive requires an optimization level");
+                else
+                {
+                    const char* level = hc.content.c_str() + notspace;
+
+                    if (strcmp(level, "0") != 0 && strcmp(level, "1") != 0 && strcmp(level, "2") != 0)
+                        emitWarning(
+                            context,
+                            LintWarning::Code_CommentDirective,
+                            hc.location,
+                            "optimize directive uses unknown optimization level '%s', 0..2 expected",
+                            level
+                        );
+                }
+            }
+            else if (first == "native")
+            {
+                if (space != std::string::npos)
+                    emitWarning(
+                        context, LintWarning::Code_CommentDirective, hc.location, "native directive has extra symbols at the end of the line"
+                    );
             }
             else
             {
@@ -2695,27 +3555,91 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
                     "nocheck",
                     "nonstrict",
                     "strict",
+                    "optimize",
+                    "native",
                 };
 
                 if (const char* suggestion = fuzzyMatch(first, kHotComments, std::size(kHotComments)))
-                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location, "Unknown comment directive '%.*s'; did you mean '%s'?",
-                        int(first.size()), first.data(), suggestion);
+                    emitWarning(
+                        context,
+                        LintWarning::Code_CommentDirective,
+                        hc.location,
+                        "Unknown comment directive '%.*s'; did you mean '%s'?",
+                        int(first.size()),
+                        first.data(),
+                        suggestion
+                    );
                 else
-                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location, "Unknown comment directive '%.*s'", int(first.size()),
-                        first.data());
+                    emitWarning(
+                        context, LintWarning::Code_CommentDirective, hc.location, "Unknown comment directive '%.*s'", int(first.size()), first.data()
+                    );
             }
         }
     }
 }
 
-void LintOptions::setDefaults()
+static bool hasNativeCommentDirective(const std::vector<HotComment>& hotcomments)
 {
-    // By default, we enable all warnings
-    warningMask = ~0ull;
+    for (const HotComment& hc : hotcomments)
+    {
+        if (hc.content.empty() || hc.content[0] == ' ' || hc.content[0] == '\t')
+            continue;
+
+        if (hc.header)
+        {
+            size_t space = hc.content.find_first_of(" \t");
+            std::string_view first = std::string_view(hc.content).substr(0, space);
+
+            if (first == "native")
+                return true;
+        }
+    }
+
+    return false;
 }
 
-std::vector<LintWarning> lint(AstStat* root, const AstNameTable& names, const ScopePtr& env, const Module* module,
-    const std::vector<HotComment>& hotcomments, const LintOptions& options)
+struct LintRedundantNativeAttribute : AstVisitor
+{
+public:
+    LUAU_NOINLINE static void process(LintContext& context)
+    {
+        LintRedundantNativeAttribute pass;
+        pass.context = &context;
+        context.root->visit(&pass);
+    }
+
+private:
+    LintContext* context;
+
+    bool visit(AstExprFunction* node) override
+    {
+        node->body->visit(this);
+
+        for (const auto attribute : node->attributes)
+        {
+            if (attribute->type == AstAttr::Type::Native)
+            {
+                emitWarning(
+                    *context,
+                    LintWarning::Code_RedundantNativeAttribute,
+                    attribute->location,
+                    "native attribute on a function is redundant in a native module; consider removing it"
+                );
+            }
+        }
+
+        return false;
+    }
+};
+
+std::vector<LintWarning> lint(
+    AstStat* root,
+    const AstNameTable& names,
+    const ScopePtr& env,
+    const Module* module,
+    const std::vector<HotComment>& hotcomments,
+    const LintOptions& options
+)
 {
     LintContext context;
 
@@ -2794,57 +3718,21 @@ std::vector<LintWarning> lint(AstStat* root, const AstNameTable& names, const Sc
     if (context.warningEnabled(LintWarning::Code_CommentDirective))
         lintComments(context, hotcomments);
 
+    if (context.warningEnabled(LintWarning::Code_IntegerParsing))
+        LintIntegerParsing::process(context);
+
+    if (context.warningEnabled(LintWarning::Code_ComparisonPrecedence))
+        LintComparisonPrecedence::process(context);
+
+    if (context.warningEnabled(LintWarning::Code_RedundantNativeAttribute))
+    {
+        if (hasNativeCommentDirective(hotcomments))
+            LintRedundantNativeAttribute::process(context);
+    }
+
     std::sort(context.result.begin(), context.result.end(), WarningComparator());
 
     return context.result;
-}
-
-const char* LintWarning::getName(Code code)
-{
-    LUAU_ASSERT(unsigned(code) < Code__Count);
-
-    return kWarningNames[code];
-}
-
-LintWarning::Code LintWarning::parseName(const char* name)
-{
-    for (int code = Code_Unknown; code < Code__Count; ++code)
-        if (strcmp(name, getName(Code(code))) == 0)
-            return Code(code);
-
-    return Code_Unknown;
-}
-
-uint64_t LintWarning::parseMask(const std::vector<HotComment>& hotcomments)
-{
-    uint64_t result = 0;
-
-    for (const HotComment& hc : hotcomments)
-    {
-        if (!hc.header)
-            continue;
-
-        if (hc.content.compare(0, 6, "nolint") != 0)
-            continue;
-
-        size_t name = hc.content.find_first_not_of(" \t", 6);
-
-        // --!nolint disables everything
-        if (name == std::string::npos)
-            return ~0ull;
-
-        // --!nolint needs to be followed by a whitespace character
-        if (name == 6)
-            continue;
-
-        // --!nolint name disables the specific lint
-        LintWarning::Code code = LintWarning::parseName(hc.content.c_str() + name);
-
-        if (code != LintWarning::Code_Unknown)
-            result |= 1ull << int(code);
-    }
-
-    return result;
 }
 
 std::vector<AstName> getDeprecatedGlobals(const AstNameTable& names)

@@ -4,14 +4,52 @@
 namespace Luau
 {
 
-std::string toString(const Position& position)
+void Position::shift(const Position& start, const Position& oldEnd, const Position& newEnd)
 {
-    return "{ line = " + std::to_string(position.line) + ", col = " + std::to_string(position.column) + " }";
+    if (*this >= start)
+    {
+        if (this->line > oldEnd.line)
+            this->line += (newEnd.line - oldEnd.line);
+        else
+        {
+            this->line = newEnd.line;
+            this->column += (newEnd.column - oldEnd.column);
+        }
+    }
 }
 
-std::string toString(const Location& location)
+bool Location::encloses(const Location& l) const
 {
-    return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
+    return begin <= l.begin && end >= l.end;
+}
+
+bool Location::overlaps(const Location& l) const
+{
+    return (begin <= l.begin && end >= l.begin) || (begin <= l.end && end >= l.end) || (begin >= l.begin && end <= l.end);
+}
+
+bool Location::contains(const Position& p) const
+{
+    return begin <= p && p < end;
+}
+
+bool Location::containsClosed(const Position& p) const
+{
+    return begin <= p && p <= end;
+}
+
+void Location::extend(const Location& other)
+{
+    if (other.begin < begin)
+        begin = other.begin;
+    if (other.end > end)
+        end = other.end;
+}
+
+void Location::shift(const Position& start, const Position& oldEnd, const Position& newEnd)
+{
+    begin.shift(start, oldEnd, newEnd);
+    end.shift(start, oldEnd, newEnd);
 }
 
 } // namespace Luau
